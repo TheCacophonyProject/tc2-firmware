@@ -1,0 +1,14 @@
+.program soft_spi_slave
+; Note: SPI Mode2
+; wait for enable
+wait_falling:
+    wait 0 gpio 13
+.wrap_target
+    jmp pin wait_falling
+    set x, 31
+bitloop:
+    wait 1 gpio 14
+    out pins, 1
+    wait 0 gpio 14
+    jmp x-- bitloop
+.wrap
