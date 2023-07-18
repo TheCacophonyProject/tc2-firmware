@@ -1,12 +1,12 @@
-use defmt::info;
 use crate::XOSC_CRYSTAL_FREQ;
 use crate::bsp::pac;
 use crate::bsp::pac::ROSC;
+use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
 
 pub fn rosc_frequency_count_hz() -> u32 {
     // Use the reference xosc while enabled to measure the speed of the rosc.
     // We need to steal the clocks block which is already "owned" by the ClocksManager
-    // struct, which configured the xosc as the reference clock, which is needed
+    // struct, which already configured the xosc as the reference clock, and is needed
     // for this measurement to work correctly.
     let peripherals = unsafe { pac::Peripherals::steal() };
     let clocks = peripherals.CLOCKS;
@@ -77,38 +77,38 @@ fn read_freq_stage(rosc: &ROSC, stage: u8) -> u8 {
     }
 }
 
+const MAX_STAGE_DRIVE: u8 = 3;
+
 fn increase_freq(rosc: &ROSC) -> bool {
-    let range = rosc.ctrl.read().freq_range().bits();
     // Assume div is 1, and freq_range is high
+
     let mut stages: [u8;8] = [0;8];
+    // TODO: Do this read in two reads rather than 8
     for stage in 0..8 {
         stages[stage] = read_freq_stage(&rosc, stage as u8)
     }
-    let num_stages = match range {
-        0xfa4 => 8, // LOW
-        0xfa5 => 6, // MEDIUM
-        0xfa7 => 4, // HIGH
-        0xaa0 => {
-            info!("INITIAL STAGE");
+    let num_stages_at_drive_level = match rosc.ctrl.read().freq_range().variant() {
+        Some(FREQ_RANGE_A::LOW) => 8,
+        Some(FREQ_RANGE_A::MEDIUM) => 6,
+        Some(FREQ_RANGE_A::HIGH) => 4,
+        Some(FREQ_RANGE_A::TOOHIGH) => panic!("Don't use TOOHIGH freq_range"),
+        None => {
+            // Start out at initial unset drive stage
             return false;
-        },
-        _ => panic!("Invalid stage")
+        }
     };
     let mut next_i = 0;
-    for (index, x) in stages[0..num_stages].windows(2).enumerate() {
+    for (index, x) in stages[0..num_stages_at_drive_level].windows(2).enumerate() {
         if x[1] < x[0] {
             next_i = index + 1;
             break;
         }
     }
-    if stages[next_i] < 3 {
+    if stages[next_i] < MAX_STAGE_DRIVE {
         stages[next_i] += 1;
-        let mut min = u8::MAX;
-        for stage in 0..num_stages {
-            min = stages[stage].min(min);
-        }
-        for stage in num_stages..8 {
-            stages[stage] = min;
+        let min = *stages[0..num_stages_at_drive_level].iter().min().unwrap_or(&0);
+        for mut stage in &mut stages[num_stages_at_drive_level..] {
+            *stage = min;
         }
         write_freq_stages(&rosc, &stages);
         true
@@ -120,49 +120,57 @@ fn increase_freq(rosc: &ROSC) -> bool {
 
 fn write_freq_stages(rosc: &ROSC, stages: &[u8;8]) {
     let passwd: u32 = 0x9696 << 16;
-    let mut freqa = passwd;
-    let mut freqb = passwd;
+    let mut freq_a = passwd;
+    let mut freq_b = passwd;
     for stage in 0..4 {
-        freqa |= ((stages[stage] & 0x07) as u32) << stage * 4;
+        freq_a |= ((stages[stage] & 0x07) as u32) << stage * 4;
     }
     for stage in 4..8 {
-        freqb |= ((stages[stage] & 0x07) as u32) << (stage - 4) * 4;
+        freq_b |= ((stages[stage] & 0x07) as u32) << (stage - 4) * 4;
     }
-    rosc.freqa.write(|w| unsafe { w.bits(freqa) });
-    rosc.freqb.write(|w| unsafe { w.bits(freqb) });
+    rosc.freqa.write(|w| unsafe { w.bits(freq_a) });
+    rosc.freqb.write(|w| unsafe { w.bits(freq_b) });
 }
 
+///! Increase the rosc frequency range up to the next step.
 fn increase_freq_range(rosc: &ROSC) -> bool {
-    let range = rosc.ctrl.read().freq_range().bits();
-    if range == 0xaa0 {
-        info!("Set freq range LOW");
-        rosc.ctrl.write(|w| unsafe { w.freq_range().bits(0xfa4) });
-        write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
-        true
-    } else if range == 0xfa4 {
-        info!("Set freq range MEDIUM");
-        rosc.ctrl.write(|w| unsafe { w.freq_range().bits(0xfa5) });
-        write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
-        true
-    } else if range == 0xfa5 {
-        info!("Set freq range HIGH");
-        rosc.ctrl.write(|w| unsafe { w.freq_range().bits(0xfa7) });
-        write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
-        true
-    } else {
-        false
-    }
+    let did_increase_freq_range = match rosc.ctrl.read().freq_range().variant() {
+        None => {
+            // Initial unset frequency range, move to LOW frequency range
+            rosc.ctrl.write(|w| w.freq_range().low());
+            // Reset all the drive strength bits.
+            write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
+            true
+        }
+        Some(FREQ_RANGE_A::LOW) => {
+            // Transition from LOW to MEDIUM frequency range
+            rosc.ctrl.write(|w| w.freq_range().medium());
+            // Reset all the drive strength bits.
+            write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
+            true
+        }
+        Some(FREQ_RANGE_A::MEDIUM) => {
+            // Transition from MEDIUM to HIGH frequency range
+            rosc.ctrl.write(|w| w.freq_range().high());
+            // Reset all the drive strength bits.
+            write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
+            true
+        },
+        Some(FREQ_RANGE_A::HIGH) | Some(FREQ_RANGE_A::TOOHIGH) => {
+            // Already in the HIGH frequency range, and can't increase
+            false
+        }
+    };
+    did_increase_freq_range
 }
 
 pub fn find_target_rosc_frequency(rosc: &ROSC, target_frequency: u32) -> u32 {
-    // So, we want a certain target clock speed.
-    // We want to slowly ramp up our rosc to get there.
-    // There's also the option of setting the divider.
     reset_rosc_operating_frequency(rosc);
     let mut div = 1;
     let mut measured_rosc_frequency;
     loop {
         measured_rosc_frequency = rosc_frequency_count_hz();
+        // If it has overshot the target frequency, increase the divider and continue.
         if measured_rosc_frequency > target_frequency {
             div += 1;
             set_rosc_div(rosc, div);

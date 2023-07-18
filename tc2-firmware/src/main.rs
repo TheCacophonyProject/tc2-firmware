@@ -404,7 +404,6 @@ fn main() -> ! {
     let mut needs_ffc = false;
     let mut ffc_requested = false;
 
-
     let sda_pin = pins.gpio6.into_mode::<FunctionI2C>();
     let scl_pin = pins.gpio7.into_mode::<FunctionI2C>();
     let mut i2c = I2C::i2c1(
@@ -422,11 +421,14 @@ fn main() -> ! {
     //     }
     // }
     let mut attiny_regs = [0u8;24];
-    i2c.read(0x25, &mut attiny_regs).unwrap();
-    if attiny_regs[1] == 2 {
-        info!("Should power off");
+    if i2c.read(0x25, &mut attiny_regs).is_ok() {
+        if attiny_regs[1] == 2 {
+            info!("Should power off");
+        }
+        info!("camera state {:?}", attiny_regs);
+    } else {
+        info!("Failed to read i2c state from attiny");
     }
-    info!("camera state {:?}", attiny_regs);
     // let mut cmd = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     // i2c.write_read(0x51, &[
     //     PCF8563_SEC_REG,
@@ -637,6 +639,7 @@ fn main() -> ! {
             }
         }
 
+        /*
         if i2c.read(0x25, &mut attiny_regs).is_ok() {
             // If the pi is powered down, we can power down too.
             if attiny_regs[0] == 3 {
@@ -654,6 +657,7 @@ fn main() -> ! {
                 continue 'frame_loop;
             }
         }
+         */
 
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
