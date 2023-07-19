@@ -590,7 +590,6 @@ fn main() -> ! {
                             }
                             else if !has_done_initial_ffc {
                                 info!("Requesting FFC");
-                                info!("Requesting FFC");
                                 let success = lepton.do_ffc();
                                 match success {
                                     Ok(success) => {
