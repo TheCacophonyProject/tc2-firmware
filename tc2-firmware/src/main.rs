@@ -341,8 +341,8 @@ fn main() -> ! {
         pins.gpio20.into_mode(),
         pins.gpio23.into_mode(),
         pins.gpio19.into_mode(),
-        // pins.gpio18.into_push_pull_output(), // Production P2 board
-        pins.gpio4.into_push_pull_output(), // Dev test board
+        pins.gpio18.into_push_pull_output(), // Production P2 board
+        // pins.gpio4.into_push_pull_output(), // Dev test board
         pins.gpio27.into_push_pull_output(),
         pins.gpio28.into_push_pull_output(),
         pins.gpio29.into_push_pull_output(),
@@ -363,8 +363,10 @@ fn main() -> ! {
         .vsync
         .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
 
-    // TODO: On production board, this should be gpio4
-    let mut wake_interrupt_pin = pins.gpio1.into_floating_input();
+    // NOTE: Pre-production board, this should be gpio1
+    // let mut wake_interrupt_pin = pins.gpio1.into_floating_input();
+    // NOTE: On production board, this should be gpio4
+    let mut wake_interrupt_pin = pins.gpio4.into_floating_input();
 
     let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
     let result = sio.fifo.read_blocking();
@@ -425,7 +427,7 @@ fn main() -> ! {
         if attiny_regs[1] == 2 {
             info!("Should power off");
         }
-        info!("camera state {:?}", attiny_regs);
+        info!("Attiny camera state {:?}", attiny_regs);
     } else {
         info!("Failed to read i2c state from attiny");
     }
@@ -576,11 +578,28 @@ fn main() -> ! {
                                 ffc_requested = true;
                                 needs_ffc = false;
                                 info!("Requesting FFC");
-                                let _ = lepton.do_ffc();
+                                let success = lepton.do_ffc();
+                                match success {
+                                    Ok(success) => {
+                                        info!("Success requesting FFC");
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to request FFC {:?}", e);
+                                    }
+                                }
                             }
                             else if !has_done_initial_ffc {
-                                // TODO: Does this make sense here?
-                                let _ = lepton.do_ffc();
+                                info!("Requesting FFC");
+                                info!("Requesting FFC");
+                                let success = lepton.do_ffc();
+                                match success {
+                                    Ok(success) => {
+                                        info!("Success requesting FFC");
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to request FFC {:?}", e);
+                                    }
+                                }
                                 has_done_initial_ffc = true;
                             }
                             if !got_sync {
@@ -617,7 +636,16 @@ fn main() -> ! {
                         lepton.wait_for_ready(false);
                         lepton.reset_spi(&mut delay, false);
                         if !has_done_initial_ffc {
-                            let _ = lepton.do_ffc();
+                            info!("Requesting FFC");
+                            let success = lepton.do_ffc();
+                            match success {
+                                Ok(success) => {
+                                    info!("Success requesting FFC");
+                                }
+                                Err(e) => {
+                                    info!("Failed to request FFC {:?}", e);
+                                }
+                            }
                             has_done_initial_ffc = true;
                         }
                         break 'scanline;
