@@ -225,9 +225,9 @@ pub struct Lepton<T:PinId> {
     pub vsync: VsyncPin,
     cci: LeptonCciI2c,
     power_enable: Pin<T, Output<PushPull>>, //Gpio18
-    power_down: Pin<Gpio27, Output<PushPull>>,
-    reset: Pin<Gpio28, Output<PushPull>>,
-    pub clk_disable: Pin<Gpio29, Output<PushPull>>,
+    power_down: Pin<Gpio28, Output<PushPull>>,
+    reset: Pin<Gpio29, Output<PushPull>>,
+    pub clk_disable: Pin<Gpio27, Output<PushPull>>,
     master_clk: Pin<Gpio26, Output<PushPull>>,
 }
 
@@ -306,9 +306,9 @@ impl<T:PinId> Lepton<T> {
         tx: Pin<Gpio23, FunctionSpi>,
         vsync: VsyncPin,
         power_enable: Pin<T, Output<PushPull>>, // Gpio18
-        power_down: Pin<Gpio27, Output<PushPull>>,
-        reset: Pin<Gpio28, Output<PushPull>>,
-        clk_disable: Pin<Gpio29, Output<PushPull>>,
+        power_down: Pin<Gpio28, Output<PushPull>>,
+        reset: Pin<Gpio29, Output<PushPull>>,
+        clk_disable: Pin<Gpio27, Output<PushPull>>,
         master_clk: Pin<Gpio26, Output<PushPull>>,
     ) -> Lepton<T> {
         Lepton {
@@ -818,11 +818,19 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn power_down_sequence(&mut self, delay: &mut Delay) {
+        // Putting lepton into standby mode, uses about 5mW in standby mode.
         info!("power down asserted");
         self.power_down.set_low().unwrap();
-        delay.delay_ms(100);
+        
+        // Datasheet says to wait at least 100ms before turning off clock after power down.
+        delay.delay_ms(100);    
         info!("clk disabled");
         self.clk_disable.set_low().unwrap();
+
+        // power off disables the 3.0V, 2.8V and 1.2V
+        info!("power off");
+        self.power_enable.set_low().unwrap();
+        delay.delay_ms(200);
     }
 
     pub fn power_on(&mut self, delay: &mut Delay) {
@@ -833,14 +841,14 @@ impl<T:PinId> Lepton<T> {
         delay.delay_ms(100);
     }
 
+    // Page 18 https://www.flir.com/globalassets/imported-assets/document/flir-lepton-engineering-datasheet.pdf
     pub fn start_up_sequence(&mut self, delay: &mut Delay) {
-        info!("power down high");
         self.power_down.set_high().unwrap();
-        info!("assert reset");
+        delay.delay_ms(1);
         self.reset.set_low().unwrap();
-        info!("clk enable");
+        delay.delay_ms(1);
         self.clk_disable.set_high().unwrap();
-        delay.delay_us(200);
+        delay.delay_ms(1);
         self.reset.set_high().unwrap();
     }
 
