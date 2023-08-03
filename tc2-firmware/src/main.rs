@@ -331,7 +331,7 @@ fn main() -> ! {
             peripherals.I2C0,
             pins.gpio24.into_mode(),
             pins.gpio25.into_mode(),
-            200.kHz(),
+            100.kHz(),
             &mut peripherals.RESETS,
             clocks.peripheral_clock.freq(),
         ),
@@ -343,9 +343,9 @@ fn main() -> ! {
         pins.gpio19.into_mode(),
         pins.gpio18.into_push_pull_output(), // Production P2 board
         // pins.gpio4.into_push_pull_output(), // Dev test board
-        pins.gpio27.into_push_pull_output(),
         pins.gpio28.into_push_pull_output(),
         pins.gpio29.into_push_pull_output(),
+        pins.gpio27.into_push_pull_output(),
         pins.gpio26.into_push_pull_output(),
     );
 
@@ -451,7 +451,7 @@ fn main() -> ! {
     //     info!("#{}: {}: {}, {}", i, unit, bcd2dec(cmd[i] & mask), bcd2dec(cmd[i]));
     // }
 
-
+    let mut i2c_poll_counter = 0;
     'frame_loop: loop {
         if got_sync {
             current_segment_num += 1;
@@ -509,7 +509,10 @@ fn main() -> ! {
                         let ffc_state = (status_bits >> 4) & 0x0000_000f;
                         let ffc_in_progress = ffc_state == 0b10;
                         let ffc_imminent = ffc_state == 0b01;
-                        if time_on_ms - last_ffc_ms > FFC_INTERVAL_MS && !ffc_imminent && !ffc_in_progress {
+                        if time_on_ms < last_ffc_ms {
+                            warn!("Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}", time_on_ms, last_ffc_ms)
+                        }
+                        else if time_on_ms - last_ffc_ms > FFC_INTERVAL_MS && !ffc_imminent && !ffc_in_progress {
                             needs_ffc = true;
                         }
                     }
@@ -666,25 +669,45 @@ fn main() -> ! {
             }
         }
 
-        /*
-        if i2c.read(0x25, &mut attiny_regs).is_ok() {
-            // If the pi is powered down, we can power down too.
-            if attiny_regs[0] == 3 {
-                info!("Powering off");
-                // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
-                // TODO: Are there any other pins we need to set low?
-                lepton.power_down_sequence(&mut delay);
-                rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
-                lepton.power_on_sequence(&mut delay);
-                lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-                lepton
-                    .vsync
-                    .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
-                got_sync = false;
-                continue 'frame_loop;
+        // TOOD Check when can't get frames from lepton also.
+
+        // Run `i2cset -y 1 0x25 0x02 0x03` on the pi to make it look like the RPi is powered off.
+        // Run `i2cset -y 1 0x25 0x02 0x01` on the pi to make it look like the RPi is powered on.
+        // Note that those you will want to have the RPi powered separately.
+        if i2c_poll_counter >= 20 {
+            i2c_poll_counter = 0;
+            let address = 0x25;
+            let write_buffer: [u8; 1] = [0x02];
+            if let Err(e) = i2c.write(address, &write_buffer) {
+                error!("I2C write error: {:?}", e);
+            } else {
+                let mut read_buffer: [u8; 1] = [0; 1];
+                if let Err(e) = i2c.read(address, &mut read_buffer) {
+                    error!("I2C read error: {:?}", e);
+                }
+
+                if read_buffer[0] == 0x03 {
+                    info!("Powering off");
+
+                    info!("Lets skip that for now, so we can get some logs...");
+                    /*
+                    // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
+                    // TODO: Are there any other pins we need to set low?
+                    lepton.power_down_sequence(&mut delay);
+                    rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
+                    lepton.power_on_sequence(&mut delay);
+                    lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+                    lepton
+                        .vsync
+                        .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
+                    got_sync = false;
+                    continue 'frame_loop;
+                    */
+                }
             }
         }
-         */
+        i2c_poll_counter += 1;
+          
 
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
