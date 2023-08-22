@@ -299,8 +299,9 @@ fn main() -> ! {
             pi_ping.set_low().unwrap();
             loop {
                 let input = sio.fifo.read_blocking();
-                debug_assert_eq!(
-                    input, CORE1_TASK_START_WITH_FULL_FRAME,
+                crate::debug_assert_eq!(
+                    input,
+                    CORE1_TASK_START_WITH_FULL_FRAME,
                     "Got unknown fifo input to core1 task loop {}",
                     input
                 );

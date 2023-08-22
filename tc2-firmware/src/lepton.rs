@@ -11,7 +11,6 @@ use embedded_hal::digital::v2::{OutputPin, StatefulOutputPin, ToggleableOutputPi
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::gpio::PinId;
 
-use crate::any_as_u8_slice;
 use crate::bsp::hal::gpio::bank0::{
     Gpio16, Gpio17, Gpio18, Gpio19, Gpio2, Gpio20, Gpio21, Gpio22, Gpio23, Gpio24, Gpio25, Gpio26,
     Gpio27, Gpio28, Gpio29, Gpio4,
@@ -26,7 +25,7 @@ use crate::bsp::{
     hal::gpio::{Function, Pin, I2C},
     pac::I2C0,
 };
-use crate::utils::u8_slice_to_u16;
+use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 
 pub enum LeptonCommandType {
     Get = 0b0000_0000_0000_00_00,
