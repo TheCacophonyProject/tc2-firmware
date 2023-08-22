@@ -3,7 +3,10 @@
 
 mod lepton;
 mod utils;
+
 pub mod bsp;
+mod cptv_encoder;
+mod motion_detector;
 
 use bsp::{
     entry,
@@ -20,46 +23,32 @@ use bsp::{
     XOSC_CRYSTAL_FREQ,
 };
 
-
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
-use lepton::Lepton;
-use cortex_m::{delay::Delay};
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::{OutputPin};
+use embedded_hal::digital::v2::OutputPin;
+use lepton::Lepton;
 use panic_probe as _;
 
-use fugit::RateExtU32;
-use fugit::{HertzU32};
+use crate::bsp::hal::dma::{single_buffer, DMAExt};
+use crate::cptv_encoder::FRAME_WIDTH;
+use crate::utils::{any_as_u32_slice, any_as_u8_slice};
 use core::cell::RefCell;
 use critical_section::Mutex;
 use embedded_hal::digital::InputPin;
 use embedded_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
-use crate::bsp::hal::dma::{DMAExt, single_buffer};
-use rp2040_hal::gpio::{FloatingInput, FunctionI2C, Interrupt, PinId};
+use fugit::HertzU32;
+use fugit::RateExtU32;
 use rp2040_hal::gpio::bank0::{Gpio1, Gpio4};
-use rp2040_hal::I2C;
+use rp2040_hal::gpio::{FloatingInput, FunctionI2C, Interrupt, PinId};
 use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
+use rp2040_hal::I2C;
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 
 // CORE1 consts
-pub unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>())
-}
-
-pub unsafe fn u8_slice_to_u16(p: &[u8]) -> &[u16] {
-    core::slice::from_raw_parts((p as *const [u8]) as *const u16, p.len() / 2)
-}
-
-pub unsafe fn u8_slice_to_u32(p: &[u8]) -> &[u32] {
-    core::slice::from_raw_parts((p as *const [u8]) as *const u32, p.len() / 4)
-}
-
-pub unsafe fn any_as_u32_slice<T: Sized>(p: &T) -> &[u32] {
-    core::slice::from_raw_parts((p as *const T) as *const u32, core::mem::size_of::<T>() / 4) //core::mem::size_of::<T>()
-}
 
 pub const CORE1_TASK_COMPLETE: u32 = 0xEE;
 pub const CORE1_TASK_READY: u32 = 0xDB;
@@ -68,12 +57,12 @@ pub const CORE1_TASK_START_WITH_FULL_FRAME: u32 = 0xAE;
 pub const CORE1_TASK_START_WITHOUT_FRAME_SEGMENT: u32 = 0xAD;
 
 // Each segment has 4 even slices to transfer from the total segment length of  9760 + 4*4bytes for the segment number.
-const FRAME_LENGTH: usize = 160 * 122 * 2;
+const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
 pub const A_SEGMENT_LENGTH: usize = 9768; //9764;
 pub const FULL_CHUNK_LENGTH: usize = A_SEGMENT_LENGTH / 4;
 pub const CHUNK_LENGTH: usize = (A_SEGMENT_LENGTH - 4) / 4;
 pub static mut FRAME_BUFFER: [u8; FRAME_LENGTH + 4] = [0u8; FRAME_LENGTH + 4];
-pub const SEGMENT_LENGTH: usize = (160 * 122) / 4;
+pub const SEGMENT_LENGTH: usize = (FRAME_WIDTH * 122) / 4;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins
 
 // NOTE: The version number here isn't important.  What's important is that we increment it
@@ -81,12 +70,12 @@ const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins
 //  for the agent software.
 pub static FIRMWARE_VERSION: u32 = 2;
 
-pub type FramePacketData = [u8; 160];
+pub type FramePacketData = [u8; FRAME_WIDTH];
 pub struct FrameSeg([FramePacketData; 61]);
 
 impl FrameSeg {
     pub const fn new() -> FrameSeg {
-        FrameSeg([[0u8; 160]; 61])
+        FrameSeg([[0u8; FRAME_WIDTH]; 61])
     }
 
     pub fn as_u8_slice(&self) -> &[u8] {
@@ -103,21 +92,21 @@ pub static FRAME_SEGMENT_BUFFER: DoubleBuffer = DoubleBuffer {
         FrameSeg::new(),
         FrameSeg::new(),
         FrameSeg::new(),
-        FrameSeg::new()
+        FrameSeg::new(),
     ])),
     back: Mutex::new(RefCell::new([
         FrameSeg::new(),
         FrameSeg::new(),
         FrameSeg::new(),
-        FrameSeg::new()
+        FrameSeg::new(),
     ])),
-    swapper: Mutex::new(RefCell::new(true))
+    swapper: Mutex::new(RefCell::new(true)),
 };
 
 pub struct DoubleBuffer {
     front: Mutex<RefCell<[FrameSeg; 4]>>,
     back: Mutex<RefCell<[FrameSeg; 4]>>,
-    swapper: Mutex<RefCell<bool>>
+    swapper: Mutex<RefCell<bool>>,
 }
 
 impl DoubleBuffer {
@@ -153,7 +142,11 @@ impl DoubleBuffer {
     }
 }
 
-fn go_dormant_until_next_vsync<T:PinId>(rosc: RingOscillator<bsp::hal::rosc::Enabled>, lepton: &mut Lepton<T>, rosc_freq_hz: u32) -> RingOscillator<bsp::hal::rosc::Enabled> {
+fn go_dormant_until_next_vsync<T: PinId>(
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    lepton: &mut Lepton<T>,
+    rosc_freq_hz: u32,
+) -> RingOscillator<bsp::hal::rosc::Enabled> {
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
     let dormant_rosc = unsafe { rosc.dormant() };
     let disabled_rosc = RingOscillator::new(dormant_rosc.free());
@@ -162,7 +155,12 @@ fn go_dormant_until_next_vsync<T:PinId>(rosc: RingOscillator<bsp::hal::rosc::Ena
     initialized_rosc
 }
 
-fn go_dormant_until_woken<T:PinId, T2:PinId>(rosc: RingOscillator<bsp::hal::rosc::Enabled>, wake_pin: &mut bsp::hal::gpio::Pin<T2, FloatingInput>, lepton: &mut Lepton<T>, rosc_freq_hz: u32) -> RingOscillator<bsp::hal::rosc::Enabled> {
+fn go_dormant_until_woken<T: PinId, T2: PinId>(
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    wake_pin: &mut bsp::hal::gpio::Pin<T2, FloatingInput>,
+    lepton: &mut Lepton<T>,
+    rosc_freq_hz: u32,
+) -> RingOscillator<bsp::hal::rosc::Enabled> {
     lepton
         .vsync
         .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, false);
@@ -198,11 +196,16 @@ fn main() -> ! {
         .configure_clock(&xosc, XOSC_CRYSTAL_FREQ.Hz())
         .unwrap();
 
-    let measured_rosc_frequency = utils::find_target_rosc_frequency(&peripherals.ROSC, rosc_clock_freq.to_Hz());
+    let measured_rosc_frequency =
+        utils::find_target_rosc_frequency(&peripherals.ROSC, rosc_clock_freq.to_Hz());
     let rosc = RingOscillator::new(peripherals.ROSC);
     let mut rosc = rosc.initialize_with_freq(measured_rosc_frequency);
     let measured_hz: HertzU32 = measured_rosc_frequency.Hz();
-    info!("Got {}, desired {}", measured_hz.to_MHz(), rosc_clock_freq.to_MHz());
+    info!(
+        "Got {}, desired {}",
+        measured_hz.to_MHz(),
+        rosc_clock_freq.to_MHz()
+    );
 
     clocks
         .system_clock
@@ -224,7 +227,6 @@ fn main() -> ! {
         .peripheral_clock
         .configure_clock(&clocks.system_clock, clocks.system_clock.freq())
         .unwrap();
-
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
@@ -282,7 +284,12 @@ fn main() -> ! {
                 LittleEndian::write_u32(&mut FRAME_BUFFER[4..8], radiometry_enabled);
                 LittleEndian::write_u32(&mut FRAME_BUFFER[8..12], FIRMWARE_VERSION);
             }; // Read 8 bytes
-            let tx_transfer = single_buffer::Config::new(dma_ch0, &unsafe { any_as_u32_slice(&FRAME_BUFFER) }[0..3], tx).start();
+            let tx_transfer = single_buffer::Config::new(
+                dma_ch0,
+                &unsafe { any_as_u32_slice(&FRAME_BUFFER) }[0..3],
+                tx,
+            )
+            .start();
             // Wait on the DMA transfer to the Pi.  In the future we can be doing other work here while we wait.
             let (ch0, _, tx_ret) = tx_transfer.wait();
             tx = tx_ret;
@@ -292,14 +299,26 @@ fn main() -> ! {
             pi_ping.set_low().unwrap();
             loop {
                 let input = sio.fifo.read_blocking();
-                crate::debug_assert_eq!(input, CORE1_TASK_START_WITH_FULL_FRAME, "Got unknown fifo input to core1 task loop {}", input);
+                debug_assert_eq!(
+                    input, CORE1_TASK_START_WITH_FULL_FRAME,
+                    "Got unknown fifo input to core1 task loop {}",
+                    input
+                );
 
                 critical_section::with(|cs| {
-                    for (seg_num, frame_seg) in FRAME_SEGMENT_BUFFER.get_back().borrow_ref(cs).iter().enumerate() {
+                    for (seg_num, frame_seg) in FRAME_SEGMENT_BUFFER
+                        .get_back()
+                        .borrow_ref(cs)
+                        .iter()
+                        .enumerate()
+                    {
                         let slice = frame_seg.as_u8_slice();
                         unsafe {
                             // Write the slice length to read
-                            LittleEndian::write_u32(&mut FRAME_BUFFER[0..4], 0x2 << 28 | FRAME_LENGTH as u32);
+                            LittleEndian::write_u32(
+                                &mut FRAME_BUFFER[0..4],
+                                0x2 << 28 | FRAME_LENGTH as u32,
+                            );
                             let start = seg_num * slice.len();
                             let end = start + slice.len();
                             let frame_buffer = &mut FRAME_BUFFER[4..];
@@ -310,7 +329,45 @@ fn main() -> ! {
 
                 pi_ping.set_high().unwrap();
                 pi_ping.set_low().unwrap();
-                let tx_transfer = single_buffer::Config::new(dma_ch0, unsafe { any_as_u32_slice(&FRAME_BUFFER) }, tx).start();
+
+                let tx_transfer = single_buffer::Config::new(
+                    dma_ch0,
+                    unsafe { any_as_u32_slice(&FRAME_BUFFER) },
+                    tx,
+                )
+                .start();
+
+                let mut motion_has_triggered = false;
+                let mut this_frame_has_motion = true;
+                let mut cptv_file = false;
+
+                let mut motion_left_frame = false;
+                let mut five_seconds_have_passed_since_motion_left_frame = false;
+                let mut thirty_seconds_have_passed_since_motion_disappeared_in_frame = false;
+                let mut motion_disappeared_in_frame = false;
+                let mut paused_cptv_recording_with_static_target_in_frame = false;
+
+                if !motion_has_triggered && this_frame_has_motion {
+                    motion_has_triggered = true;
+                    // Begin cptv file
+
+                    // Write out the cptv header, with placeholders, then write out the previous
+                    // frame and the current frame.  Going dormant on the main thread gets turned off.
+                }
+                if (motion_left_frame && five_seconds_have_passed_since_motion_left_frame)
+                    || (motion_disappeared_in_frame
+                        && thirty_seconds_have_passed_since_motion_disappeared_in_frame)
+                {
+                    // Stop writing out frame, end frame write,
+                    // go back to trigger active mode, going dormant in between frames
+                    // Re-write cptv header in place with min/max/total frames, updated CRC32
+                    // We know exactly how big the CPTV header is as an uncompressed block.
+                }
+                // TODO: Encode and transfer to flash.  If rpi is awake, also transfer to rpi?
+
+                // Check if we need to trigger:  Mostly at the moment we want to see what frame data
+                // structures can be shared with encoding.
+
                 // Wait on the DMA transfer to the Pi.  In the future we can be doing other work here while we wait.
                 let (ch0, _, tx_ret) = tx_transfer.wait();
                 tx = tx_ret;
@@ -371,7 +428,8 @@ fn main() -> ! {
     let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
     let result = sio.fifo.read_blocking();
     crate::debug_assert_eq!(result, CORE1_TASK_READY);
-    sio.fifo.write_blocking(if radiometric_mode { 1 } else { 0 });
+    sio.fifo
+        .write_blocking(if radiometric_mode { 1 } else { 0 });
 
     let result = sio.fifo.read_blocking();
     crate::debug_assert_eq!(result, CORE1_TASK_READY);
@@ -422,7 +480,7 @@ fn main() -> ! {
     //         info!("Found i2c device at {:#x}", i);
     //     }
     // }
-    let mut attiny_regs = [0u8;24];
+    let mut attiny_regs = [0u8; 24];
     if i2c.read(0x25, &mut attiny_regs).is_ok() {
         if attiny_regs[1] == 2 {
             info!("Should power off");
@@ -497,7 +555,7 @@ fn main() -> ! {
                     if got_sync && valid_frame_current_segment_num == 1 {
                         // Check if we need an FFC
                         let telemetry = &scanline_buffer[2..];
-                        let mut buf = [0u8;4];
+                        let mut buf = [0u8; 4];
                         LittleEndian::write_u16_into(&telemetry[1..=2], &mut buf);
                         let time_on_ms = LittleEndian::read_u32(&buf);
 
@@ -510,13 +568,17 @@ fn main() -> ! {
                         let ffc_in_progress = ffc_state == 0b10;
                         let ffc_imminent = ffc_state == 0b01;
                         if time_on_ms < last_ffc_ms {
-                            warn!("Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}", time_on_ms, last_ffc_ms)
-                        }
-                        else if time_on_ms - last_ffc_ms > FFC_INTERVAL_MS && !ffc_imminent && !ffc_in_progress {
+                            warn!(
+                                "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
+                                time_on_ms, last_ffc_ms
+                            )
+                        } else if time_on_ms - last_ffc_ms > FFC_INTERVAL_MS
+                            && !ffc_imminent
+                            && !ffc_in_progress
+                        {
                             needs_ffc = true;
                         }
                     }
-
                 } else if packet_id == packet_id_with_valid_segment_num {
                     // Packet 20 is the only one that contains a meaningful segment number
                     let segment_num = packet_header >> 12;
@@ -527,12 +589,15 @@ fn main() -> ! {
                         && segment_num != valid_frame_current_segment_num
                     {
                         // Segment order mismatch.
-                        warn!("Segment order mismatch error: stored {}, this {}", current_segment_num, segment_num);
+                        warn!(
+                            "Segment order mismatch error: stored {}, this {}",
+                            current_segment_num, segment_num
+                        );
                         started_segment = false;
                         prev_segment_was_4 = false;
 
                         lepton.wait_for_ready(false);
-                        lepton.reset_spi(& mut delay, true);
+                        lepton.reset_spi(&mut delay, true);
                         if !has_done_initial_ffc {
                             let _success = lepton.do_ffc();
                             has_done_initial_ffc = true;
@@ -546,24 +611,37 @@ fn main() -> ! {
                     }
                 }
 
-                let is_valid_segment_num = valid_frame_current_segment_num > 0 && valid_frame_current_segment_num <= last_segment_num_for_frame;
+                let is_valid_segment_num = valid_frame_current_segment_num > 0
+                    && valid_frame_current_segment_num <= last_segment_num_for_frame;
                 let packets_are_in_order = packet_id == prev_packet_id + 1;
-                if is_valid_segment_num && is_valid_packet_num && started_segment && packets_are_in_order {
-                    if do_crc_check  {
+                if is_valid_segment_num
+                    && is_valid_packet_num
+                    && started_segment
+                    && packets_are_in_order
+                {
+                    if do_crc_check {
                         let crc = scanline_buffer[1].to_le();
                         BigEndian::write_u16_into(&scanline_buffer, &mut crc_buffer);
                         crc_buffer[0] = crc_buffer[0] & 0x0f;
                         crc_buffer[2] = 0;
                         crc_buffer[3] = 0;
-                        if crc_check.checksum(&crc_buffer) != crc && packet_id != 0 && valid_frame_current_segment_num != 1 {
-                            warn!("Checksum fail on packet {}, segment {}", packet_id, current_segment_num);
+                        if crc_check.checksum(&crc_buffer) != crc
+                            && packet_id != 0
+                            && valid_frame_current_segment_num != 1
+                        {
+                            warn!(
+                                "Checksum fail on packet {}, segment {}",
+                                packet_id, current_segment_num
+                            );
                         }
                     }
 
                     // Copy the line out to the appropriate place in the current segment buffer.
                     critical_section::with(|cs| {
-                        let segment_index = ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
-                        let frame_seg = &mut FRAME_SEGMENT_BUFFER.get_front().borrow_ref_mut(cs)[segment_index];
+                        let segment_index =
+                            ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
+                        let frame_seg =
+                            &mut FRAME_SEGMENT_BUFFER.get_front().borrow_ref_mut(cs)[segment_index];
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
                         //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
                         // NOTE: We want LittleEndian for our purposes, but for emulating `leptond` it's big endian
@@ -590,8 +668,7 @@ fn main() -> ! {
                                         info!("Failed to request FFC {:?}", e);
                                     }
                                 }
-                            }
-                            else if !has_done_initial_ffc {
+                            } else if !has_done_initial_ffc {
                                 info!("Requesting FFC");
                                 let success = lepton.do_ffc();
                                 match success {
@@ -634,7 +711,10 @@ fn main() -> ! {
                     started_segment = false;
                     prev_segment_was_4 = false;
                     if attempt > 250 && attempt % 5 == 0 {
-                        warn!("Packet order mismatch current: {}, prev: {}, seg {} #{}", packet_id, prev_packet_id, current_segment_num, attempt);
+                        warn!(
+                            "Packet order mismatch current: {}, prev: {}, seg {} #{}",
+                            packet_id, prev_packet_id, current_segment_num, attempt
+                        );
                         lepton.wait_for_ready(false);
                         lepton.reset_spi(&mut delay, false);
                         if !has_done_initial_ffc {
@@ -707,7 +787,6 @@ fn main() -> ! {
             }
         }
         i2c_poll_counter += 1;
-          
 
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.

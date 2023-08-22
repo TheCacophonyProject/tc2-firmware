@@ -1,7 +1,23 @@
-use crate::XOSC_CRYSTAL_FREQ;
 use crate::bsp::pac;
-use crate::bsp::pac::ROSC;
 use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
+use crate::bsp::pac::ROSC;
+use crate::XOSC_CRYSTAL_FREQ;
+
+pub unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>())
+}
+
+pub unsafe fn u8_slice_to_u16(p: &[u8]) -> &[u16] {
+    core::slice::from_raw_parts((p as *const [u8]) as *const u16, p.len() / 2)
+}
+
+pub unsafe fn u8_slice_to_u32(p: &[u8]) -> &[u32] {
+    core::slice::from_raw_parts((p as *const [u8]) as *const u32, p.len() / 4)
+}
+
+pub unsafe fn any_as_u32_slice<T: Sized>(p: &T) -> &[u32] {
+    core::slice::from_raw_parts((p as *const T) as *const u32, core::mem::size_of::<T>() / 4)
+}
 
 pub fn rosc_frequency_count_hz() -> u32 {
     // Use the reference xosc while enabled to measure the speed of the rosc.
@@ -48,11 +64,7 @@ pub fn rosc_frequency_count_hz() -> u32 {
 
 fn set_rosc_div(rosc: &ROSC, div: u32) {
     assert!(div <= 32);
-    let div = if div == 32 {
-        0
-    } else {
-        div
-    };
+    let div = if div == 32 { 0 } else { div };
     rosc.div.write(|w| unsafe { w.bits(0xaa0 + div) });
 }
 
@@ -73,7 +85,7 @@ fn read_freq_stage(rosc: &ROSC, stage: u8) -> u8 {
         5 => rosc.freqb.read().ds5().bits(),
         6 => rosc.freqb.read().ds6().bits(),
         7 => rosc.freqb.read().ds7().bits(),
-        _ => panic!("invalid frequency drive strength stage")
+        _ => panic!("invalid frequency drive strength stage"),
     }
 }
 
@@ -82,7 +94,7 @@ const MAX_STAGE_DRIVE: u8 = 3;
 fn increase_freq(rosc: &ROSC) -> bool {
     // Assume div is 1, and freq_range is high
 
-    let mut stages: [u8;8] = [0;8];
+    let mut stages: [u8; 8] = [0; 8];
     // TODO: Do this read in two reads rather than 8
     for stage in 0..8 {
         stages[stage] = read_freq_stage(&rosc, stage as u8)
@@ -106,7 +118,10 @@ fn increase_freq(rosc: &ROSC) -> bool {
     }
     if stages[next_i] < MAX_STAGE_DRIVE {
         stages[next_i] += 1;
-        let min = *stages[0..num_stages_at_drive_level].iter().min().unwrap_or(&0);
+        let min = *stages[0..num_stages_at_drive_level]
+            .iter()
+            .min()
+            .unwrap_or(&0);
         for mut stage in &mut stages[num_stages_at_drive_level..] {
             *stage = min;
         }
@@ -118,7 +133,7 @@ fn increase_freq(rosc: &ROSC) -> bool {
     // NOTE: Medium should be 1.33 x low, high should be about 2x low.
 }
 
-fn write_freq_stages(rosc: &ROSC, stages: &[u8;8]) {
+fn write_freq_stages(rosc: &ROSC, stages: &[u8; 8]) {
     let passwd: u32 = 0x9696 << 16;
     let mut freq_a = passwd;
     let mut freq_b = passwd;
@@ -155,7 +170,7 @@ fn increase_freq_range(rosc: &ROSC) -> bool {
             // Reset all the drive strength bits.
             write_freq_stages(&rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
             true
-        },
+        }
         Some(FREQ_RANGE_A::HIGH) | Some(FREQ_RANGE_A::TOOHIGH) => {
             // Already in the HIGH frequency range, and can't increase
             false
