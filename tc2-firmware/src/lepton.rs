@@ -1,29 +1,32 @@
-use core::convert::Infallible;
-use core::mem;
-use defmt::Format;
 use byte_slice_cast::AsByteSlice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use core::convert::Infallible;
+use core::mem;
 use cortex_m::asm::nop;
 use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
 use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
+use defmt::Format;
 use defmt::{info, warn};
-use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin, StatefulOutputPin};
+use embedded_hal::digital::v2::{OutputPin, StatefulOutputPin, ToggleableOutputPin};
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::gpio::PinId;
 
-use crate::bsp::hal::gpio::bank0::{Gpio16, Gpio17, Gpio18, Gpio19, Gpio2, Gpio20, Gpio21, Gpio22, Gpio23, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29, Gpio4};
-use crate::bsp::hal::gpio::{Pins, PullDown, PullDownInput};
-use crate::bsp::hal::{pac, Sio, Timer};
+use crate::any_as_u8_slice;
+use crate::bsp::hal::gpio::bank0::{
+    Gpio16, Gpio17, Gpio18, Gpio19, Gpio2, Gpio20, Gpio21, Gpio22, Gpio23, Gpio24, Gpio25, Gpio26,
+    Gpio27, Gpio28, Gpio29, Gpio4,
+};
 use crate::bsp::hal::gpio::{FloatingInput, FunctionSpi, Interrupt, Output, PushPull};
+use crate::bsp::hal::gpio::{Pins, PullDown, PullDownInput};
 use crate::bsp::hal::spi::Enabled;
+use crate::bsp::hal::{pac, Sio, Timer};
 use crate::bsp::hal::{Spi, I2C as I2CInterface};
 use crate::bsp::pac::SPI0;
 use crate::bsp::{
     hal::gpio::{Function, Pin, I2C},
     pac::I2C0,
 };
-use crate::{any_as_u8_slice, u8_slice_to_u16};
-
+use crate::utils::u8_slice_to_u16;
 
 pub enum LeptonCommandType {
     Get = 0b0000_0000_0000_00_00,
@@ -49,7 +52,7 @@ const LEPTON_COMMAND_OEM_BIT: u16 = 0b0100_0000_0000_0000;
 
 const LEPTON_SUB_SYSTEM_VID: u16 = 0b0000_0011_0000_0000;
 const LEPTON_SUB_SYSTEM_OEM: u16 = 0b0000_1000_0000_0000; // | LEPTON_COMMAND_OEM_BIT; // Requires protection bit set
-const LEPTON_SUB_SYSTEM_RAD: u16 = 0x0e00;//0b0000_1110_0000_0000; // | LEPTON_COMMAND_OEM_BIT; // Requires protection bit set
+const LEPTON_SUB_SYSTEM_RAD: u16 = 0x0e00; //0b0000_1110_0000_0000; // | LEPTON_COMMAND_OEM_BIT; // Requires protection bit set
 const LEPTON_SUB_SYSTEM_AGC: u16 = 0b0000_0001_0000_0000;
 const LEPTON_SUB_SYSTEM_SYS: u16 = 0b0000_0010_0000_0000;
 
@@ -169,18 +172,18 @@ impl LeptonError {
             -7 => UndefinedFunctionError, // Camera undefined function error
             -8 => FunctionNotSupported,   // Camera function not yet supported error
             -9 => DataOutOfRange,         // Camera input DATA is out of valid range error
-            -11 => CommandNotAllowed,     // Camera unable to execute command due to current camera state
+            -11 => CommandNotAllowed, // Camera unable to execute command due to current camera state
 
             -15 => OtpWriteError,         // Camera OTP write error
             -16 => OtpReadError,          // double bit error detected (uncorrectible)
             -18 => OtpNotProgrammedError, // Flag read as non-zero
 
-            -20 => ErrorI2CBusNotReady,     // I2C Bus Error - Bus Not Avaialble
-            -22 => ErrorI2CBufferOverflow,  // I2C Bus Error - Buffer Overflow
+            -20 => ErrorI2CBusNotReady, // I2C Bus Error - Bus Not Avaialble
+            -22 => ErrorI2CBufferOverflow, // I2C Bus Error - Buffer Overflow
             -23 => ErrorI2CArbitrationLost, // I2C Bus Error - Bus Arbitration Lost
-            -24 => ErrorI2CBusError,        // I2C Bus Error - General Bus Error
-            -25 => ErrorI2CNackReceived,    // I2C Bus Error - NACK Received
-            -26 => ErrorI2CFail,            // I2C Bus Error - General Failure
+            -24 => ErrorI2CBusError,    // I2C Bus Error - General Bus Error
+            -25 => ErrorI2CNackReceived, // I2C Bus Error - NACK Received
+            -26 => ErrorI2CFail,        // I2C Bus Error - General Failure
 
             -80 => DivZeroError, // Attempted div by zero
 
@@ -220,7 +223,7 @@ pub struct LeptonSpi {
     _tx: Pin<Gpio23, FunctionSpi>,
 }
 
-pub struct Lepton<T:PinId> {
+pub struct Lepton<T: PinId> {
     pub spi: LeptonSpi,
     pub vsync: VsyncPin,
     cci: LeptonCciI2c,
@@ -235,14 +238,14 @@ pub struct Lepton<T:PinId> {
 enum FFCShutterMode {
     Manual = 0,
     Auto = 1,
-    External = 2
+    External = 2,
 }
 
 #[repr(C)]
 enum FFCTempLockoutState {
     Inactive = 0,
     High = 1,
-    Low = 2
+    Low = 2,
 }
 
 #[repr(C)]
@@ -251,14 +254,14 @@ pub enum FFCStatus {
     NeverCommanded = 0,
     Imminent = 1,
     InProcess = 2,
-    Done = 3
+    Done = 3,
 }
 
 #[repr(C)]
 #[derive(PartialEq)]
 enum LepSysEnable {
     Disable = 0,
-    Enable = 1
+    Enable = 1,
 }
 
 #[repr(C)]
@@ -271,7 +274,7 @@ pub struct FFCState {
     desired_ffc_period_ms: u32,
     explicit_command_to_open: bool,
     desired_ffc_temp_delta: u16, // Kelvin x 100
-    imminent_delay: u16, // in frame counts
+    imminent_delay: u16,         // in frame counts
 }
 
 impl Default for FFCState {
@@ -285,7 +288,7 @@ impl Default for FFCState {
             desired_ffc_period_ms: 0,
             explicit_command_to_open: false,
             desired_ffc_temp_delta: 0,
-            imminent_delay: 0
+            imminent_delay: 0,
         }
     }
 }
@@ -296,7 +299,7 @@ impl FFCState {
     }
 }
 
-impl<T:PinId> Lepton<T> {
+impl<T: PinId> Lepton<T> {
     pub fn new(
         i2c: LeptonCciI2c,
         spi: Spi<Enabled, SPI0, 16>,
@@ -385,7 +388,6 @@ impl<T:PinId> Lepton<T> {
             warn!("{}", success);
         }
         //self.vsync.set_interrupt_enabled(Interrupt::EdgeHigh, true);
-
 
         //info!("Got ping? {}", self.ping());
         //info!("AGC enabled? {}", self.acg_enabled());
@@ -540,14 +542,12 @@ impl<T:PinId> Lepton<T> {
 
     pub fn wait_for_ffc_status_ready(&mut self, delay: &mut Delay) -> bool {
         loop {
-            match self.get_attribute(
-                lepton_command(
-                    LEPTON_SUB_SYSTEM_SYS,
-                    LEPTON_SYS_FFC_STATUS,
-                    LeptonCommandType::Get,
-                    false,
-                ),
-            ) {
+            match self.get_attribute(lepton_command(
+                LEPTON_SUB_SYSTEM_SYS,
+                LEPTON_SYS_FFC_STATUS,
+                LeptonCommandType::Get,
+                false,
+            )) {
                 Ok((ffc_state, length)) => {
                     let ffc_state = BigEndian::read_i32(&ffc_state[..((length * 2) as usize)]);
                     info!("FFC state {}", ffc_state);
@@ -564,14 +564,12 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn telemetry_location(&mut self) -> Result<TelemetryLocation, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_SYS,
-                LEPTON_SYS_STATS,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_STATS,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((telemetry_location, length)) => {
                 let telemetry_location_state =
                     LittleEndian::read_u32(&telemetry_location[..((length * 2) as usize)]);
@@ -581,7 +579,7 @@ impl<T:PinId> Lepton<T> {
                     Ok(TelemetryLocation::Footer)
                 }
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
@@ -627,34 +625,30 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn get_ffc_state(&mut self) -> Result<FFCState, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_SYS,
-                LEPTON_SYS_FFC_SHUTTER_MODE,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_FFC_SHUTTER_MODE,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((state, _length)) => {
                 let struct_size = mem::size_of::<FFCState>();
                 let mut ffc_state = [0u8; 20];
                 ffc_state.copy_from_slice(&state[0..struct_size]);
                 let ffc_state: FFCState = unsafe { mem::transmute(ffc_state) };
                 Ok(ffc_state)
-            },
-            Err(err) => Err(err)
+            }
+            Err(err) => Err(err),
         }
     }
 
     pub fn get_ffc_status(&mut self) -> Result<FFCStatus, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_SYS,
-                LEPTON_SYS_FFC_STATUS,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_FFC_STATUS,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((state, length)) => {
                 let ffc_status = LittleEndian::read_u32(&state[..((length * 2) as usize)]);
                 let ffc_status: FFCStatus = match ffc_status {
@@ -662,11 +656,11 @@ impl<T:PinId> Lepton<T> {
                     1 => FFCStatus::Imminent,
                     2 => FFCStatus::InProcess,
                     3 => FFCStatus::Done,
-                    _ => panic!("Unknown FFC Status {}", ffc_status)
+                    _ => panic!("Unknown FFC Status {}", ffc_status),
                 };
                 Ok(ffc_status)
-            },
-            Err(err) => Err(err)
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -681,51 +675,43 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn telemetry_enabled(&mut self) -> Result<bool, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_SYS,
-                LEPTON_SYS_TELEMETRY_LOCATION,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_TELEMETRY_LOCATION,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((telemetry_enabled, length)) => {
                 Ok(LittleEndian::read_u32(&telemetry_enabled[..((length * 2) as usize)]) == 1)
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
     pub fn output_raw14(&mut self) -> Result<bool, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_VID,
-                LEPTON_VID_OUTPUT_FORMAT,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_VID,
+            LEPTON_VID_OUTPUT_FORMAT,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((output_state, length)) => {
                 let output_state = LittleEndian::read_u32(&output_state[..((length * 2) as usize)]);
                 Ok(output_state == 7)
-            },
-            Err(err) => Err(err)
+            }
+            Err(err) => Err(err),
         }
     }
 
     pub fn status(&mut self) -> Result<u32, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_SYS,
-                LEPTON_SYS_STATUS,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
-            Ok((output_state, _length)) => {
-                Ok(LittleEndian::read_u32(&output_state[..4usize]))
-            }
-            Err(err) => Err(err)
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_STATUS,
+            LeptonCommandType::Get,
+            false,
+        )) {
+            Ok((output_state, _length)) => Ok(LittleEndian::read_u32(&output_state[..4usize])),
+            Err(err) => Err(err),
         }
     }
 
@@ -742,51 +728,46 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn focus_metric_enabled(&mut self) -> Result<bool, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_VID,
-                LEPTON_VID_FOCUS_ENABLE_STATE,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_VID,
+            LEPTON_VID_FOCUS_ENABLE_STATE,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((enabled_focus_state, l)) => {
                 Ok(LittleEndian::read_u32(&enabled_focus_state[..((l * 2) as usize)]) == 1)
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
     pub fn get_focus_metric(&mut self) -> Result<u32, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_VID,
-                LEPTON_VID_FOCUS_METRIC,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_VID,
+            LEPTON_VID_FOCUS_METRIC,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((focus_metric, l)) => {
                 Ok(LittleEndian::read_u32(&focus_metric[..((l * 2) as usize)]))
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
     pub fn acg_enabled(&mut self) -> Result<bool, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_AGC,
-                LEPTON_AGC_ENABLE_STATE,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_AGC,
+            LEPTON_AGC_ENABLE_STATE,
+            LeptonCommandType::Get,
+            false,
+        )) {
             Ok((agc_state, length)) => {
-                let acg_enabled_state = LittleEndian::read_u32(&agc_state[..((length * 2) as usize)]);
+                let acg_enabled_state =
+                    LittleEndian::read_u32(&agc_state[..((length * 2) as usize)]);
                 Ok(acg_enabled_state == 1)
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
@@ -821,9 +802,9 @@ impl<T:PinId> Lepton<T> {
         // Putting lepton into standby mode, uses about 5mW in standby mode.
         info!("power down asserted");
         self.power_down.set_low().unwrap();
-        
+
         // Datasheet says to wait at least 100ms before turning off clock after power down.
-        delay.delay_ms(100);    
+        delay.delay_ms(100);
         info!("clk disabled");
         self.clk_disable.set_low().unwrap();
 
@@ -867,32 +848,28 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn radiometric_mode_enabled(&mut self) -> Result<bool, LeptonError> {
-       let success =  match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_RAD,
-                LEPTON_RAD_ENABLE_STATE,
-                LeptonCommandType::Get,
-                true,
-            )
-        ) {
+        let success = match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_RAD,
+            LEPTON_RAD_ENABLE_STATE,
+            LeptonCommandType::Get,
+            true,
+        )) {
             Ok((radiometry_enabled, length)) => {
                 Ok(LittleEndian::read_u32(&radiometry_enabled[..((length * 2) as usize)]) == 1)
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         };
         if let Ok(true) = success {
-            match self.get_attribute(
-                lepton_command(
-                    LEPTON_SUB_SYSTEM_RAD,
-                    LEPTON_RAD_TLINEAR_ENABLE_STATE,
-                    LeptonCommandType::Get,
-                    true,
-                )
-            ) {
+            match self.get_attribute(lepton_command(
+                LEPTON_SUB_SYSTEM_RAD,
+                LEPTON_RAD_TLINEAR_ENABLE_STATE,
+                LeptonCommandType::Get,
+                true,
+            )) {
                 Ok((radiometry_enabled, length)) => {
                     Ok(LittleEndian::read_u32(&radiometry_enabled[..((length * 2) as usize)]) == 1)
                 }
-                Err(err) => Err(err)
+                Err(err) => Err(err),
             }
         } else {
             success
@@ -926,39 +903,33 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn vsync_enabled(&mut self) -> Result<bool, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_OEM,
-                LEPTON_OEM_GPIO_MODE,
-                LeptonCommandType::Get,
-                true,
-            )
-        ) {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_OEM,
+            LEPTON_OEM_GPIO_MODE,
+            LeptonCommandType::Get,
+            true,
+        )) {
             Ok((vsync_state, length)) => {
                 Ok(LittleEndian::read_u32(&vsync_state[..((length * 2) as usize)]) == 5)
             }
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
     pub fn scene_stats(&mut self) -> Result<SceneStats, LeptonError> {
-        match self.get_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_SYS,
-                LEPTON_SYS_STATS,
-                LeptonCommandType::Get,
-                false,
-            )
-        ) {
-            Ok((scene_stats, _length)) => {
-                Ok(SceneStats {
-                    avg: LittleEndian::read_u16(&scene_stats[0..2]),
-                    max: LittleEndian::read_u16(&scene_stats[2..4]),
-                    min: LittleEndian::read_u16(&scene_stats[4..6]),
-                    num_pixels: LittleEndian::read_u16(&scene_stats[6..8]),
-                })
-            }
-            Err(err) => Err(err)
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_STATS,
+            LeptonCommandType::Get,
+            false,
+        )) {
+            Ok((scene_stats, _length)) => Ok(SceneStats {
+                avg: LittleEndian::read_u16(&scene_stats[0..2]),
+                max: LittleEndian::read_u16(&scene_stats[2..4]),
+                min: LittleEndian::read_u16(&scene_stats[4..6]),
+                num_pixels: LittleEndian::read_u16(&scene_stats[6..8]),
+            }),
+            Err(err) => Err(err),
         }
     }
 
@@ -968,7 +939,10 @@ impl<T:PinId> Lepton<T> {
         let mut failures = 0;
         loop {
             readbuf = [0; 2];
-            if match self.cci.write_read(LEPTON_ADDRESS, &LEPTON_STATUS_REGISTER, &mut readbuf) {
+            if match self
+                .cci
+                .write_read(LEPTON_ADDRESS, &LEPTON_STATUS_REGISTER, &mut readbuf)
+            {
                 Ok(()) => {
                     camera_status = BigEndian::read_u16(&readbuf);
                     if print {
@@ -997,10 +971,13 @@ impl<T:PinId> Lepton<T> {
         }
     }
 
-    fn execute_command(&mut self, (command, _length): LeptonSynthesizedCommand) -> Result<bool, LeptonError> {
+    fn execute_command(
+        &mut self,
+        (command, _length): LeptonSynthesizedCommand,
+    ) -> Result<bool, LeptonError> {
         let success = self.wait_for_ready(false);
         if success != LeptonError::Ok {
-            return Err(success)
+            return Err(success);
         }
         let success = self.cci.write(
             LEPTON_ADDRESS,
@@ -1024,7 +1001,10 @@ impl<T:PinId> Lepton<T> {
         }
     }
 
-    fn execute_command_non_blocking(&mut self, (command, _length): LeptonSynthesizedCommand) -> Result<bool, LeptonError> {
+    fn execute_command_non_blocking(
+        &mut self,
+        (command, _length): LeptonSynthesizedCommand,
+    ) -> Result<bool, LeptonError> {
         self.wait_for_ready(false);
         let success = self.cci.write(
             LEPTON_ADDRESS,
@@ -1042,9 +1022,9 @@ impl<T:PinId> Lepton<T> {
         }
         let success = self.wait_for_ready(false);
         if success != LeptonError::Ok {
-            return Err(success)
+            return Err(success);
         }
-        return Ok(true)
+        return Ok(true);
     }
 
     fn get_attribute(
@@ -1091,14 +1071,12 @@ impl<T:PinId> Lepton<T> {
             return Err(success);
         }
 
-
         // Now read out length registers, and assemble them into the return type that we want.
-        let success = self.cci
-            .write_read(
-                LEPTON_ADDRESS,
-                &LEPTON_DATA_0_REGISTER,
-                &mut buf[..(length as usize * 2)],
-            );
+        let success = self.cci.write_read(
+            LEPTON_ADDRESS,
+            &LEPTON_DATA_0_REGISTER,
+            &mut buf[..(length as usize * 2)],
+        );
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok((buf, 0));
@@ -1119,7 +1097,11 @@ impl<T:PinId> Lepton<T> {
         return Ok((buf, length));
     }
 
-    fn set_attribute_i32(&mut self, command: LeptonSynthesizedCommand, val: i32) -> Result<bool, LeptonError> {
+    fn set_attribute_i32(
+        &mut self,
+        command: LeptonSynthesizedCommand,
+        val: i32,
+    ) -> Result<bool, LeptonError> {
         self.set_attribute(
             command,
             &[(val & 0xffff) as u16, (val >> 16 & 0xffff) as u16],
