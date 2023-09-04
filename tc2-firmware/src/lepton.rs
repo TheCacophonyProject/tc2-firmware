@@ -372,11 +372,11 @@ impl<T:PinId> Lepton<T> {
         //     Err(err) => warn!("{:?}", err)
         // };
         //self.setup_spot_meter_roi();
-        info!("Disable post-processing");
-        let success = self.disable_post_processing();
-        if !success.is_ok() {
-            warn!("{}", success);
-        }
+        //info!("Disable post-processing");
+        //let success = self.disable_post_processing();
+        //if !success.is_ok() {
+        //    warn!("{}", success);
+        //}
         //self.disable_t_linear();
 
         let success = self.radiometric_mode_enabled();

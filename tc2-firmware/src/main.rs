@@ -3,6 +3,7 @@
 
 mod lepton;
 mod utils;
+mod attiny;
 pub mod bsp;
 
 use bsp::{
@@ -41,6 +42,10 @@ use rp2040_hal::gpio::{FloatingInput, FunctionI2C, Interrupt, PinId};
 use rp2040_hal::gpio::bank0::{Gpio1, Gpio4};
 use rp2040_hal::I2C;
 use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
+
+use attiny::Attiny;
+use attiny::CameraState;
+use attiny::AttinyError;
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 
@@ -412,25 +417,12 @@ fn main() -> ! {
         peripherals.I2C1,
         sda_pin,
         scl_pin,
-        400.kHz(),
+        100.kHz(),
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
-    // Write three bytes to the I²C device with 7-bit address 0x2C
-    // for i in 0u8..127u8 {
-    //     if i2c.write(i, &[1, 2, 3]).is_ok() {
-    //         info!("Found i2c device at {:#x}", i);
-    //     }
-    // }
-    let mut attiny_regs = [0u8;24];
-    if i2c.read(0x25, &mut attiny_regs).is_ok() {
-        if attiny_regs[1] == 2 {
-            info!("Should power off");
-        }
-        info!("Attiny camera state {:?}", attiny_regs);
-    } else {
-        info!("Failed to read i2c state from attiny");
-    }
+    let mut attiny = Attiny::new(i2c);
+
     // let mut cmd = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     // i2c.write_read(0x51, &[
     //     PCF8563_SEC_REG,
@@ -676,33 +668,29 @@ fn main() -> ! {
         // Note that those you will want to have the RPi powered separately.
         if i2c_poll_counter >= 20 {
             i2c_poll_counter = 0;
-            let address = 0x25;
-            let write_buffer: [u8; 1] = [0x02];
-            if let Err(e) = i2c.write(address, &write_buffer) {
-                error!("I2C write error: {:?}", e);
-            } else {
-                let mut read_buffer: [u8; 1] = [0; 1];
-                if let Err(e) = i2c.read(address, &mut read_buffer) {
-                    error!("I2C read error: {:?}", e);
+            match attiny.check_camera_state() {
+                Ok(state) => {
+                    if state != CameraState::PoweredOn {
+                        info!("Powering off");
+
+                        info!("Lets skip that for now, so we can get some logs...");
+                        /*
+                        // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
+                        // TODO: Are there any other pins we need to set low?
+                        lepton.power_down_sequence(&mut delay);
+                        rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
+                        lepton.power_on_sequence(&mut delay);
+                        lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+                        lepton
+                            .vsync
+                            .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
+                        got_sync = false;
+                        continue 'frame_loop;
+                        */
+                    }
                 }
-
-                if read_buffer[0] == 0x03 {
-                    info!("Powering off");
-
-                    info!("Lets skip that for now, so we can get some logs...");
-                    /*
-                    // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
-                    // TODO: Are there any other pins we need to set low?
-                    lepton.power_down_sequence(&mut delay);
-                    rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
-                    lepton.power_on_sequence(&mut delay);
-                    lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-                    lepton
-                        .vsync
-                        .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
-                    got_sync = false;
-                    continue 'frame_loop;
-                    */
+                Err(err) => {
+                    error!("Error checking camera state");
                 }
             }
         }
