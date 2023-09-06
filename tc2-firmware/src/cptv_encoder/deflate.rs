@@ -16,7 +16,8 @@ use crate::cptv_encoder::bit_cursor::BitCursor;
 fn write_to_flash(cursor: &mut BitCursor, storage: &mut [u8; 4096]) {
     let (to_flush, num_bytes) = cursor.flush();
     for byte in &to_flush[0..num_bytes] {
-        storage.push(*byte);
+        // TODO:
+        //storage.push(*byte);
     }
 }
 
@@ -44,7 +45,7 @@ fn write_dynamic_final_block_header(cursor: &mut BitCursor, storage: &mut [u8; 4
         }
     }
     if cursor.write_bits(
-        block_header_and_huffman_description[block_header_and_huffman_description.len() - 1] as u16,
+        block_header_and_huffman_description[block_header_and_huffman_description.len() - 1] as u32,
         5,
     ) {
         write_to_flash(cursor, storage);

@@ -7,6 +7,7 @@ mod utils;
 pub mod bsp;
 mod cptv_encoder;
 mod motion_detector;
+mod onboard_flash;
 
 use bsp::{
     entry,
@@ -33,35 +34,44 @@ use lepton::Lepton;
 use panic_probe as _;
 
 use crate::bsp::hal::dma::{single_buffer, DMAExt};
-use crate::cptv_encoder::FRAME_WIDTH;
-use crate::utils::{any_as_u32_slice, any_as_u8_slice};
+use crate::bsp::pac::SPI1;
+use crate::cptv_encoder::streaming_cptv::{Cptv2Header, CptvStream};
+use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
+use crate::onboard_flash::OnboardFlash;
+use crate::utils::{any_as_u32_slice, any_as_u8_slice, u8_slice_to_u16, u8_slice_to_u32};
 use core::cell::RefCell;
+use cortex_m::asm::nop;
+use cortex_m::singleton;
 use critical_section::Mutex;
 use embedded_hal::digital::InputPin;
 use embedded_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
 use fugit::HertzU32;
 use fugit::RateExtU32;
 use rp2040_hal::gpio::bank0::{Gpio1, Gpio4};
-use rp2040_hal::gpio::{FloatingInput, FunctionI2C, Interrupt, PinId};
+use rp2040_hal::gpio::{FloatingInput, FunctionI2C, FunctionSpi, Interrupt, PinId};
 use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
+use rp2040_hal::uart::Enabled;
 use rp2040_hal::I2C;
 
-static mut CORE1_STACK: Stack<4096> = Stack::new();
+static mut CORE1_STACK: Stack<32768> = Stack::new();
 
 // CORE1 consts
-
+pub const START_TIMER: u32 = 0xfb;
+pub const END_TIMER: u32 = 0xfc;
 pub const CORE1_TASK_COMPLETE: u32 = 0xEE;
 pub const CORE1_TASK_READY: u32 = 0xDB;
 pub const CORE1_TASK_START_WITH_FRAME_SEGMENT: u32 = 0xAC;
 pub const CORE1_TASK_START_WITH_FULL_FRAME: u32 = 0xAE;
 pub const CORE1_TASK_START_WITHOUT_FRAME_SEGMENT: u32 = 0xAD;
 
+pub const CORE1_TASK_START_FILE_TRANSFER: u32 = 0xAF;
+
 // Each segment has 4 even slices to transfer from the total segment length of  9760 + 4*4bytes for the segment number.
 const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
 pub const A_SEGMENT_LENGTH: usize = 9768; //9764;
 pub const FULL_CHUNK_LENGTH: usize = A_SEGMENT_LENGTH / 4;
 pub const CHUNK_LENGTH: usize = (A_SEGMENT_LENGTH - 4) / 4;
-pub static mut FRAME_BUFFER: [u8; FRAME_LENGTH + 4] = [0u8; FRAME_LENGTH + 4];
+//pub static mut FRAME_BUFFER: [u8; FRAME_LENGTH + 4] = [0u8; FRAME_LENGTH + 4];
 pub const SEGMENT_LENGTH: usize = (FRAME_WIDTH * 122) / 4;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins
 
@@ -81,12 +91,12 @@ impl FrameSeg {
     pub fn as_u8_slice(&self) -> &[u8] {
         unsafe { any_as_u8_slice(&self.0) }
     }
-
     pub fn packet(&mut self, packet_id: usize) -> &mut FramePacketData {
         &mut self.0[packet_id]
     }
 }
 
+// TODO: Just double buffer this on scanlines, or even FIFO between cores?
 pub static FRAME_SEGMENT_BUFFER: DoubleBuffer = DoubleBuffer {
     front: Mutex::new(RefCell::new([
         FrameSeg::new(),
@@ -173,6 +183,14 @@ fn go_dormant_until_woken<T: PinId, T2: PinId>(
     initialized_rosc
 }
 
+fn wake_raspberry_pi() {
+    // TODO: Send a wake signal to the attiny, and poll its registers
+    //  until we see that the raspberry pi is awake (and ideally that tc2-agent is running).
+    //  Actually, tc2-agent will restart this firmware, so maybe we don't need to poll, we just
+    //  block indefinitely?
+    info!("Sent wake signal to raspberry pi");
+}
+
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
@@ -244,6 +262,27 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
     {
+        // Initialise comms with onboard flash chip:
+        // 8: miso
+        // 9: cs
+        // 10: clk
+        // 11: mosi
+        let _spi_miso = pins.gpio8.into_mode::<FunctionSpi>();
+        let cs = pins.gpio9.into_push_pull_output();
+        let _spi_sck = pins.gpio10.into_mode::<FunctionSpi>();
+        let _spi_mosi = pins.gpio11.into_mode::<FunctionSpi>();
+        delay.delay_ms(500);
+
+        //let cs = &mut cs;
+        let (spi, baud_rate) = Spi::new(peripherals.SPI1).init(
+            &mut peripherals.RESETS,
+            clocks.peripheral_clock.freq(), // 125_000_000
+            10_000_000.Hz(),
+            &embedded_hal::spi::MODE_3,
+        );
+        let mut flash_storage = OnboardFlash::init(spi, cs);
+        //flash_storage.
+
         let mut pi_ping = pins.gpio5.into_push_pull_output();
         let _spi_clk = pins.gpio14.into_mode::<rp2040_hal::gpio::FunctionPio0>();
         let _spi_miso = pins.gpio15.into_mode::<rp2040_hal::gpio::FunctionPio0>();
@@ -253,7 +292,14 @@ fn main() -> ! {
 
         let (mut pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
         let dma = peripherals.DMA.split(&mut peripherals.RESETS);
+
         let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
+            // NOTE: This creates a buffer with a static lifetime, which is safe to access only this
+            //  thread.
+            let mut raspberry_pi_is_awake = false;
+            let mut buffer =
+                singleton!(BUFFER: [u8; FRAME_LENGTH + 4] = [0u8; FRAME_LENGTH + 4]).unwrap();
+
             let peripherals = unsafe { Peripherals::steal() };
             let mut sio = Sio::new(peripherals.SIO);
             sio.fifo.write_blocking(CORE1_TASK_READY);
@@ -275,30 +321,89 @@ fn main() -> ! {
             sm.start();
 
             // Make sure we start our "pi-ping" pin low here.
-            pi_ping.set_low().unwrap();
+            if raspberry_pi_is_awake {
+                pi_ping.set_low().unwrap();
 
-            pi_ping.set_high().unwrap();
-            pi_ping.set_low().unwrap();
-            unsafe {
-                LittleEndian::write_u32(&mut FRAME_BUFFER[0..4], 0x1 << 28 | 8u32);
-                LittleEndian::write_u32(&mut FRAME_BUFFER[4..8], radiometry_enabled);
-                LittleEndian::write_u32(&mut FRAME_BUFFER[8..12], FIRMWARE_VERSION);
-            }; // Read 8 bytes
-            let tx_transfer = single_buffer::Config::new(
-                dma_ch0,
-                &unsafe { any_as_u32_slice(&FRAME_BUFFER) }[0..3],
-                tx,
-            )
-            .start();
-            // Wait on the DMA transfer to the Pi.  In the future we can be doing other work here while we wait.
-            let (ch0, _, tx_ret) = tx_transfer.wait();
-            tx = tx_ret;
-            dma_ch0 = ch0;
+                pi_ping.set_high().unwrap();
+                pi_ping.set_low().unwrap();
 
+                unsafe {
+                    LittleEndian::write_u32(&mut buffer[0..4], 0x1 << 28 | 8u32);
+                    LittleEndian::write_u32(&mut buffer[4..8], radiometry_enabled);
+                    LittleEndian::write_u32(&mut buffer[8..12], FIRMWARE_VERSION);
+                }; // Read 8 bytes
+                let tx_transfer = single_buffer::Config::new(
+                    dma_ch0,
+                    &unsafe { any_as_u32_slice(buffer) }[0..3],
+                    tx,
+                )
+                .start();
+                // Wait on the DMA transfer to the Pi.  In the future we can be doing other work here while we wait.
+                let (ch0, _, tx_ret) = tx_transfer.wait();
+                tx = tx_ret;
+                dma_ch0 = ch0;
+            }
+
+            // TODO: Switch modes here.
+            //  If there are files to upload, do that.
+            //  If the pi requests raw frames, do that (as well as being able to write to flash)
+            if flash_storage.has_files_to_offload() {
+                warn!("There are files to offload!");
+                if !raspberry_pi_is_awake {
+                    wake_raspberry_pi();
+                }
+                if raspberry_pi_is_awake {
+                    // do some offloading.
+                    // TODO: Seems like we really want double buffering here.
+                    let mut file_start = true;
+                    while let Some((part, is_last)) = flash_storage.get_file_part() {
+                        // Can we transfer directly from SPI to PIO via DMA without any intermediate buffer?
+                        buffer.copy_from_slice(part);
+
+                        pi_ping.set_high().unwrap();
+                        pi_ping.set_low().unwrap();
+
+                        let tx_transfer = single_buffer::Config::new(
+                            dma_ch0,
+                            &unsafe { any_as_u32_slice(buffer) }[0..part.len()],
+                            tx,
+                        )
+                        .start();
+                        let (ch0, _, tx_ret) = tx_transfer.wait();
+                        tx = tx_ret;
+                        dma_ch0 = ch0;
+                        if is_last {
+                            file_start = true;
+                        }
+                    }
+                }
+                // TODO: Some validation from the raspberry pi that the transfer completed
+                //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
+
+                // Once we've successfully offloaded all files, we can erase the flash and we're
+                // ready to start recording new CPTV files there.
+                flash_storage.erase_all_good_used_blocks();
+            }
+
+            // Let Core0 know that it can start the frame loop
+            info!("Tell core 1 to start frame loop");
             sio.fifo.write_blocking(CORE1_TASK_READY);
             pi_ping.set_low().unwrap();
+
+            let mut motion_has_triggered = false;
+            let mut this_frame_has_motion = true;
+            let mut cptv_stream: Option<CptvStream> = None;
+
+            let mut motion_left_frame = false;
+            let mut five_seconds_have_passed_since_motion_left_frame = false;
+            let mut thirty_seconds_have_passed_since_motion_disappeared_in_frame = false;
+            let mut motion_disappeared_in_frame = false;
+            let mut paused_cptv_recording_with_static_target_in_frame = false;
+            let mut frames_written = 0;
+
             loop {
                 let input = sio.fifo.read_blocking();
+                //info!("Core1 got frame");
                 crate::debug_assert_eq!(
                     input,
                     CORE1_TASK_START_WITH_FULL_FRAME,
@@ -317,52 +422,74 @@ fn main() -> ! {
                         unsafe {
                             // Write the slice length to read
                             LittleEndian::write_u32(
-                                &mut FRAME_BUFFER[0..4],
+                                &mut buffer[0..4],
                                 0x2 << 28 | FRAME_LENGTH as u32,
                             );
                             let start = seg_num * slice.len();
                             let end = start + slice.len();
-                            let frame_buffer = &mut FRAME_BUFFER[4..];
+                            let frame_buffer = &mut buffer[4..];
                             frame_buffer[start..end].copy_from_slice(slice);
                         }
                     }
                 });
 
-                pi_ping.set_high().unwrap();
-                pi_ping.set_low().unwrap();
+                // let tx_transfer = if raspberry_pi_is_awake {
+                //     // Prime pi for receiving some bytes
+                //     pi_ping.set_high().unwrap();
+                //     pi_ping.set_low().unwrap();
+                //
+                //     // Write the frame to the raspberry pi if it's awake
+                //     let tx_transfer = single_buffer::Config::new(
+                //         dma_ch0,
+                //         unsafe { any_as_u32_slice(buffer) },
+                //         tx,
+                //     )
+                //     .start();
+                //     Some(tx_transfer)
+                // } else {
+                //     None
+                // };
+                // TODO: Add the frame to the current CPTV encode
 
-                let tx_transfer = single_buffer::Config::new(
-                    dma_ch0,
-                    unsafe { any_as_u32_slice(&FRAME_BUFFER) },
-                    tx,
-                )
-                .start();
+                // TODO: Reserve next free page in storage for the cptv header, which will be written out
+                // after the rest of the file.
+                let should_start_new_recording =
+                    !motion_has_triggered && this_frame_has_motion && cptv_stream.is_none();
+                let should_end_current_recording = ((motion_left_frame
+                    && five_seconds_have_passed_since_motion_left_frame)
+                    || (motion_disappeared_in_frame
+                        && thirty_seconds_have_passed_since_motion_disappeared_in_frame))
+                    && cptv_stream.is_some();
 
-                let mut motion_has_triggered = false;
-                let mut this_frame_has_motion = true;
-                let mut cptv_file = false;
+                let raw_frame = unsafe { u8_slice_to_u16(&buffer[644..]) }; // Telemetry + 4 byte header skipped
 
-                let mut motion_left_frame = false;
-                let mut five_seconds_have_passed_since_motion_left_frame = false;
-                let mut thirty_seconds_have_passed_since_motion_disappeared_in_frame = false;
-                let mut motion_disappeared_in_frame = false;
-                let mut paused_cptv_recording_with_static_target_in_frame = false;
-
-                if !motion_has_triggered && this_frame_has_motion {
+                //crate::assert_ne!(should_start_new_recording, should_end_current_recording);
+                if should_start_new_recording && frames_written < 50 {
+                    error!("Starting new recording");
                     motion_has_triggered = true;
                     // Begin cptv file
+                    // TODO: Record the current time when recording starts
 
+                    // TODO: Pass in various cptv header info bits.
+                    cptv_stream = Some(CptvStream::new(0, &mut flash_storage));
+                    info!("Created CPTV stream");
                     // Write out the cptv header, with placeholders, then write out the previous
-                    // frame and the current frame.  Going dormant on the main thread gets turned off.
+                    // frame and the current frame.  Going dormant on the main thread gets turned off?  Maybe, we'll see
                 }
-                if (motion_left_frame && five_seconds_have_passed_since_motion_left_frame)
-                    || (motion_disappeared_in_frame
-                        && thirty_seconds_have_passed_since_motion_disappeared_in_frame)
-                {
-                    // Stop writing out frame, end frame write,
-                    // go back to trigger active mode, going dormant in between frames
-                    // Re-write cptv header in place with min/max/total frames, updated CRC32
-                    // We know exactly how big the CPTV header is as an uncompressed block.
+                if let Some(cptv_stream) = &mut cptv_stream {
+                    // TODO: double buffer prev/current raw frames?
+                    // At this point, do we really even want two cores running in tandem?
+                    pi_ping.set_high().unwrap();
+                    cptv_stream.push_frame(raw_frame, &mut flash_storage);
+                    pi_ping.set_low().unwrap();
+                    frames_written += 1;
+                }
+                if should_end_current_recording || frames_written == 500 {
+                    if let Some(cptv_stream) = &mut cptv_stream {
+                        error!("Ending current recording");
+                        cptv_stream.finalise(&mut flash_storage);
+                    }
+                    cptv_stream = None;
                 }
                 // TODO: Encode and transfer to flash.  If rpi is awake, also transfer to rpi?
 
@@ -370,9 +497,11 @@ fn main() -> ! {
                 // structures can be shared with encoding.
 
                 // Wait on the DMA transfer to the Pi.  In the future we can be doing other work here while we wait.
-                let (ch0, _, tx_ret) = tx_transfer.wait();
-                tx = tx_ret;
-                dma_ch0 = ch0;
+                // if let Some(tx_transfer) = tx_transfer {
+                //     let (ch0, _, tx_ret) = tx_transfer.wait();
+                //     tx = tx_ret;
+                //     dma_ch0 = ch0;
+                // }
                 sio.fifo.write(CORE1_TASK_COMPLETE);
             }
         });
@@ -400,7 +529,6 @@ fn main() -> ! {
         pins.gpio23.into_mode(),
         pins.gpio19.into_mode(),
         pins.gpio18.into_push_pull_output(), // Production P2 board
-        // pins.gpio4.into_push_pull_output(), // Dev test board
         pins.gpio28.into_push_pull_output(),
         pins.gpio29.into_push_pull_output(),
         pins.gpio27.into_push_pull_output(),
@@ -421,12 +549,12 @@ fn main() -> ! {
         .vsync
         .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
 
-    // NOTE: Pre-production board, this should be gpio1
-    // let mut wake_interrupt_pin = pins.gpio1.into_floating_input();
-    // NOTE: On production board, this should be gpio4
-    let mut wake_interrupt_pin = pins.gpio4.into_floating_input();
+    //let mut wake_interrupt_pin = pins.gpio4.into_floating_input();
+    let mut wake_interrupt_pin = pins.gpio4.into_push_pull_output();
+    wake_interrupt_pin.set_low().unwrap();
 
     let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
+    info!("Radiometry enabled? {}", radiometric_mode);
     let result = sio.fifo.read_blocking();
     crate::debug_assert_eq!(result, CORE1_TASK_READY);
     sio.fifo
@@ -547,6 +675,7 @@ fn main() -> ! {
                 if packet_id == 0 {
                     prev_packet_id = -1;
                     started_segment = true;
+                    wake_interrupt_pin.set_high().unwrap();
                     // If we don't know, always start at segment 1 so that things will be
                     // written out.
                     if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
@@ -645,7 +774,6 @@ fn main() -> ! {
                             &mut FRAME_SEGMENT_BUFFER.get_front().borrow_ref_mut(cs)[segment_index];
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
                         //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
-                        // NOTE: We want LittleEndian for our purposes, but for emulating `leptond` it's big endian
                         BigEndian::write_u16_into(
                             &scanline_buffer[2..],
                             frame_seg.packet(packet_id as usize),
@@ -690,6 +818,7 @@ fn main() -> ! {
 
                             attempt = 0;
                             prev_frame_needs_transfer = true;
+                            wake_interrupt_pin.set_low().unwrap();
                         } else {
                             // Increment in good faith if we're on the last packet of a valid segment
                             valid_frame_current_segment_num += 1;
@@ -739,60 +868,86 @@ fn main() -> ! {
                 prev_packet_id = packet_id;
 
                 // Check if the previous frame is has finished transferring.
+                // if transferring_prev_frame {
+                //     if let Some(message) = sio.fifo.read() {
+                //         if message == START_TIMER {
+                //             let mut count = 0u32;
+                //             while sio.fifo.read().is_none() {
+                //                 count += 1;
+                //             }
+                //             sio.fifo.write(count);
+                //         } else if message == CORE1_TASK_COMPLETE {
+                //             transferring_prev_frame = false;
+                //             prev_frame_needs_transfer = false;
+                //         }
+                //     }
+                // }
                 if transferring_prev_frame {
-                    if let Some(core_1_completed) = sio.fifo.read() {
-                        if core_1_completed == CORE1_TASK_COMPLETE {
+                    // TODO: Shouldn't we block and wait for core1 to complete?
+
+                    if let Some(message) = sio.fifo.read() {
+                        if message == CORE1_TASK_COMPLETE {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
                         }
                     }
+
+                    // let message = sio.fifo.read_blocking();
+                    // if message == CORE1_TASK_COMPLETE {
+                    //     transferring_prev_frame = false;
+                    //     prev_frame_needs_transfer = false;
+                    // }
                 }
             }
         }
 
-        // TOOD Check when can't get frames from lepton also.
+        // TODO Check when can't get frames from lepton also.
 
         // Run `i2cset -y 1 0x25 0x02 0x03` on the pi to make it look like the RPi is powered off.
         // Run `i2cset -y 1 0x25 0x02 0x01` on the pi to make it look like the RPi is powered on.
         // Note that those you will want to have the RPi powered separately.
-        if i2c_poll_counter >= 20 {
-            i2c_poll_counter = 0;
-            let address = 0x25;
-            let write_buffer: [u8; 1] = [0x02];
-            if let Err(e) = i2c.write(address, &write_buffer) {
-                error!("I2C write error: {:?}", e);
-            } else {
-                let mut read_buffer: [u8; 1] = [0; 1];
-                if let Err(e) = i2c.read(address, &mut read_buffer) {
-                    error!("I2C read error: {:?}", e);
-                }
-
-                if read_buffer[0] == 0x03 {
-                    info!("Powering off");
-
-                    info!("Lets skip that for now, so we can get some logs...");
-                    /*
-                    // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
-                    // TODO: Are there any other pins we need to set low?
-                    lepton.power_down_sequence(&mut delay);
-                    rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
-                    lepton.power_on_sequence(&mut delay);
-                    lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-                    lepton
-                        .vsync
-                        .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
-                    got_sync = false;
-                    continue 'frame_loop;
-                    */
-                }
-            }
-        }
-        i2c_poll_counter += 1;
+        // if i2c_poll_counter >= 20 {
+        //     i2c_poll_counter = 0;
+        //     let address = 0x25;
+        //     let write_buffer: [u8; 1] = [0x02];
+        //     if let Err(e) = i2c.write(address, &write_buffer) {
+        //         error!("I2C write error: {:?}", e);
+        //     } else {
+        //         let mut read_buffer: [u8; 1] = [0; 1];
+        //         if let Err(e) = i2c.read(address, &mut read_buffer) {
+        //             error!("I2C read error: {:?}", e);
+        //         }
+        //
+        //         if read_buffer[0] == 0x03 {
+        //             info!("Powering off");
+        //
+        //             info!("Lets skip that for now, so we can get some logs...");
+        //             /*
+        //             // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
+        //             // TODO: Are there any other pins we need to set low?
+        //             lepton.power_down_sequence(&mut delay);
+        //             rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
+        //             lepton.power_on_sequence(&mut delay);
+        //             lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+        //             lepton
+        //                 .vsync
+        //                 .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
+        //             got_sync = false;
+        //             continue 'frame_loop;
+        //             */
+        //         }
+        //     }
+        // }
+        // i2c_poll_counter += 1;
 
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
         if !transferring_prev_frame && current_segment_num == 3 {
+            wake_interrupt_pin.set_low().unwrap();
             rosc = go_dormant_until_next_vsync(rosc, &mut lepton, measured_rosc_frequency);
+            wake_interrupt_pin.set_high().unwrap();
+        } else if current_segment_num == 3 {
+            //warn!("Overrunning frame time");
         }
     }
 }
