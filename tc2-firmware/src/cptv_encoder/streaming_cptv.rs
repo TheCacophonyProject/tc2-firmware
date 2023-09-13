@@ -1,16 +1,16 @@
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HUFFMAN_TABLE;
+use crate::cptv_encoder::streaming_cptv::FieldType::PreviewSecs;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::onboard_flash::OnboardFlash;
-use crate::utils::{
-    any_as_u32_slice, any_as_u8_slice, i32_slice_to_u8, u16_slice_to_u8, u16_slice_to_u8_mut,
-    u8_slice_to_u16,
-};
+use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
 use core::ops::{Index, IndexMut};
-use defmt::export::u16;
 use defmt::info;
+use embedded_hal::digital::v2::OutputPin;
+use rp2040_hal::gpio::bank0::{Gpio4, Gpio5};
+use rp2040_hal::gpio::{Pin, PushPullOutput};
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -479,16 +479,16 @@ impl CptvStream {
     }
 
     pub fn init(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
-        let gzip_header = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff];
+        let gzip_header: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff];
         let (block_index, page_index) = if at_header_location {
-            (Some(self.starting_block_index as usize), Some(0usize))
+            (Some(self.starting_block_index as isize), Some(0isize))
         } else {
             (None, None)
         };
+
         for byte in gzip_header {
-            let needs_flush = self.cursor.write_byte(byte);
-            if needs_flush {
-                let (to_flush, num_bytes) = self.cursor.flush();
+            self.cursor.write_bits_fast(byte as u32, 8);
+            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(
                     to_flush,
                     num_bytes,
@@ -498,9 +498,10 @@ impl CptvStream {
                 );
             }
         }
+
         for byte in &STATIC_HUFFMAN_AND_BLOCK_HEADER[..STATIC_HUFFMAN_AND_BLOCK_HEADER.len() - 1] {
-            if self.cursor.write_byte(*byte) {
-                let (to_flush, num_bytes) = self.cursor.flush();
+            self.cursor.write_bits_fast(*byte as u32, 8);
+            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(
                     to_flush,
                     num_bytes,
@@ -510,16 +511,22 @@ impl CptvStream {
                 );
             }
         }
-        if self.cursor.write_bits(
+        self.cursor.write_bits_fast(
             STATIC_HUFFMAN_AND_BLOCK_HEADER[STATIC_HUFFMAN_AND_BLOCK_HEADER.len() - 1] as u32,
             5,
-        ) {
-            let (to_flush, num_bytes) = self.cursor.flush();
+        );
+        if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
             flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
         }
     }
 
-    pub fn push_frame(&mut self, raw_frame: &[u16], flash_storage: &mut OnboardFlash) {
+    pub fn push_frame(
+        &mut self,
+        raw_frame: &[u16],
+        flash_storage: &mut OnboardFlash,
+        pin: &mut Pin<Gpio5, PushPullOutput>,
+        pin2: &mut Pin<Gpio4, PushPullOutput>,
+    ) {
         let mut scratch = [0i32; FRAME_WIDTH * FRAME_HEIGHT];
         let frame_header = CptvFrameHeader::new();
         let (min, max, bits_per_pixel, frame_iter) = push_frame_iterator(
@@ -528,6 +535,7 @@ impl CptvStream {
             &mut self.prev_frame,
             &mut scratch,
             self.cptv_header.total_frame_count as i32,
+            pin2,
         );
         self.cptv_header.min_value = self.cptv_header.min_value.min(min);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max);
@@ -548,7 +556,9 @@ impl CptvStream {
                 self.cursor
                     .write_bits_fast(entry.code as u32, entry.bits as u32);
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+                    pin.set_high().unwrap();
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
+                    pin.set_low().unwrap();
                 }
             }
             let frame_size = 4 + (((FRAME_HEIGHT * FRAME_WIDTH) - 1) * (bits_per_pixel / 8));
@@ -568,7 +578,9 @@ impl CptvStream {
                     .write_bits_fast(entry.code as u32, entry.bits as u32);
                 // TODO: Do we need to somehow do this async to keep times down?
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+                    pin.set_high().unwrap();
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
+                    pin.set_low().unwrap();
                 }
             }
         }
@@ -577,7 +589,7 @@ impl CptvStream {
 
     fn write_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
         let (block_index, page_index) = if at_header_location {
-            (Some(self.starting_block_index as usize), Some(0usize))
+            (Some(self.starting_block_index as isize), Some(0isize))
         } else {
             (None, None)
         };
@@ -623,7 +635,14 @@ impl CptvStream {
         }
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
-        flash_storage.append_file_bytes(to_flush, num_bytes, true, block_index, page_index);
+
+        flash_storage.append_file_bytes(
+            to_flush,
+            num_bytes,
+            !at_header_location,
+            block_index,
+            page_index,
+        );
     }
     pub fn finalise(&mut self, flash_storage: &mut OnboardFlash) {
         self.write_trailer(flash_storage, false);
@@ -641,8 +660,11 @@ impl CptvStream {
                 ^ (self.crc_val >> 8);
             self.crc_val = self.crc_val ^ 0xffffffff;
             let entry = &HUFFMAN_TABLE[byte as usize];
-            let needs_flush = self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-            assert_ne!(needs_flush, true);
+            self.cursor
+                .write_bits_fast(entry.code as u32, entry.bits as u32);
+            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+                flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
+            }
         }
         self.write_trailer(flash_storage, true);
     }
@@ -668,9 +690,12 @@ pub fn push_frame_iterator<'a>(
     prev_frame: &'a mut [u16],
     scratch: &'a mut [i32],
     frame_num: i32,
+    pin2: &mut Pin<Gpio4, PushPullOutput>,
 ) -> (u16, u16, usize, impl Iterator<Item = u8> + 'a) {
+    pin2.set_high().unwrap();
     let (bits_per_pixel, max_value, min_value) =
         delta_encode_frame_data(prev_frame, frame, scratch);
+    pin2.set_low().unwrap();
     (
         min_value,
         max_value,

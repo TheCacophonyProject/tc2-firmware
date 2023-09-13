@@ -7,7 +7,7 @@ const META_BUFFER_LENGTH: usize = 128;
 // Total buffer length is the same as a single page to be written to our onboard nand flash.
 // LZ encoding only uses the first 2048 bytes, which is the user data section.  Other meta data
 // is written in the remaining 128 bytes.
-const BUFFER_LENGTH: usize = PAGE_COMMAND_ADDRESS + USER_BUFFER_LENGTH + META_BUFFER_LENGTH;
+const BUFFER_LENGTH: usize = PAGE_COMMAND_ADDRESS + 2112; //USER_BUFFER_LENGTH + META_BUFFER_LENGTH;
 type PageBuffer = [u8; BUFFER_LENGTH];
 pub struct BitCursor {
     //unused_bits: u16,
@@ -15,7 +15,7 @@ pub struct BitCursor {
     accumulator: u32,
     cursor: usize,
     front: u8,
-    buffer: PageBuffer,
+    pub buffer: PageBuffer,
     bytes_flushed: usize,
 }
 
@@ -39,12 +39,13 @@ impl BitCursor {
     }
 
     #[inline(always)]
-    pub fn write_byte(&mut self, value: u8) -> bool {
-        self.write_bits(value as u32, 8)
+    pub fn write_byte(&mut self, value: u8) {
+        self.write_bits_fast(value as u32, 8)
     }
 
+    #[inline(always)]
     pub fn write_bits_fast(&mut self, bits: u32, len: u32) {
-        self.accumulator |= bits << self.used_bits;
+        self.accumulator |= bits.overflowing_shl(self.used_bits).0;
         self.used_bits += len;
     }
 
@@ -136,7 +137,7 @@ impl BitCursor {
     pub fn unused_bits(&self) -> u32 {
         32 - self.used_bits
     }
-    pub fn flush<'a>(&'a mut self) -> (&'a mut PageBuffer, usize) {
+    pub fn flush(&mut self) -> (&mut PageBuffer, usize) {
         let num_bytes = self.cursor;
         self.bytes_flushed += self.cursor;
         self.cursor = 0;

@@ -1,5 +1,4 @@
 mod bit_cursor;
-pub mod deflate;
 pub mod huffman;
 pub mod streaming_cptv;
 
