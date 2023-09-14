@@ -556,33 +556,7 @@ impl OnboardFlash {
         self.spi.cs.set_low().unwrap();
         self.spi.spi.transfer(bytes).unwrap();
         self.spi.cs.set_high().unwrap();
-        //self.wait_for_ready();
     }
-
-    pub fn read_page_from_cache_2(&mut self, dest: &mut [u8], block: isize) {
-        let plane = (block % 2 << 4) as u8;
-        dest[0] = CACHE_READ;
-        dest[1] = plane;
-        dest[2] = 0;
-        dest[3] = 0;
-        self.wait_for_cache_ready();
-        self.spi.cs.set_low().unwrap();
-        self.spi.spi.transfer(dest).unwrap();
-        self.spi.cs.set_high().unwrap();
-        self.wait_for_cache_ready();
-    }
-
-    // fn get_block_and_page(bytes: &[u8]) -> (usize, usize) {
-    //     let address = BigEndian::read_u32(&[0, bytes[0], bytes[1], bytes[2]]);
-    //     let block_index = address >> 6;
-    //     let page_index = address & 0b0011_1111;
-    //     (block_index as usize, page_index as usize)
-    // }
-    //
-    // fn get_column_index(bytes: &[u8]) -> usize {
-    //     let address = BigEndian::read_u32(&[0, bytes[0], bytes[1], bytes[2]]);
-    //     (address & 0b1111_1111_1111) as usize
-    // }
     pub fn spi_write(&mut self, bytes: &[u8]) {
         self.spi.cs.set_low().unwrap();
         self.spi.spi.write(bytes).unwrap();
@@ -594,15 +568,6 @@ impl OnboardFlash {
         self.spi_transfer(&mut features);
         info!("Feature {}: {:08b}", name, features[2]);
     }
-
-    // pub fn reset(&mut self, delay: &mut Delay) {
-    //     info!("Resetting onboard flash");
-    //     self.spi_write(&[RESET]);
-    //     // After issuing reset, must wait at least 1.25ms
-    //     delay.delay_us(1500);
-    //     self.spi_wait_for_ready();
-    //     info!("Onboard flash ready");
-    // }
 
     fn write_enabled(&mut self) -> bool {
         let mut features: [u8; 3] = [GET_FEATURES, FEATURE_STATUS, 0x00];
