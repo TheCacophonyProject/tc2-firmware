@@ -74,17 +74,17 @@ pub struct OnboardFlashStatus {
     inner: u8,
 }
 
-struct EccStatus {
-    okay: bool,
+pub struct EccStatus {
+    pub okay: bool,
     should_relocate: bool,
 }
 
 impl OnboardFlashStatus {
-    fn cache_read_busy(&self) -> bool {
+    pub fn cache_read_busy(&self) -> bool {
         self.inner & 0b1000_0000 != 0
     }
 
-    fn ecc_status(&self) -> EccStatus {
+    pub fn ecc_status(&self) -> EccStatus {
         // TODO: return relocation info?
         let ecc_bits = (self.inner >> 4) & 0b0000_0111;
         match ecc_bits {
@@ -100,7 +100,7 @@ impl OnboardFlashStatus {
                 }
             }
             2 => {
-                error!("ECC error - uncorrectable error, data corrupted!");
+                //error!("ECC error - uncorrectable error, data corrupted!");
                 EccStatus {
                     okay: false,
                     should_relocate: true,
@@ -136,7 +136,7 @@ impl OnboardFlashStatus {
         self.inner & 0b0000_0010 != 0
     }
 
-    fn operation_in_progress(&self) -> bool {
+    pub fn operation_in_progress(&self) -> bool {
         self.inner & 0b0000_0001 != 0
     }
 }
@@ -255,7 +255,7 @@ impl OnboardFlash {
         flash_storage.reset();
         //flash_storage.scan();
         flash_storage.unlock_blocks();
-        let erase = false;
+        let erase = true;
         if erase {
             info!("Erasing");
             for block in 0..2048 {
@@ -289,7 +289,7 @@ impl OnboardFlash {
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
             self.read_page(block_index, 0).unwrap();
-            self.read_page_from_cache();
+            self.read_page_from_cache(block_index);
             if self.current_page.is_part_of_bad_block() {
                 warn!("Found bad block {}", block_index);
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
@@ -386,7 +386,7 @@ impl OnboardFlash {
                 continue;
             }
             self.read_page(block_index, 0).unwrap();
-            self.read_page_from_cache();
+            self.read_page_from_cache(block_index);
             if self.current_page.page_is_used() {
                 println!("Erasing used block {}", block_index);
                 self.erase_block(block_index).unwrap();
@@ -402,21 +402,17 @@ impl OnboardFlash {
     }
     pub fn write_enable(&mut self) {
         self.spi_write(&[WRITE_ENABLE]);
-        //self.wait_for_ready();
     }
     pub fn erase_block(&mut self, block_index: isize) -> Result<(), &str> {
         self.write_enable();
         let address = OnboardFlash::get_address(block_index, 0);
-        //warn!("Erase {}:0, -> {:?}", block_index, address);
-
         self.spi_write(&[BLOCK_ERASE, address[0], address[1], address[2]]);
-        self.wait_for_ready();
-        if self.get_status().erase_failed() {
+        let status = self.wait_for_ready();
+        if status.erase_failed() {
             Err(&"Block erase failed")
         } else {
             Ok(())
         }
-        // TODO: Book-keep used pages/blocks etc.
     }
 
     pub fn get_file_part(&mut self, pin: &mut Pin<Gpio5, PushPullOutput>) -> Option<(&[u8], bool)> {
@@ -426,7 +422,7 @@ impl OnboardFlash {
             .is_ok()
         {
             pin.set_high().unwrap();
-            self.read_page_from_cache();
+            self.read_page_from_cache(self.current_block_index);
             pin.set_low().unwrap();
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
@@ -459,7 +455,7 @@ impl OnboardFlash {
         self.spi.cs.set_high().unwrap();
     }
 
-    fn get_status(&mut self) -> OnboardFlashStatus {
+    pub fn get_status(&mut self) -> OnboardFlashStatus {
         let mut features: [u8; 3] = [GET_FEATURES, FEATURE_STATUS, 0x00];
         self.spi_transfer(&mut features);
         OnboardFlashStatus { inner: features[2] }
@@ -491,8 +487,8 @@ impl OnboardFlash {
 
     pub fn get_address(block: isize, page: isize) -> [u8; 3] {
         // 11 bits for block, 6 bits for page
-        let address: u32 = (block as u32) << 6 | page as u32;
-        [(address >> 16) as u8, address as u8, (address >> 8) as u8]
+        let address: u32 = ((block as u32) << 6 | page as u32);
+        [(address >> 16) as u8, (address >> 8) as u8, (address) as u8]
     }
     pub fn read_page(&mut self, block: isize, page: isize) -> Result<(), &str> {
         assert!(block < 2048, "Invalid block");
@@ -550,10 +546,11 @@ impl OnboardFlash {
         }
     }
 
-    pub fn read_page_from_cache(&mut self) {
+    pub fn read_page_from_cache(&mut self, block: isize) {
+        let plane = (block % 2 << 4) as u8;
         let bytes = self.current_page.page_mut();
         bytes[0] = CACHE_READ;
-        bytes[1] = 0;
+        bytes[1] = plane;
         bytes[2] = 0;
         bytes[3] = 0;
         self.spi.cs.set_low().unwrap();
@@ -562,9 +559,10 @@ impl OnboardFlash {
         //self.wait_for_ready();
     }
 
-    pub fn read_page_from_cache_2(&mut self, dest: &mut [u8]) {
+    pub fn read_page_from_cache_2(&mut self, dest: &mut [u8], block: isize) {
+        let plane = (block % 2 << 4) as u8;
         dest[0] = CACHE_READ;
-        dest[1] = 0;
+        dest[1] = plane;
         dest[2] = 0;
         dest[3] = 0;
         self.wait_for_cache_ready();

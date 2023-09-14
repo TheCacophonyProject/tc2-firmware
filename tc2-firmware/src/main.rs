@@ -290,30 +290,96 @@ fn main() -> ! {
         // let len = t.len();
 
         //flash_storage.append_file_bytes(&mut t, len, false, Some(0), Some(0));
-        // let start = 5;
-        // flash_storage.write_enable();
-        // flash_storage.spi_write(&[PROGRAM_LOAD, 0, 0, b'H', b'e', b'l', b'l', b'o']);
-        // let address = OnboardFlash::get_address(start, 0);
-        // println!("Address {:?}", address);
-        // flash_storage.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-        // flash_storage.wait_for_all_ready();
-        // // flash_storage.reset();
-        // //flash_storage.wait_for_all_ready();
-        // //flash_storage.read_page(start + 1, 0).unwrap();
-        //
-        // //flash_storage.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
-        // let address = OnboardFlash::get_address(start + 1, 0);
-        // flash_storage.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
-        // //flash_storage.read_page_cache_random(start + 1, 1).unwrap();
-        // let mut buf = [255u8; 10];
-        // flash_storage.wait_for_all_ready();
-        // flash_storage.read_page_from_cache_2(&mut buf);
-        // flash_storage.wait_for_all_ready();
-        // //flash_storage.read_page_last().unwrap();
-        // info!("User data {:?}", buf);
-        // //let mut buf = [255u8; 10];
-        //flash_storage.read_page_from_cache_2(&mut buf);
-        //info!("User data {:?}", buf);
+        for block in 0..2048 {
+            for page in 0..64 {
+                let address = OnboardFlash::get_address(block, page);
+                info!("Writing ({}:{}), at {:?}", block, page, address);
+                flash_storage.write_enable();
+                let plane = ((block % 2) << 4) as u8;
+                flash_storage.spi_write(&[
+                    PROGRAM_LOAD,
+                    plane,
+                    0,
+                    b'H',
+                    b'e',
+                    b'l',
+                    b'l',
+                    b'o',
+                    (block << 8) as u8,
+                    block as u8,
+                    page as u8,
+                ]);
+                flash_storage.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+                flash_storage.wait_for_all_ready();
+                info!(
+                    "Reading ({}:{}) at {:?}, [{:#010b}, {:#010b}, {:#010b}]",
+                    block, page, address, address[0], address[1], address[2]
+                );
+                flash_storage.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
+                let mut status = flash_storage.get_status();
+                while status.operation_in_progress() || status.cache_read_busy() {
+                    status = flash_storage.get_status();
+                }
+                if !status.ecc_status().okay {
+                    error!("ECC error?");
+                }
+
+                // TODO: Experiment with putting 1s in the 7 dummy bits at the end/beginning, and see
+                //  if that helps to work things out
+
+                // FIXME - It's the plane select that I didn't understand!
+
+                let mut buf = [255u8; 12];
+                flash_storage.read_page_from_cache_2(&mut buf, block);
+                crate::assert_eq!(buf[0], 0);
+                crate::assert_eq!(buf[1], 0);
+                crate::assert_eq!(buf[2], 0);
+                crate::assert_eq!(buf[3], 0);
+                crate::assert_eq!(buf[4], b'H');
+                crate::assert_eq!(buf[5], b'e');
+                crate::assert_eq!(buf[6], b'l');
+                crate::assert_eq!(buf[7], b'l');
+                crate::assert_eq!(buf[8], b'o');
+                crate::assert_eq!(buf[9], (block << 8) as u8);
+                crate::assert_eq!(buf[10], block as u8);
+                crate::assert_eq!(buf[11], page as u8);
+                let address = OnboardFlash::get_address((block + 1).min(2047), page);
+                info!(
+                    "Reading ({}:{}) at {:?}, [{:#010b}, {:#010b}, {:#010b}]",
+                    (block + 1).min(2047),
+                    page,
+                    address,
+                    address[0],
+                    address[1],
+                    address[2]
+                );
+                flash_storage.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
+                let mut status = flash_storage.get_status();
+                while status.operation_in_progress() || status.cache_read_busy() {
+                    status = flash_storage.get_status();
+                }
+                if !status.ecc_status().okay {
+                    error!("ECC error?");
+                }
+
+                let mut buf = [255u8; 12];
+                flash_storage.read_page_from_cache_2(&mut buf, (block + 1).min(2047));
+                crate::assert_eq!(buf[0], 0);
+                crate::assert_eq!(buf[1], 0);
+                crate::assert_eq!(buf[2], 0);
+                crate::assert_eq!(buf[3], 0);
+                crate::assert_eq!(buf[4], 255, "{}/{}, {}", buf[9], buf[10], buf[11]);
+                crate::assert_eq!(buf[5], 255);
+                crate::assert_eq!(buf[6], 255);
+                crate::assert_eq!(buf[7], 255);
+                crate::assert_eq!(buf[8], 255);
+                crate::assert_eq!(buf[9], 255);
+                crate::assert_eq!(buf[10], 255);
+                crate::assert_eq!(buf[11], 255);
+                //info!("User data {:?}", buf);
+            }
+        }
+
         /*info!(
             "User meta {:?}",
             flash_storage.current_page.user_metadata_1()[0..10]
@@ -390,7 +456,7 @@ fn main() -> ! {
             "Finished scan, needs offload? {}",
             flash_storage.has_files_to_offload()
         );
-        //crate::unreachable!("Foo");
+        crate::unreachable!("Foo");
 
         let mut pi_ping = pins.gpio5.into_push_pull_output();
         let mut wake_interrupt_pin = pins.gpio4.into_push_pull_output();
@@ -474,7 +540,7 @@ fn main() -> ! {
                 if !raspberry_pi_is_awake {
                     wake_raspberry_pi();
                 }
-                if raspberry_pi_is_awake {
+                if true || raspberry_pi_is_awake {
                     // do some offloading.
                     // TODO: Seems like we really want double buffering here.
                     let mut file_count = 0;
@@ -503,6 +569,8 @@ fn main() -> ! {
                         if is_last {
                             file_count += 1;
                             file_start = true;
+                        } else {
+                            file_start = false;
                         }
                     }
                     info!("Offloaded {} files", file_count);
@@ -532,7 +600,7 @@ fn main() -> ! {
             sio.fifo.write_blocking(CORE1_TASK_READY);
             pi_ping.set_low().unwrap();
             let mut motion_has_triggered = false;
-            let mut this_frame_has_motion = false;
+            let mut this_frame_has_motion = true;
             let mut cptv_stream: Option<CptvStream> = None;
 
             let mut motion_left_frame = false;
