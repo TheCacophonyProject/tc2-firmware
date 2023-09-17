@@ -14,7 +14,7 @@ use rp2040_hal::gpio::PinId;
 use crate::bsp::hal::gpio::bank0::{Gpio16, Gpio17, Gpio18, Gpio19, Gpio2, Gpio20, Gpio21, Gpio22, Gpio23, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29, Gpio4};
 use crate::bsp::hal::gpio::{Pins, PullDown, PullDownInput};
 use crate::bsp::hal::{pac, Sio, Timer};
-use crate::bsp::hal::gpio::{FloatingInput, FunctionSpi, Interrupt, Output, PushPull};
+use crate::bsp::hal::gpio::{FloatingInput, FunctionSpi, Interrupt, Input, Floating, Output, PushPull};
 use crate::bsp::hal::spi::Enabled;
 use crate::bsp::hal::{Spi, I2C as I2CInterface};
 use crate::bsp::pac::SPI0;
@@ -228,7 +228,7 @@ pub struct Lepton<T:PinId> {
     power_down: Pin<Gpio28, Output<PushPull>>,
     reset: Pin<Gpio29, Output<PushPull>>,
     pub clk_disable: Pin<Gpio27, Output<PushPull>>,
-    master_clk: Pin<Gpio26, Output<PushPull>>,
+    master_clk: Pin<Gpio26, Input<Floating>>,
 }
 
 #[repr(C)]
@@ -309,7 +309,7 @@ impl<T:PinId> Lepton<T> {
         power_down: Pin<Gpio28, Output<PushPull>>,
         reset: Pin<Gpio29, Output<PushPull>>,
         clk_disable: Pin<Gpio27, Output<PushPull>>,
-        master_clk: Pin<Gpio26, Output<PushPull>>,
+        master_clk: Pin<Gpio26, Input<Floating>>,
     ) -> Lepton<T> {
         Lepton {
             spi: LeptonSpi {
@@ -834,6 +834,7 @@ impl<T:PinId> Lepton<T> {
     }
 
     pub fn power_on(&mut self, delay: &mut Delay) {
+        info!("power on");
         self.power_enable.set_low().unwrap();
         delay.delay_ms(100);
         self.clk_disable.set_low().unwrap();
@@ -843,6 +844,7 @@ impl<T:PinId> Lepton<T> {
 
     // Page 18 https://www.flir.com/globalassets/imported-assets/document/flir-lepton-engineering-datasheet.pdf
     pub fn start_up_sequence(&mut self, delay: &mut Delay) {
+        info!("start up sequence");
         self.power_down.set_high().unwrap();
         delay.delay_ms(1);
         self.reset.set_low().unwrap();

@@ -351,7 +351,7 @@ fn main() -> ! {
         pins.gpio28.into_push_pull_output(),
         pins.gpio29.into_push_pull_output(),
         pins.gpio27.into_push_pull_output(),
-        pins.gpio26.into_push_pull_output(),
+        pins.gpio26.into_floating_input(),
     );
 
     // TODO: When going dormant, can we make sure we don't have any gpio pins in a pullup/down mode.
@@ -444,10 +444,15 @@ fn main() -> ! {
     // }
 
     let mut i2c_poll_counter = 0;
+    let mut frame_count = 0;
     'frame_loop: loop {
         if got_sync {
             current_segment_num += 1;
             if current_segment_num > total_segments_including_dummy_frames {
+                frame_count += 1;
+                if frame_count % 9 == 0 {
+                    info!("{} frames", frame_count);
+                }
                 current_segment_num = 1;
             }
         }
