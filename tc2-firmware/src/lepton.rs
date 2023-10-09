@@ -1,30 +1,22 @@
-use byte_slice_cast::AsByteSlice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
 use core::mem;
-use cortex_m::asm::nop;
 use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
 use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
 use defmt::Format;
 use defmt::{info, warn};
-use embedded_hal::digital::v2::{OutputPin, StatefulOutputPin, ToggleableOutputPin};
-use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::gpio::PinId;
+use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::spi::MODE_3;
+use fugit::HertzU32;
+use rp2040_hal::gpio::bank0::{Gpio20, Gpio21, Gpio22, Gpio23};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PinId, PullDown, PullNone, SioInput, SioOutput};
 
-use crate::bsp::hal::gpio::bank0::{
-    Gpio16, Gpio17, Gpio18, Gpio19, Gpio2, Gpio20, Gpio21, Gpio22, Gpio23, Gpio24, Gpio25, Gpio26,
-    Gpio27, Gpio28, Gpio29, Gpio4,
-};
-use crate::bsp::hal::gpio::{FloatingInput, FunctionSpi, Interrupt, Output, PushPull};
-use crate::bsp::hal::gpio::{Pins, PullDown, PullDownInput};
+use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
+use crate::bsp::hal::gpio::FunctionSpi;
 use crate::bsp::hal::spi::Enabled;
-use crate::bsp::hal::{pac, Sio, Timer};
 use crate::bsp::hal::{Spi, I2C as I2CInterface};
-use crate::bsp::pac::SPI0;
-use crate::bsp::{
-    hal::gpio::{Function, Pin, I2C},
-    pac::I2C0,
-};
+use crate::bsp::pac::{RESETS, SPI0};
+use crate::bsp::{hal::gpio::Pin, pac::I2C0};
 use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 
 pub enum LeptonCommandType {
@@ -206,31 +198,37 @@ impl LeptonError {
     }
 }
 
-pub type LeptonCciI2c =
-    I2CInterface<I2C0, (Pin<Gpio24, Function<I2C>>, Pin<Gpio25, Function<I2C>>)>;
+pub type LeptonCciI2c = I2CInterface<
+    I2C0,
+    (
+        Pin<Gpio24, FunctionI2C, PullDown>,
+        Pin<Gpio25, FunctionI2C, PullDown>,
+    ),
+>;
 
-type VsyncPin = Pin<Gpio19, FloatingInput>;
-pub struct LeptonCCI {
-    i2c: LeptonCciI2c,
-}
-
-pub struct LeptonSpi {
-    spi: Spi<Enabled, SPI0, 16>,
-    cs: Option<Pin<Gpio21, FunctionSpi>>,
-    sck: Option<Pin<Gpio22, FunctionSpi>>,
-    _rx: Pin<Gpio20, FunctionSpi>,
-    _tx: Pin<Gpio23, FunctionSpi>,
-}
+type VsyncPin = Pin<Gpio19, FunctionSio<SioInput>, PullDown>;
 
 pub struct Lepton<T: PinId> {
-    pub spi: LeptonSpi,
+    pub spi: Option<
+        Spi<
+            Enabled,
+            SPI0,
+            (
+                Pin<Gpio23, FunctionSpi, PullDown>, // TX
+                Pin<Gpio20, FunctionSpi, PullDown>, // RX
+                Pin<Gpio22, FunctionSpi, PullDown>, // SCK
+            ),
+            16,
+        >,
+    >,
+    cs: Option<Pin<Gpio21, FunctionSpi, PullDown>>, // CS
     pub vsync: VsyncPin,
     cci: LeptonCciI2c,
-    power_enable: Pin<T, Output<PushPull>>, //Gpio18
-    power_down: Pin<Gpio28, Output<PushPull>>,
-    reset: Pin<Gpio29, Output<PushPull>>,
-    pub clk_disable: Pin<Gpio27, Output<PushPull>>,
-    master_clk: Pin<Gpio26, Output<PushPull>>,
+    power_enable: Pin<T, FunctionSio<SioOutput>, PullDown>, //Gpio18
+    power_down: Pin<Gpio28, FunctionSio<SioOutput>, PullDown>,
+    reset: Pin<Gpio29, FunctionSio<SioOutput>, PullDown>,
+    pub clk_disable: Pin<Gpio27, FunctionSio<SioOutput>, PullDown>,
+    master_clk: Pin<Gpio26, FunctionSio<SioInput>, PullNone>,
 }
 
 #[repr(C)]
@@ -301,26 +299,27 @@ impl FFCState {
 impl<T: PinId> Lepton<T> {
     pub fn new(
         i2c: LeptonCciI2c,
-        spi: Spi<Enabled, SPI0, 16>,
-        cs: Pin<Gpio21, FunctionSpi>,
-        sck: Pin<Gpio22, FunctionSpi>,
-        rx: Pin<Gpio20, FunctionSpi>,
-        tx: Pin<Gpio23, FunctionSpi>,
+        spi: Spi<
+            Enabled,
+            SPI0,
+            (
+                Pin<Gpio23, FunctionSpi, PullDown>,
+                Pin<Gpio20, FunctionSpi, PullDown>,
+                Pin<Gpio22, FunctionSpi, PullDown>,
+            ),
+            16,
+        >,
+        cs: Pin<Gpio21, FunctionSpi, PullDown>,
         vsync: VsyncPin,
-        power_enable: Pin<T, Output<PushPull>>, // Gpio18
-        power_down: Pin<Gpio28, Output<PushPull>>,
-        reset: Pin<Gpio29, Output<PushPull>>,
-        clk_disable: Pin<Gpio27, Output<PushPull>>,
-        master_clk: Pin<Gpio26, Output<PushPull>>,
+        power_enable: Pin<T, FunctionSio<SioOutput>, PullDown>, // Gpio18
+        power_down: Pin<Gpio28, FunctionSio<SioOutput>, PullDown>,
+        reset: Pin<Gpio29, FunctionSio<SioOutput>, PullDown>,
+        clk_disable: Pin<Gpio27, FunctionSio<SioOutput>, PullDown>,
+        master_clk: Pin<Gpio26, FunctionSio<SioInput>, PullNone>,
     ) -> Lepton<T> {
         Lepton {
-            spi: LeptonSpi {
-                spi,
-                cs: Some(cs),
-                sck: Some(sck),
-                _rx: rx,
-                _tx: tx,
-            },
+            spi: Some(spi),
+            cs: Some(cs),
             vsync,
             power_enable,
             power_down,
@@ -437,7 +436,7 @@ impl<T: PinId> Lepton<T> {
                 LeptonCommandType::Set,
                 true,
             ),
-            0,
+            1,
         );
         if !success.is_ok() {
             warn!("{}", success);
@@ -513,30 +512,39 @@ impl<T: PinId> Lepton<T> {
         )
     }
 
-    pub fn reset_spi(&mut self, delay: &mut Delay, print: bool) {
+    pub fn reset_spi(
+        &mut self,
+        delay: &mut Delay,
+        resets: &mut RESETS,
+        freq: HertzU32,
+        baudrate: HertzU32,
+        print: bool,
+    ) {
         if print {
             info!("Resetting spi");
         }
-        let cs = self.spi.cs.take().unwrap();
-        let mut cs = cs.into_push_pull_output();
-        let sck = self.spi.sck.take().unwrap();
+        let spi = self.spi.take().unwrap();
+        let spi = spi.disable();
+        let (spi, (tx, rx, sck)) = spi.free();
+        let mut cs = self.cs.take().unwrap().into_push_pull_output();
         let mut sck = sck.into_push_pull_output();
         cs.set_high().unwrap();
         sck.set_high().unwrap(); // SCK is high when idle
         delay.delay_ms(200);
         cs.set_low().unwrap();
         sck.set_low().unwrap();
-        let cs = cs.into_mode::<FunctionSpi>();
-        let sck = sck.into_mode::<FunctionSpi>();
-        self.spi.cs = Some(cs);
-        self.spi.sck = Some(sck);
+        self.cs = Some(cs.into_function::<FunctionSpi>());
+        let sck = sck.into_function::<FunctionSpi>();
+
+        self.spi = Some(Spi::new(spi, (tx, rx, sck)).init(resets, freq, baudrate, &MODE_3));
+
         if print {
             info!("Finished resetting spi");
         }
     }
 
     pub fn transfer<'w>(&mut self, words: &'w mut [u16]) -> Result<&'w [u16], Infallible> {
-        return self.spi.spi.transfer(words);
+        return self.spi.as_mut().unwrap().transfer(words);
     }
 
     pub fn wait_for_ffc_status_ready(&mut self, delay: &mut Delay) -> bool {
@@ -1215,4 +1223,42 @@ pub struct SceneStats {
 pub enum TelemetryLocation {
     Header,
     Footer,
+}
+
+#[derive(Debug, Format)]
+pub struct Telemetry {
+    pub frame_num: u32,
+    pub msec_on: u32,
+    pub ffc_in_progress: bool,
+    pub msec_since_last_ffc: u32,
+    pub time_at_last_ffc: u32,
+    pub fpa_temp_c: f32,
+    pub fpa_temp_c_at_last_ffc: f32,
+}
+
+struct CentiK {
+    inner: u16,
+}
+pub fn read_telemetry(buf: &[u8]) -> Telemetry {
+    let frame_num = LittleEndian::read_u32(&buf[40..44]);
+    let msec_on = LittleEndian::read_u32(&buf[2..6]);
+    let time_at_last_ffc = LittleEndian::read_u32(&buf[60..64]);
+    let msec_since_last_ffc = msec_on - time_at_last_ffc;
+    let status_bits = LittleEndian::read_u32(&buf[6..10]);
+    let ffc_state = (status_bits >> 4) & 0b11;
+    let ffc_in_progress = ffc_state == 0b10;
+    let fpa_temp_kelvin_x_100 = LittleEndian::read_u16(&buf[48..=49]);
+    let fpa_temp_kelvin_x_100_at_last_ffc = LittleEndian::read_u16(&buf[58..=59]);
+
+    let fpa_temp_c = (fpa_temp_kelvin_x_100 as f32 / 100.0) - 273.15;
+    let fpa_temp_c_at_last_ffc = (fpa_temp_kelvin_x_100_at_last_ffc as f32 / 100.0) - 273.15;
+    Telemetry {
+        frame_num,
+        msec_on,
+        ffc_in_progress,
+        time_at_last_ffc,
+        msec_since_last_ffc,
+        fpa_temp_c,
+        fpa_temp_c_at_last_ffc,
+    }
 }

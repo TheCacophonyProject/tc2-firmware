@@ -134,7 +134,7 @@ fn increase_freq(rosc: &ROSC) -> bool {
             .iter()
             .min()
             .unwrap_or(&0);
-        for mut stage in &mut stages[num_stages_at_drive_level..] {
+        for stage in &mut stages[num_stages_at_drive_level..] {
             *stage = min;
         }
         write_freq_stages(&rosc, &stages);

@@ -1,16 +1,13 @@
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HUFFMAN_TABLE;
-use crate::cptv_encoder::streaming_cptv::FieldType::PreviewSecs;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
+use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
 use core::ops::{Index, IndexMut};
 use defmt::info;
-use embedded_hal::digital::v2::OutputPin;
-use rp2040_hal::gpio::bank0::{Gpio4, Gpio5};
-use rp2040_hal::gpio::{Pin, PushPullOutput};
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -186,11 +183,8 @@ impl FrameData {
     }
 }
 
-fn delta_encode_frame_data(
-    prev_frame: &mut [u16],
-    curr: &[u16],
-    output: &mut [i32],
-) -> (u8, u16, u16) {
+fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u16) {
+    let mut output = [0i32; FRAME_WIDTH * FRAME_HEIGHT];
     // We need to work out after the delta encoding what the range is, and how many bits we can pack
     // this into.
 
@@ -201,8 +195,8 @@ fn delta_encode_frame_data(
         .cycle()
         .take(FRAME_WIDTH * FRAME_HEIGHT)
         .enumerate()
-        .map(|(index, i)| (index / FRAME_WIDTH) * FRAME_WIDTH + i)
-        .skip(1);
+        .map(|(index, i)| (index / FRAME_WIDTH) * FRAME_WIDTH + i);
+    //.skip(1);
     let mut prev_val = 0;
 
     // IDEA: Images from lepton often seem to have vertical noise bands that are similar
@@ -216,19 +210,28 @@ fn delta_encode_frame_data(
     let mut min_value = u16::MAX;
 
     // NOTE: We can ignore the first pixel when working out our range, since that is always a literal u32
-    let curr_px = unsafe { curr.get_unchecked(0) };
-    let prev_raw = unsafe { prev_frame.get_unchecked(0) };
-    let mut val = *curr_px as i32 - *prev_raw as i32;
-    let delta = val - prev_val;
-    *unsafe { output.get_unchecked_mut(0) } = delta;
-    prev_val = val;
+    // let curr_px = unsafe { curr.get_unchecked(0) };
+    // info!("First frame px {}", *curr_px);
+    // let prev_raw = unsafe { prev_frame.get_unchecked(0) };
+    // let mut val = *curr_px as i32 - *prev_raw as i32;
+    // let delta = val - prev_val;
+    // info!("First frame delta {}", delta);
+    // *unsafe { output.get_unchecked_mut(0) } = delta;
+    // prev_val = val;
 
-    let mut i = 1;
+    // TODO: Try having a separate buffer for prev_frame?
+    let max = i16::MAX as i32;
+    let min = i16::MIN as i32;
+    let mut i = 0;
     for input_index in snake_iter {
         let curr_px = unsafe { curr.get_unchecked(input_index) };
+        max_value = max_value.max(*curr_px);
+        min_value = min_value.min(*curr_px);
         let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
-        let mut val = *curr_px as i32 - *prev_raw as i32;
+        let val = *curr_px as i32 - *prev_raw as i32;
         let delta = val - prev_val;
+        assert!(delta >= min);
+        assert!(delta <= max);
         *unsafe { output.get_unchecked_mut(i) } = delta;
         i += 1;
         prev_val = val;
@@ -246,16 +249,16 @@ fn delta_encode_frame_data(
     };
     {
         let px = output[0];
-        let mut prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
+        let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
         LittleEndian::write_u32(&mut prev_as_u8[0..4], px as u32);
     }
-    if bits_per_pixel >= 8 {
+    if bits_per_pixel == 16 {
         for i in 1..output.len() {
             let px = unsafe { *output.get_unchecked(i) } as u16;
             prev_frame[i + 1] = px;
         }
     } else {
-        let mut prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
+        let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
         for i in 1..output.len() {
             let px = unsafe { *output.get_unchecked(i) } as u8;
             prev_as_u8[i + 3] = px;
@@ -277,15 +280,19 @@ impl Iterator for FieldIterator {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        self.cursor += 1;
-        if self.cursor == 1 {
-            Some(self.size)
-        } else if self.cursor == 2 {
-            Some(self.code)
-        } else if self.cursor <= (self.size as u16) + 2 {
-            Some(self.state[self.cursor as usize - 3])
-        } else {
+        if self.size == 0 {
             None
+        } else {
+            self.cursor += 1;
+            if self.cursor == 1 {
+                Some(self.size)
+            } else if self.cursor == 2 {
+                Some(self.code)
+            } else if self.cursor <= (self.size as u16) + 2 {
+                Some(self.state[self.cursor as usize - 3])
+            } else {
+                None
+            }
         }
     }
 }
@@ -333,103 +340,6 @@ fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
         core::slice::from_raw_parts(value as *const T as *const u8, size as usize)
     });
     iter_state
-}
-
-struct PackBitsIterator<'a> {
-    input: &'a [i32],
-    bits_per_pixel: u8,
-    cursor: usize,
-    byte: u8,
-}
-
-impl<'a> Iterator for PackBitsIterator<'a> {
-    type Item = u8;
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.cursor == self.input.len() {
-            None
-        } else {
-            let px = self.input[self.cursor];
-            if self.cursor == 0 {
-                self.byte += 1;
-                // Initial pixel written out as a u32
-
-                match self.byte {
-                    1 => Some((((px as u32) & 0x000000ff) >> 0) as u8),
-                    2 => Some((((px as u32) & 0x0000ff00) >> 8) as u8),
-                    3 => Some((((px as u32) & 0x00ff0000) >> 16) as u8),
-                    4 => {
-                        self.byte = 0;
-                        self.cursor += 1;
-                        Some((((px as u32) & 0xff000000) >> 24) as u8)
-                    }
-                    _ => unreachable!(),
-                }
-            } else {
-                if self.bits_per_pixel == 8 {
-                    self.cursor += 1;
-                    Some(px as u8)
-                } else if self.bits_per_pixel == 16 {
-                    if self.byte == 1 {
-                        self.cursor += 1;
-                        self.byte = 0;
-                        Some(px as u8)
-                    } else {
-                        self.byte += 1;
-                        Some((px >> 8) as u8)
-                    }
-                } else {
-                    unreachable!()
-                }
-            }
-        }
-    }
-}
-
-fn pack_bits_fast_iterator(input: &[i32], bits_per_pixel: u8) -> PackBitsIterator {
-    PackBitsIterator {
-        input,
-        bits_per_pixel,
-        cursor: 0,
-        byte: 0,
-    }
-}
-fn pack_frame_iterator<'a>(
-    frame: &'a CptvFrameHeader,
-    delta_encoded_frame: &'a [i32], // Could this be an iterator too, and we just evaluate as needed?
-    bits_per_pixel: u8,
-    frame_num: i32,
-) -> impl Iterator<Item = u8> + 'a {
-    // Write the frame header
-    // We know the number of fields up front:
-    let frame_size = 4 + (delta_encoded_frame[1..].len() * (bits_per_pixel as usize / 8));
-    FrameHeaderIterator {
-        state: [b'F', 6],
-        cursor: 0,
-    }
-    .chain(push_field_iterator(&frame_size, FieldType::FrameSize))
-    .chain(push_field_iterator(
-        &bits_per_pixel,
-        FieldType::BitsPerPixel,
-    ))
-    .chain(push_field_iterator(&frame.time_on, FieldType::TimeOn))
-    .chain(push_field_iterator(
-        &frame.last_ffc_time,
-        FieldType::LastFfcTime,
-    ))
-    .chain(push_field_iterator(
-        &frame.last_ffc_temp_c,
-        FieldType::LastFfcTempC,
-    ))
-    .chain(push_field_iterator(
-        &frame.frame_temp_c,
-        FieldType::FrameTempC,
-    ))
-    // .chain(pack_bits_fast_iterator(
-    //     &delta_encoded_frame,
-    //     bits_per_pixel,
-    // ))
 }
 
 const STATIC_HUFFMAN_AND_BLOCK_HEADER: [u8; 46] = [
@@ -487,7 +397,7 @@ impl CptvStream {
         };
 
         for byte in gzip_header {
-            self.cursor.write_bits_fast(byte as u32, 8);
+            self.cursor.write_byte(byte);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(
                     to_flush,
@@ -500,7 +410,7 @@ impl CptvStream {
         }
 
         for byte in &STATIC_HUFFMAN_AND_BLOCK_HEADER[..STATIC_HUFFMAN_AND_BLOCK_HEADER.len() - 1] {
-            self.cursor.write_bits_fast(*byte as u32, 8);
+            self.cursor.write_byte(*byte);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(
                     to_flush,
@@ -511,7 +421,7 @@ impl CptvStream {
                 );
             }
         }
-        self.cursor.write_bits_fast(
+        self.cursor.write_bits(
             STATIC_HUFFMAN_AND_BLOCK_HEADER[STATIC_HUFFMAN_AND_BLOCK_HEADER.len() - 1] as u32,
             5,
         );
@@ -523,50 +433,48 @@ impl CptvStream {
     pub fn push_frame(
         &mut self,
         raw_frame: &[u16],
+        frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
-        pin: &mut Pin<Gpio5, PushPullOutput>,
-        pin2: &mut Pin<Gpio4, PushPullOutput>,
     ) {
-        let mut scratch = [0i32; FRAME_WIDTH * FRAME_HEIGHT];
-        let frame_header = CptvFrameHeader::new();
-        let (min, max, bits_per_pixel, frame_iter) = push_frame_iterator(
-            raw_frame,
-            &frame_header,
-            &mut self.prev_frame,
-            &mut scratch,
-            self.cptv_header.total_frame_count as i32,
-            pin2,
-        );
-        self.cptv_header.min_value = self.cptv_header.min_value.min(min);
-        self.cptv_header.max_value = self.cptv_header.max_value.max(max);
+        let (bit_width, max_value, min_value) =
+            delta_encode_frame_data(&mut self.prev_frame, raw_frame);
+        let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
+        let frame_header = CptvFrameHeader {
+            time_on: frame_telemetry.msec_on,
+            last_ffc_time: frame_telemetry.time_at_last_ffc,
+            bit_width,
+            frame_size,
+            last_ffc_temp_c: frame_telemetry.fpa_temp_c_at_last_ffc,
+            frame_temp_c: frame_telemetry.fpa_temp_c,
+        };
+        let frame_header_iter = frame_header_iter(&frame_header);
+        self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
+        self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
         // Delta encode iterator.
         {
             //let frame_bytes = unsafe { u16_slice_to_u8(raw_frame) };
             if self.cptv_header.total_frame_count % 10 == 0 {
-                info!("Write frame #{}", self.cptv_header.total_frame_count);
+                info!(
+                    "Write frame #{}, {}",
+                    self.cptv_header.total_frame_count, frame_telemetry.frame_num
+                );
             }
-            for byte in frame_iter {
+            for byte in frame_header_iter {
                 self.total_uncompressed += 1;
                 self.crc_val = self.crc_val ^ 0xffffffff;
                 self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
                     ^ (self.crc_val >> 8);
                 self.crc_val = self.crc_val ^ 0xffffffff;
                 let entry = &HUFFMAN_TABLE[byte as usize];
-                self.cursor
-                    .write_bits_fast(entry.code as u32, entry.bits as u32);
+                self.cursor.write_bits(entry.code as u32, entry.bits as u32);
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                    pin.set_high().unwrap();
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                    pin.set_low().unwrap();
                 }
             }
-            let frame_size = 4 + (((FRAME_HEIGHT * FRAME_WIDTH) - 1) * (bits_per_pixel / 8));
-            let delta_encoded = if bits_per_pixel == 8 {
-                unsafe { &u16_slice_to_u8(&self.prev_frame)[0..frame_size] }
-            } else {
-                unsafe { &u16_slice_to_u8(&self.prev_frame)[0..frame_size] }
-            };
+            let delta_encoded =
+                unsafe { &u16_slice_to_u8(&self.prev_frame)[0..frame_size as usize] };
+            let mut bits = 0u32;
             for byte in delta_encoded {
                 self.total_uncompressed += 1;
                 self.crc_val = self.crc_val ^ 0xffffffff;
@@ -574,13 +482,11 @@ impl CptvStream {
                     ^ (self.crc_val >> 8);
                 self.crc_val = self.crc_val ^ 0xffffffff;
                 let entry = &HUFFMAN_TABLE[*byte as usize];
-                self.cursor
-                    .write_bits_fast(entry.code as u32, entry.bits as u32);
+                self.cursor.write_bits(entry.code as u32, entry.bits as u32);
+                bits += entry.bits as u32;
                 // TODO: Do we need to somehow do this async to keep times down?
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                    pin.set_high().unwrap();
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                    pin.set_low().unwrap();
                 }
             }
         }
@@ -595,8 +501,7 @@ impl CptvStream {
         };
 
         let entry = &HUFFMAN_TABLE[256];
-        self.cursor
-            .write_bits_fast(entry.code as u32, entry.bits as u32);
+        self.cursor.write_bits(entry.code as u32, entry.bits as u32);
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
             flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
         }
@@ -606,10 +511,11 @@ impl CptvStream {
             let (to_flush, num_bytes) = self.cursor.flush();
             flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
         }
+        // Write CRC value
         let mut buf = [0u8; 4];
         LittleEndian::write_u32(&mut buf, self.crc_val);
         for b in buf {
-            self.cursor.write_bits_fast(b as u32, 8);
+            self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(
                     to_flush,
@@ -620,9 +526,10 @@ impl CptvStream {
                 );
             }
         }
+        // Write total uncompressed length of input data
         LittleEndian::write_u32(&mut buf, self.total_uncompressed);
         for b in buf {
-            self.cursor.write_bits_fast(b as u32, 8);
+            self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(
                     to_flush,
@@ -633,9 +540,9 @@ impl CptvStream {
                 );
             }
         }
+        // Shouldn't be necessary as we're already aligned
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
-
         flash_storage.append_file_bytes(
             to_flush,
             num_bytes,
@@ -652,7 +559,7 @@ impl CptvStream {
         // Now write header
         self.crc_val = 0;
         self.total_uncompressed = 0;
-        let mut header_iter = push_header_iterator(&self.cptv_header);
+        let header_iter = push_header_iterator(&self.cptv_header);
         for byte in header_iter {
             self.total_uncompressed += 1;
             self.crc_val = self.crc_val ^ 0xffffffff;
@@ -660,8 +567,7 @@ impl CptvStream {
                 ^ (self.crc_val >> 8);
             self.crc_val = self.crc_val ^ 0xffffffff;
             let entry = &HUFFMAN_TABLE[byte as usize];
-            self.cursor
-                .write_bits_fast(entry.code as u32, entry.bits as u32);
+            self.cursor.write_bits(entry.code as u32, entry.bits as u32);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
             }
@@ -684,24 +590,36 @@ impl HeaderIterator {
     }
 }
 
-pub fn push_frame_iterator<'a>(
-    frame: &'a [u16],
-    frame_header: &'a CptvFrameHeader,
-    prev_frame: &'a mut [u16],
-    scratch: &'a mut [i32],
-    frame_num: i32,
-    pin2: &mut Pin<Gpio4, PushPullOutput>,
-) -> (u16, u16, usize, impl Iterator<Item = u8> + 'a) {
-    pin2.set_high().unwrap();
-    let (bits_per_pixel, max_value, min_value) =
-        delta_encode_frame_data(prev_frame, frame, scratch);
-    pin2.set_low().unwrap();
-    (
-        min_value,
-        max_value,
-        bits_per_pixel as usize,
-        pack_frame_iterator(&frame_header, scratch, bits_per_pixel, frame_num),
-    )
+pub fn frame_header_iter<'a>(frame_header: &'a CptvFrameHeader) -> impl Iterator<Item = u8> + 'a {
+    // Write the frame header
+    // We know the number of fields up front:
+    [b'F', 6]
+        .iter()
+        .map(|x| *x)
+        .chain(push_field_iterator(
+            &frame_header.frame_size,
+            FieldType::FrameSize,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.bit_width,
+            FieldType::BitsPerPixel,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.time_on,
+            FieldType::TimeOn,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.last_ffc_time,
+            FieldType::LastFfcTime,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.last_ffc_temp_c,
+            FieldType::LastFfcTempC,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.frame_temp_c,
+            FieldType::FrameTempC,
+        ))
 }
 
 fn push_optional_field_iterator<T: Sized>(value: &Option<T>, code: FieldType) -> FieldIterator {
@@ -748,7 +666,7 @@ impl Iterator for HeaderIterator {
     }
 }
 pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
-    let num_header_fields = 9u8;
+    let num_header_fields = 11u8;
     let num_optional_header_fields = [
         header.device_id.is_some(),
         header.serial_number.is_some(),
@@ -758,12 +676,10 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
         header.loc_timestamp.is_some(),
         header.altitude.is_some(),
         header.accuracy.is_some(),
-        header.model.is_some(),
     ]
     .iter()
     .filter(|x| **x)
     .count() as u8;
-
     HeaderIterator::new(num_header_fields + num_optional_header_fields)
         .chain(push_field_iterator(&header.min_value, FieldType::MinValue))
         .chain(push_field_iterator(&header.max_value, FieldType::MaxValue))
@@ -777,17 +693,17 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
             &(FRAME_HEIGHT as u32),
             FieldType::Height,
         ))
-        .chain(push_field_iterator(&1, FieldType::Compression))
-        .chain(push_field_iterator(&9, FieldType::FrameRate))
+        .chain(push_field_iterator(&1u8, FieldType::Compression))
+        .chain(push_field_iterator(&9u8, FieldType::FrameRate))
         .chain(push_field_iterator(
             &header.device_name,
             FieldType::DeviceName,
         ))
-        .chain(push_field_iterator(&"flir", FieldType::Brand))
-        .chain(push_optional_field_iterator(
-            &header.model.map_or(None, |x| Some(x)),
-            FieldType::Model,
+        .chain(push_field_iterator(
+            &[b'f', b'l', b'i', b'r'],
+            FieldType::Brand,
         ))
+        .chain(push_field_iterator(&header.model, FieldType::Model))
         .chain(push_optional_field_iterator(
             &header.device_id,
             FieldType::DeviceID,
@@ -829,7 +745,7 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
 pub struct Cptv2Header {
     pub timestamp: u64,
     pub device_name: [u8; 20],
-    pub model: Option<[u8; 20]>,
+    pub model: [u8; 20],
     pub device_id: Option<u32>,
     pub serial_number: Option<u32>,
     pub firmware_version: Option<[u8; 20]>,
@@ -852,7 +768,7 @@ impl Cptv2Header {
         let mut header = Cptv2Header {
             timestamp,
             device_name: [0; 20],
-            model: None,
+            model: [0; 20],
             device_id: None,
             serial_number: None,
             firmware_version: None,
@@ -867,6 +783,8 @@ impl Cptv2Header {
         };
         let device_name = b"<unknown>";
         header.device_name[0..device_name.len()].copy_from_slice(device_name);
+        let model = b"lepton3.5";
+        header.model[0..model.len()].copy_from_slice(model);
 
         header
     }

@@ -1,14 +1,18 @@
 .program soft_spi_slave
 ; Note: SPI Mode2
-; wait for enable
+; gpio 13: cs
+; gpio 14: clk
+; wait for enable (Cs goes low)
 wait_falling:
     wait 0 gpio 13
 .wrap_target
+; makes sure Cs is still low
     jmp pin wait_falling
     set x, 31
 bitloop:
     wait 1 gpio 14
     out pins, 1
     wait 0 gpio 14
+; loop while x > 0, and we've read out a full u32
     jmp x-- bitloop
 .wrap

@@ -2,6 +2,7 @@
 edition = "2021"
 name = "tc2-firmware"
 version = "0.1.0"
+resolver = "2"
 
 [dependencies]
 
@@ -24,11 +25,12 @@ critical-section = "1.1.1"
 fugit = "0.3.6"
 crc = "3.0.1"
 
-rp2040-hal = { path = "../rp-hal/rp2040-hal", features = ["defmt"] }
+rp2040-hal = { path = "../rp-hal-0.9.0/rp2040-hal", features = ["defmt"] }
+#rp2040-hal = "0.9.0"
 pcf8563 = "0.1.2"
 
-pio = "0.2.1"
-pio-proc = "0.2.1"
+#pio = "0.2.1"
+#pio-proc = "0.2.1"
 
 [features]
 # This is the set of features we enable by default
@@ -55,6 +57,9 @@ disable-intrinsics = ["rp2040-hal/disable-intrinsics"]
 
 # This enables ROM functions for f64 math that were not present in the earliest RP2040s
 rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
+
+#defmt = ["rp2040-hal/defmt"]
+#eh1_0_alpha = ["rp2040-hal/eh1_0_alpha"]
 
 # cargo build/run
 [profile.dev]
