@@ -34,14 +34,17 @@ use defmt_rtt as _;
 use lepton::Lepton;
 use panic_probe as _;
 
-use crate::bsp::pac::{RESETS, SPI1};
+use crate::bsp::pac::{DMA, RESETS, SPI1};
 use crate::cptv_encoder::streaming_cptv::CptvStream;
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::read_telemetry;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 use core::cell::RefCell;
+use cortex_m::asm::nop;
+use cortex_m::singleton;
 use critical_section::Mutex;
+use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_spi_Transfer,
     _embedded_hal_blocking_spi_Write, _embedded_hal_spi_FullDuplex,
@@ -49,10 +52,13 @@ use embedded_hal::prelude::{
 use fugit::HertzU32;
 use fugit::RateExtU32;
 use rp2040_hal::clocks::init_clocks_and_plls;
-use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio8};
+use rp2040_hal::dma::{
+    bidirectional, double_buffer, single_buffer, Channel, DMAExt, SingleChannel, CH0,
+};
+use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio8};
 use rp2040_hal::gpio::{
     FunctionI2C, FunctionNull, FunctionSio, FunctionSpi, Interrupt, Pin, PinId, PullDown, PullNone,
-    SioInput,
+    SioInput, SioOutput,
 };
 use rp2040_hal::{Watchdog, I2C};
 
@@ -134,18 +140,22 @@ struct PiSpi {
             rp2040_hal::spi::Enabled,
             SPI1,
             (
-                Pin<Gpio15, FunctionSpi, PullDown>, // miso
-                Pin<Gpio12, FunctionSpi, PullDown>, // mosi
-                Pin<Gpio14, FunctionSpi, PullDown>, // clk
+                Pin<Gpio15, FunctionSpi, PullNone>, // miso
+                Pin<Gpio12, FunctionSpi, PullNone>, // mosi
+                Pin<Gpio14, FunctionSpi, PullNone>, // clk
             ),
             8,
         >,
     >,
-    cs_enabled: Option<Pin<Gpio13, FunctionSpi, PullDown>>, // cs
+    cs_enabled: Option<Pin<Gpio13, FunctionSpi, PullNone>>, // cs
     miso_disabled: Option<Pin<Gpio15, FunctionNull, PullNone>>,
     mosi_disabled: Option<Pin<Gpio12, FunctionNull, PullNone>>,
     clk_disabled: Option<Pin<Gpio14, FunctionNull, PullNone>>,
     cs_disabled: Option<Pin<Gpio13, FunctionNull, PullNone>>,
+    ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
+    dma_channel: Option<Channel<CH0>>,
+    payload_buffer: Option<&'static mut [u8; 2066]>,
+    crc_buffer: Option<&'static mut [u8; 32]>,
 }
 
 impl PiSpi {
@@ -154,6 +164,10 @@ impl PiSpi {
         cs: Pin<Gpio13, FunctionNull, PullNone>,
         clk: Pin<Gpio14, FunctionNull, PullNone>,
         miso: Pin<Gpio15, FunctionNull, PullNone>,
+        ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
+        dma_channel: Channel<CH0>,
+        payload_buffer: &'static mut [u8; 2066],
+        crc_buffer: &'static mut [u8; 32],
     ) -> PiSpi {
         PiSpi {
             spi: None,
@@ -162,8 +176,13 @@ impl PiSpi {
             cs_disabled: Some(cs),
             clk_disabled: Some(clk),
             miso_disabled: Some(miso),
+            ping,
+            dma_channel: Some(dma_channel),
+            payload_buffer: Some(payload_buffer),
+            crc_buffer: Some(crc_buffer),
         }
     }
+
     pub fn enable(&mut self, spi: SPI1, resets: &mut RESETS) {
         self.cs_enabled = Some(
             self.cs_disabled
@@ -194,6 +213,102 @@ impl PiSpi {
         )
         .init_slave(resets, &embedded_hal::spi::MODE_3);
         self.spi = Some(spi);
+        self.ping.set_low().unwrap();
+    }
+
+    pub fn send_message(&mut self, message_type: u8, payload: &[u8], dma_peripheral: &mut DMA) {
+        // The transfer header contains the transfer type (2x)
+        // the number of bytes to read for the payload (should this be twice?)
+        // the 16 bit crc of the payload (twice)
+
+        // It is followed by the payload itself
+
+        let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+
+        let crc = crc_check.checksum(&payload);
+        transfer_header[0] = message_type;
+        transfer_header[1] = message_type;
+        LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
+        LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32);
+        LittleEndian::write_u16(&mut transfer_header[10..12], crc);
+        LittleEndian::write_u16(&mut transfer_header[12..14], crc);
+        LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
+        LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
+
+        // info!("Writing header {}", &transfer_header);
+
+        self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
+            .copy_from_slice(&transfer_header);
+        self.payload_buffer.as_mut().unwrap()
+            [transfer_header.len()..transfer_header.len() + payload.len()]
+            .copy_from_slice(&payload);
+
+        let mut transmit_success = false;
+        while !transmit_success {
+            self.ping.set_high().unwrap();
+            {
+                // Enable sniffing on the channel
+                dma_peripheral.ch[0]
+                    .ch_ctrl_trig
+                    .write(|w| w.sniff_en().set_bit());
+                // Set which channel the sniffer is sniffing
+                dma_peripheral
+                    .sniff_ctrl
+                    .write(|w| unsafe { w.dmach().bits(0) });
+                //let payload = self.payload_buffer.take().unwrap();
+                {
+                    let mut transfer = single_buffer::Config::new(
+                        self.dma_channel.take().unwrap(),
+                        self.payload_buffer.take().unwrap(),
+                        self.spi.take().unwrap(),
+                    )
+                    .start();
+                    self.ping.set_low().unwrap();
+                    maybe_abort_dma_transfer(dma_peripheral, 0);
+                    let (r_ch0, r_buf, spi) = transfer.wait();
+                    self.dma_channel = Some(r_ch0);
+                    self.payload_buffer = Some(r_buf);
+                    self.spi = Some(spi);
+                }
+                //self.payload_buffer = Some(payload);
+            }
+            self.ping.set_high().unwrap();
+            // Now read the crc from the pi
+            {
+                // TODO: Is all the DMA state reset now?
+
+                let transfer = single_buffer::Config::new(
+                    self.dma_channel.take().unwrap(),
+                    self.spi.take().unwrap(),
+                    self.crc_buffer.take().unwrap(),
+                )
+                .start();
+                self.ping.set_low().unwrap();
+                maybe_abort_dma_transfer(dma_peripheral, 0);
+                let (r_ch0, spi, r_buf) = transfer.wait();
+                self.dma_channel = Some(r_ch0);
+
+                // Find offset crc in buffer:
+                if let Some(start) = r_buf.iter().position(|&x| x == 1) {
+                    if start < r_buf.len() - 8 {
+                        let prelude = &r_buf[start + 1..start + 4];
+                        if prelude[0] == 2 && prelude[1] == 3 && prelude[2] == 4 {
+                            let crc_from_remote =
+                                LittleEndian::read_u16(&r_buf[start + 4..start + 6]);
+                            let crc_from_remote_dup =
+                                LittleEndian::read_u16(&r_buf[start + 6..start + 8]);
+                            if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc {
+                                //info!("Success!");
+                                transmit_success = true;
+                            }
+                        }
+                    }
+                }
+                self.crc_buffer = Some(r_buf);
+                self.spi = Some(spi);
+            }
+        }
     }
 
     pub fn disable(&mut self) -> SPI1 {
@@ -218,9 +333,14 @@ impl PiSpi {
     }
 
     pub fn flush(&mut self) {
-        while !self.is_empty() {
-            let b = self.read_byte();
-        }
+        // while !self.is_empty() {
+        //     let b = self.read_byte();
+        // }
+        //self.spi.as_mut().unwrap().flush().unwrap();
+
+        //&mut hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>
+
+        //Option<hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>>::flush()
     }
 
     pub fn schmitt(&self) -> bool {
@@ -320,6 +440,61 @@ fn go_dormant_until_next_vsync<T: PinId>(
     let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq_hz.Hz());
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
     initialized_rosc
+}
+
+fn maybe_abort_dma_transfer(dma: &mut DMA, channel: u32) {
+    // If the raspberry pi host requests less bytes than we want to send, we'd stall forever
+    // unless we keep tabs on whether or not the channel has stalled, and abort appropriately.
+    let mut prev_count = dma.ch[channel as usize].ch_trans_count.read().bits();
+    let mut prev_crc = dma.sniff_data.read().bits();
+    let mut same_count = 0;
+    let mut same_crc = 0;
+    let mut needs_abort = false;
+    loop {
+        let count = dma.ch[channel as usize].ch_trans_count.read().bits();
+        let crc = dma.sniff_data.read().bits();
+        if count == dma.ch0_dbg_tcr.read().bits() && crc != prev_crc {
+            // Completed full transfer successfully.
+            break;
+        }
+        if count == prev_count {
+            same_count += 1;
+        }
+        if crc == prev_crc {
+            same_crc += 1;
+        }
+        if same_count == 10_000 {
+            needs_abort = true;
+            break;
+        }
+        if same_crc == 10_000 {
+            needs_abort = true;
+            break;
+        }
+        prev_count = count;
+        prev_crc = crc;
+    }
+    if needs_abort && dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {
+        info!(
+            "Aborting dma transfer at count {} of {}, dreq {}",
+            prev_count,
+            dma.ch0_dbg_tcr.read().bits(),
+            dma.ch0_dbg_ctdreq.read().bits()
+        );
+        // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
+        let inte0 = dma.inte0.read().bits();
+        let inte1 = dma.inte1.read().bits();
+        let mask = (1u32 << channel).reverse_bits();
+        dma.inte0.write(|w| unsafe { w.bits(inte0 & mask) });
+        dma.inte1.write(|w| unsafe { w.bits(inte1 & mask) });
+        // Abort all dma transfers
+        dma.chan_abort.write(|w| unsafe { w.bits(1 << channel) });
+
+        while dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {}
+
+        dma.inte0.write(|w| unsafe { w.bits(inte0) });
+        dma.inte1.write(|w| unsafe { w.bits(inte1) });
+    }
 }
 
 fn get_crc_from_remote(pi_spi: &mut PiSpi, comparison_crc: u16) -> bool {
@@ -470,18 +645,13 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
     let should_record_new = false;
-    let num_seconds = 20;
+    let num_seconds = 80;
     let num_frames_to_record = num_seconds * 9;
 
-    // let pi_mosi = pins.gpio12.into_floating_input();
-    // loop {
-    //     if pi_mosi.is_high().unwrap() {
-    //         info!("Bit");
-    //     }
-    // }
-    // crate::unreachable!("Foo");
-
+    let crc_buf = singleton!(: [u8; 32] = [0x42; 32]).unwrap();
+    let payload_buf = singleton!(: [u8; 2066] = [0x42; 2066]).unwrap();
     {
+        let pi_ping = pins.gpio5.into_push_pull_output();
         let cs = pins.gpio9.into_push_pull_output();
         let pi_miso = pins.gpio15.into_floating_disabled();
         let pi_mosi = pins.gpio12.into_floating_disabled();
@@ -490,13 +660,23 @@ fn main() -> ! {
         let fs_miso = pins.gpio8.into_pull_down_disabled().into_pull_type();
         let fs_mosi = pins.gpio11.into_pull_down_disabled().into_pull_type();
         let fs_clk = pins.gpio10.into_pull_down_disabled().into_pull_type();
-        let mut pi_spi = PiSpi::new(pi_mosi, pi_cs, pi_clk, pi_miso);
+        let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+
+        let mut pi_spi = PiSpi::new(
+            pi_mosi,
+            pi_cs,
+            pi_clk,
+            pi_miso,
+            pi_ping,
+            dma_channels.ch0,
+            payload_buf,
+            crc_buf,
+        );
 
         let mut spi_peripheral = Some(peripherals.SPI1);
         let clock_freq = clocks.peripheral_clock.freq();
         let mut flash_storage = OnboardFlash::new(cs, fs_mosi, fs_clk, fs_miso);
         {
-            //fs_pins.enable();
             flash_storage.take_spi(
                 spi_peripheral.take().unwrap(),
                 &mut peripherals.RESETS,
@@ -507,12 +687,9 @@ fn main() -> ! {
                 "Finished scan, needs offload? {}",
                 flash_storage.has_files_to_offload()
             );
-            // flash_storage.disable_spi();
-            //fs_pins.disable();
         }
 
         // let (mut pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-        // let dma = peripherals.DMA.split(&mut peripherals.RESETS);
 
         let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
             // NOTE: This creates a buffer with a static lifetime, which is safe to access only this
@@ -525,47 +702,25 @@ fn main() -> ! {
             sio.fifo.write_blocking(CORE1_TASK_READY);
             let radiometry_enabled = sio.fifo.read_blocking();
             info!("Got radiometry enabled? {}", radiometry_enabled);
-            let mut transfer_header = [0u8; 7];
-            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-            let mut transmit_success = false;
-            let mut payload = [0u8; 8];
-            let mut crc_twice = [0u8; 4];
 
             if raspberry_pi_is_awake {
+                let mut payload = [0u8; 8];
                 let free_spi = flash_storage.free_spi();
                 pi_spi.enable(free_spi, &mut peripherals.RESETS);
+
                 LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
                 LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
-                transfer_header[0] = CAMERA_CONNECT_INFO;
-                LittleEndian::write_u32(&mut transfer_header[1..5], 8u32);
-                let crc = crc_check.checksum(&payload);
-                LittleEndian::write_u16(&mut transfer_header[5..7], crc);
-                info!("Writing header {}, payload {}", &transfer_header, &payload);
 
-                transfer_header = [1, 2, 3, 4, 5, 6, 7];
-                payload = [10, 11, 12, 13, 14, 15, 16, 17];
-                while !transmit_success {
-                    //delay.delay_ms(1);
-                    //pi_spi.flush();
-                    pi_spi.write(&transfer_header);
-                    pi_spi.write(&payload);
-                    //transmit_success = get_crc_from_remote(&mut pi_spi, crc);
-                    pi_spi.transfer(&mut crc_twice);
-                }
+                pi_spi.send_message(CAMERA_CONNECT_INFO, &payload, &mut peripherals.DMA);
 
                 let spi_free = pi_spi.disable();
                 flash_storage.take_spi(spi_free, &mut peripherals.RESETS, clock_freq);
-                //fs_pins.enable();
             }
             // TODO: Switch modes here.
             //  If there are files to upload, do that.
             //  If the pi requests raw frames, do that (as well as being able to write to flash)
 
-            if false && flash_storage.has_files_to_offload() {
-                // info!("Erasing after successful offload");
-                // flash_storage.erase_all_good_used_blocks();
-                // crate::unreachable!("foo");
-
+            if flash_storage.has_files_to_offload() {
                 warn!("There are files to offload!");
                 if !raspberry_pi_is_awake {
                     wake_raspberry_pi();
@@ -581,7 +736,6 @@ fn main() -> ! {
                     while let Some((part, is_last, spi)) = flash_storage.get_file_part() {
                         //fs_pins.disable();
                         pi_spi.enable(spi, &mut peripherals.RESETS);
-                        transmit_success = false;
                         let transfer_type = if file_start && !is_last {
                             CAMERA_BEGIN_FILE_TRANSFER
                         } else if !file_start && !is_last {
@@ -600,18 +754,8 @@ fn main() -> ! {
                             CAMERA_BEGIN_AND_END_FILE_TRANSFER => "BEGIN & END FILE TRANSFER",
                             _ => crate::unreachable!("Invalid"),
                         };
-                        let crc = crc_check.checksum(&part);
-                        transfer_header[0] = transfer_type;
-                        LittleEndian::write_u32(&mut transfer_header[1..5], part.len() as u32);
-                        LittleEndian::write_u16(&mut transfer_header[5..7], crc);
-                        info!("tt {}", tt);
-                        info!("Writing header {}", &transfer_header);
-                        while !transmit_success {
-                            //delay.delay_ms(1);
-                            pi_spi.write(&transfer_header);
-                            pi_spi.write(&part);
-                            transmit_success = get_crc_from_remote(&mut pi_spi, crc);
-                        }
+                        //info!("tt {}, part len {}", tt, part.len());
+                        pi_spi.send_message(transfer_type, &part, &mut peripherals.DMA);
 
                         part_count += 1;
                         if is_last {
@@ -631,8 +775,10 @@ fn main() -> ! {
 
                     // Once we've successfully offloaded all files, we can erase the flash and we're
                     // ready to start recording new CPTV files there.
-                    // info!("Erasing after successful offload");
-                    // flash_storage.erase_all_good_used_blocks();
+                    if should_record_new {
+                        info!("Erasing after successful offload");
+                        flash_storage.erase_all_good_used_blocks();
+                    }
                 }
             }
 
@@ -686,25 +832,7 @@ fn main() -> ! {
                 // Read the telemetry:
                 let frame_buffer = unsafe { &mut FRAME_BUFFER[4..] };
                 let frame_telemetry = read_telemetry(&frame_buffer);
-                //
-
                 frames_seen += 1;
-                // let tx_transfer = if raspberry_pi_is_awake {
-                //     // Prime pi for receiving some bytes
-                //     pi_ping.set_high().unwrap();
-                //     pi_ping.set_low().unwrap();
-                //
-                //     // Write the frame to the raspberry pi if it's awake
-                //     let tx_transfer = single_buffer::Config::new(
-                //         dma_ch0,
-                //         unsafe { any_as_u32_slice(buffer) },
-                //         tx,
-                //     )
-                //     .start();
-                //     Some(tx_transfer)
-                // } else {
-                //     None
-                // };
                 // TODO: Add the frame to the current CPTV encode
 
                 // TODO: Reserve next free page in storage for the cptv header, which will be written out

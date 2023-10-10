@@ -313,6 +313,7 @@ impl OnboardFlash {
             }
         }
 
+        // TODO: DMA transfers too
         for block_index in 0..2048isize {
             // TODO: Interleave with random cache read
 
