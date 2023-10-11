@@ -229,43 +229,63 @@ fn main() -> ! {
                 &mut peripherals.RESETS,
                 clock_freq,
             );
-            //delay.delay_ms(5000);
+            delay.delay_ms(5000);
             flash_storage.init();
             info!(
                 "Finished scan, needs offload? {}",
                 flash_storage.has_files_to_offload()
             );
-            let user_bytes = [0x00u8; 2048];
-            let mut bytes = [0xffu8; 2112 + 4];
-            bytes[0..user_bytes.len()].copy_from_slice(&user_bytes);
-            for block in 0..50 {
-                for page in 0..64 {
-                    let is_last = block == 49 && page == 63;
-                    flash_storage.append_file_bytes(&mut bytes[..], 2048, is_last, None, None);
+            let test = false;
+            if test {
+                let mut user_bytes = [0x00u8; 2048];
+                let mut i = 0;
+                for b in &mut user_bytes {
+                    *b = i;
+                    i += 1;
                 }
-            }
-            for block in 0..50 {
-                for page in 0..64 {
-                    flash_storage.read_page(block, page).unwrap();
-                    flash_storage.read_page_from_cache(block);
-                    for (a, b) in flash_storage
-                        .current_page
-                        .user_data()
-                        .iter()
-                        .zip(&user_bytes)
-                    {
-                        crate::assert_eq!(*a, *b, "Got {}, should be {}", *a, *b);
+                info!("User bytes {:?}", user_bytes);
+                let mut bytes = [0xffu8; 2112 + 4];
+                bytes[4..user_bytes.len() + 4].copy_from_slice(&user_bytes);
+                for block in 0..2048 {
+                    for page in 0..64 {
+                        let is_last = block == 49 && page == 63;
+                        flash_storage.append_file_bytes(&mut bytes[..], 2048, is_last, None, None);
+                    }
+                }
+                for block in 0..2048 {
+                    for page in 0..64 {
+                        flash_storage.read_page(block, page).unwrap();
+                        flash_storage.read_page_from_cache(block);
+                        for (i, (a, b)) in flash_storage
+                            .current_page
+                            .user_data()
+                            .iter()
+                            .zip(&user_bytes)
+                            .enumerate()
+                        {
+                            crate::assert_eq!(
+                                *a,
+                                *b,
+                                "Got {}, should be {} at {}:{}:{}, {:?}",
+                                *a,
+                                *b,
+                                block,
+                                page,
+                                i,
+                                flash_storage.current_page.user_data()
+                            );
+                        }
                     }
                 }
             }
         }
-        delay.delay_ms(1000);
-        crate::unreachable!("Break");
+        // delay.delay_ms(1000);
+        // crate::unreachable!("Break");
 
         let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
             // NOTE: This creates a buffer with a static lifetime, which is safe to access only this
             //  thread.
-            let raspberry_pi_is_awake = false;
+            let raspberry_pi_is_awake = true;
             let mut peripherals = unsafe { Peripherals::steal() };
             let core = unsafe { pac::CorePeripherals::steal() };
             let mut delay = Delay::new(core.SYST, sys_freq);

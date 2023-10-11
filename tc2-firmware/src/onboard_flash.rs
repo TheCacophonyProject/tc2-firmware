@@ -302,16 +302,17 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
-        // if erase {
-        info!("Erasing");
-        //
-        for block in 0..2048 {
-            if !self.erase_block(block).is_ok() {
-                error!("Block erase failed for block {}", block);
+        let erase = false;
+        if erase {
+            info!("Erasing");
+            //
+            for block in 0..2048 {
+                if !self.erase_block(block).is_ok() {
+                    error!("Block erase failed for block {}", block);
+                }
             }
+            self.scan();
         }
-        self.scan();
-        // }
         // crate::unreachable!("Foo");
     }
 
@@ -347,12 +348,6 @@ impl OnboardFlash {
             // For simplicity at the moment, just read the full pages
             self.read_page(block_index, 0).unwrap();
             self.read_page_metadata(block_index);
-            info!(
-                "current_page {:?}, {:?}",
-                self.current_page.bad_block_data(),
-                self.current_page.user_metadata_1()
-            );
-
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
                 //warn!("Found bad block {}", block_index);
@@ -835,8 +830,8 @@ impl OnboardFlash {
         }
 
         //info!("Write address {:?}", address);
-        self.spi_write_dma(&bytes[1..]);
-        //self.spi_write(&bytes[1..]);
+        //self.spi_write_dma(&bytes[1..]);
+        self.spi_write(&bytes[1..]);
         self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
 
         // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
