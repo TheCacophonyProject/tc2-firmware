@@ -13,12 +13,14 @@
 
 use crate::bsp::pac::SPI1;
 use byteorder::{ByteOrder, LittleEndian};
+use core::mem;
 use defmt::{error, info, println, warn};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
 use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::dma::{bidirectional, single_buffer, Channel, CH1, CH2};
 use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio8, Gpio9};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
@@ -142,23 +144,25 @@ impl OnboardFlashStatus {
 }
 
 pub struct Page {
-    inner: [u8; 4 + 2048 + 128],
+    inner: Option<&'static mut [u8; 4 + 2048 + 128]>,
 }
 
 impl Page {
-    fn new() -> Page {
+    fn new(blank_page: &'static mut [u8; 4 + 2048 + 128]) -> Page {
         // NOTE: We include 3 bytes at the beginning of the buffer for the command + column address
-        let mut blank_page = [0xff; 4 + 2048 + 128];
         blank_page[0] = CACHE_READ;
         blank_page[1] = 0;
         blank_page[2] = 0;
         blank_page[3] = 0;
-        Page { inner: blank_page }
+        Page {
+            inner: Some(blank_page),
+        }
     }
 
     fn cache_data(&self) -> &[u8] {
-        &self.inner[4..]
+        &self.inner.as_ref().unwrap()[4..]
     }
+
     pub fn user_data(&self) -> &[u8] {
         &self.cache_data()[0..2048]
     }
@@ -203,12 +207,20 @@ impl Page {
     }
 
     fn cache_data_mut(&mut self) -> &mut [u8] {
-        &mut self.inner[4..]
+        &mut self.inner.as_mut().unwrap()[4..]
     }
 
     fn page_mut(&mut self) -> &mut [u8] {
-        &mut self.inner
+        &mut self.inner.as_mut().unwrap()[..]
     }
+
+    fn take(&mut self) -> &'static mut [u8; 4 + 2048 + 128] {
+        self.inner.take().unwrap()
+    }
+}
+
+unsafe fn extend_lifetime<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
+    mem::transmute::<&'b mut [u8], &'static mut [u8]>(r)
 }
 
 pub struct OnboardFlash {
@@ -234,6 +246,9 @@ pub struct OnboardFlash {
     pub first_used_block_index: Option<isize>,
     bad_blocks: [i16; 40],
     pub current_page: Page,
+    pub prev_page: Page,
+    dma_channel_1: Option<Channel<CH1>>,
+    dma_channel_2: Option<Channel<CH2>>,
 }
 
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
@@ -247,6 +262,10 @@ impl OnboardFlash {
         mosi: Pin<Gpio11, FunctionNull, PullNone>,
         clk: Pin<Gpio10, FunctionNull, PullNone>,
         miso: Pin<Gpio8, FunctionNull, PullNone>,
+        flash_page_buf: &'static mut [u8; 4 + 2048 + 128],
+        flash_page_buf_2: &'static mut [u8; 4 + 2048 + 128],
+        dma_channel_1: Channel<CH1>,
+        dma_channel_2: Channel<CH2>,
     ) -> OnboardFlash {
         OnboardFlash {
             cs,
@@ -259,7 +278,10 @@ impl OnboardFlash {
             bad_blocks: [i16::MAX; 40],
             current_page_index: 0,
             current_block_index: 0,
-            current_page: Page::new(),
+            current_page: Page::new(flash_page_buf),
+            prev_page: Page::new(flash_page_buf_2),
+            dma_channel_1: Some(dma_channel_1),
+            dma_channel_2: Some(dma_channel_2),
         }
     }
     pub fn init(&mut self) {
@@ -307,6 +329,7 @@ impl OnboardFlash {
         {
             self.read_page(0, 1).unwrap();
             self.read_page_from_cache(0);
+            info!("Page {:?}", self.current_page.inner.as_ref().unwrap());
             self.wait_for_all_ready();
             if self.current_page.page_is_used() {
                 warn!("Page 1 has data");
@@ -320,7 +343,7 @@ impl OnboardFlash {
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
             self.read_page(block_index, 0).unwrap();
-            self.read_page_from_cache(block_index);
+            self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
                 warn!("Found bad block {}", block_index);
@@ -440,7 +463,9 @@ impl OnboardFlash {
                 continue;
             }
             self.read_page(block_index, 0).unwrap();
-            self.read_page_from_cache(block_index);
+
+            // TODO: Could just read the user-metadata, not the full page, might be faster.
+            self.read_page_metadata(block_index);
             if self.current_page.page_is_used() {
                 //println!("Erasing used block {}", block_index);
                 self.erase_block(block_index).unwrap();
@@ -621,7 +646,61 @@ impl OnboardFlash {
         }
     }
 
-    pub fn read_page_from_cache(&mut self, block: isize) {
+    pub fn read_from_cache_at_column_offset(
+        &mut self,
+        block: isize,
+        offset: isize,
+        length: Option<usize>,
+    ) {
+        let plane = (((block % 2) << 4) | offset >> 8) as u8;
+        let current_page = self.current_page.take();
+        current_page[0] = CACHE_READ;
+        current_page[1] = plane;
+        current_page[2] = (offset & 0xff) as u8;
+        current_page[3] = 0; // Dummy byte
+        let length = length.unwrap_or((2048 + 128) - offset as usize);
+        // TODO: Use a pair of global buffers for all DMA transfers
+
+        let prev_page = self.prev_page.take();
+        {
+            self.cs.set_low().unwrap();
+            let target_offset = (offset - 4).max(0) as usize;
+            let src_range = 0..length + 4;
+            let dst_range = target_offset..target_offset + length + 4;
+            //info!("Src {:?}, Dst {:?}", src_range, dst_range);
+            crate::assert_eq!(src_range.len(), dst_range.len());
+            let transfer = bidirectional::Config::new(
+                (
+                    self.dma_channel_1.take().unwrap(),
+                    self.dma_channel_2.take().unwrap(),
+                ),
+                unsafe { extend_lifetime(&mut current_page[src_range]) },
+                self.spi.take().unwrap(),
+                // TO ensure the data is placed in the correct place on the page, offset by -4
+                unsafe { extend_lifetime(&mut prev_page[dst_range]) },
+            )
+            .start();
+            let ((r_ch1, r_ch2), r_tx_buf, spi, r_rx_buf) = transfer.wait();
+            // Do we also need some CRC checking?
+            self.cs.set_high().unwrap();
+            self.dma_channel_1 = Some(r_ch1);
+            self.dma_channel_2 = Some(r_ch2);
+            self.spi = Some(spi);
+        }
+
+        // Copy to the appropriate column offset:
+
+        // Swap the buffers here.
+        self.current_page.inner = Some(prev_page);
+        self.prev_page.inner = Some(current_page);
+    }
+
+    pub fn read_from_cache_at_column_offset_spi(
+        &mut self,
+        block: isize,
+        offset: isize,
+        length: Option<usize>,
+    ) {
         let plane = ((block % 2) << 4) as u8;
         let bytes = self.current_page.page_mut();
         bytes[0] = CACHE_READ;
@@ -633,10 +712,35 @@ impl OnboardFlash {
         self.spi.as_mut().unwrap().transfer(bytes).unwrap();
         self.cs.set_high().unwrap();
     }
+
+    pub fn read_page_metadata(&mut self, block: isize) {
+        self.read_from_cache_at_column_offset_spi(block, 2048, None);
+    }
+
+    pub fn read_page_from_cache(&mut self, block: isize) {
+        self.read_from_cache_at_column_offset_spi(block, 0, None);
+    }
     pub fn spi_write(&mut self, bytes: &[u8]) {
         self.cs.set_low().unwrap();
         self.spi.as_mut().unwrap().write(bytes).unwrap();
         self.cs.set_high().unwrap();
+    }
+
+    pub fn spi_write_dma(&mut self, bytes: &[u8]) {
+        let page_buffer = self.current_page.take();
+        page_buffer[0..bytes.len()].copy_from_slice(bytes);
+        self.cs.set_low().unwrap();
+        let transfer = single_buffer::Config::new(
+            self.dma_channel_1.take().unwrap(),
+            page_buffer,
+            self.spi.take().unwrap(),
+        )
+        .start();
+        let (r_ch1, r_buf, spi) = transfer.wait();
+        self.cs.set_high().unwrap();
+        self.dma_channel_1 = Some(r_ch1);
+        self.current_page.inner = Some(r_buf);
+        self.spi = Some(spi);
     }
 
     fn print_feature(&mut self, name: &str, feature: u8) {
@@ -683,9 +787,9 @@ impl OnboardFlash {
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
-        assert_eq!(bytes.len(), 2112 + 4);
-        // Skip the first byte in the buffer
+        assert_eq!(bytes.len(), 2112 + 4); // 2116
 
+        // Skip the first byte in the buffer
         let b = block_index.unwrap_or(self.current_block_index);
         let p = page_index.unwrap_or(self.current_page_index);
         let address = OnboardFlash::get_address(b, p);
@@ -721,6 +825,7 @@ impl OnboardFlash {
         }
 
         //info!("Write address {:?}", address);
+        //self.spi_write_dma(&bytes[1..]);
         self.spi_write(&bytes[1..]);
         self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         let status = self.wait_for_ready();

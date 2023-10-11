@@ -6,44 +6,39 @@
 mod lepton;
 mod utils;
 
-pub mod bsp;
+mod bsp;
+mod clock_utils;
 mod cptv_encoder;
+mod double_frame_buffer;
+mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
 
+use crate::cptv_encoder::streaming_cptv::CptvStream;
+use crate::cptv_encoder::FRAME_WIDTH;
+use crate::double_frame_buffer::FRAME_SEGMENT_BUFFER;
+use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
+use crate::lepton::read_telemetry;
+use crate::onboard_flash::OnboardFlash;
+use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 use bsp::{
     entry,
     hal::{
-        clocks::{Clock, ClockSource, ClocksManager, StoppableClock},
+        clocks::{Clock, ClockSource, StoppableClock},
         multicore::{Multicore, Stack},
         pac,
         rosc::RingOscillator,
         sio::Sio,
-        xosc::setup_xosc_blocking,
         Spi,
     },
     pac::Peripherals,
-    XOSC_CRYSTAL_FREQ,
 };
-
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
+use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::*;
 use defmt_rtt as _;
-use lepton::Lepton;
-use panic_probe as _;
-
-use crate::bsp::pac::{DMA, RESETS, SPI1};
-use crate::cptv_encoder::streaming_cptv::CptvStream;
-use crate::cptv_encoder::FRAME_WIDTH;
-use crate::lepton::read_telemetry;
-use crate::onboard_flash::OnboardFlash;
-use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
-use core::cell::RefCell;
-use cortex_m::asm::nop;
-use cortex_m::singleton;
-use critical_section::Mutex;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_spi_Transfer,
@@ -51,16 +46,11 @@ use embedded_hal::prelude::{
 };
 use fugit::HertzU32;
 use fugit::RateExtU32;
-use rp2040_hal::clocks::init_clocks_and_plls;
-use rp2040_hal::dma::{
-    bidirectional, double_buffer, single_buffer, Channel, DMAExt, SingleChannel, CH0,
-};
-use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio8};
-use rp2040_hal::gpio::{
-    FunctionI2C, FunctionNull, FunctionSio, FunctionSpi, Interrupt, Pin, PinId, PullDown, PullNone,
-    SioInput, SioOutput,
-};
-use rp2040_hal::{Watchdog, I2C};
+use lepton::Lepton;
+use panic_probe as _;
+use rp2040_hal::dma::{DMAExt, SingleChannel};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
+use rp2040_hal::I2C;
 
 // This is 128KB, or half of our available memory
 static mut CORE1_STACK: Stack<32768> = Stack::new();
@@ -89,12 +79,6 @@ pub const SEGMENT_LENGTH: usize = (FRAME_WIDTH * 122) / 4;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins
 
 // transfer payloads to raspberry pi:
-const CAMERA_CONNECT_INFO: u8 = 0x1;
-const CAMERA_RAW_FRAME_TRANSFER: u8 = 0x2;
-const CAMERA_BEGIN_FILE_TRANSFER: u8 = 0x3;
-const CAMERA_RESUME_FILE_TRANSFER: u8 = 0x4;
-const CAMERA_END_FILE_TRANSFER: u8 = 0x5;
-const CAMERA_BEGIN_AND_END_FILE_TRANSFER: u8 = 0x6;
 
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
@@ -118,423 +102,25 @@ impl FrameSeg {
 }
 
 // TODO: Just double buffer this on scanlines, or even FIFO between cores?
-pub static FRAME_SEGMENT_BUFFER: DoubleBuffer = DoubleBuffer {
-    front: Mutex::new(RefCell::new([
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-    ])),
-    back: Mutex::new(RefCell::new([
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-    ])),
-    swapper: Mutex::new(RefCell::new(true)),
-};
-
-struct PiSpi {
-    pub spi: Option<
-        Spi<
-            rp2040_hal::spi::Enabled,
-            SPI1,
-            (
-                Pin<Gpio15, FunctionSpi, PullNone>, // miso
-                Pin<Gpio12, FunctionSpi, PullNone>, // mosi
-                Pin<Gpio14, FunctionSpi, PullNone>, // clk
-            ),
-            8,
-        >,
-    >,
-    cs_enabled: Option<Pin<Gpio13, FunctionSpi, PullNone>>, // cs
-    miso_disabled: Option<Pin<Gpio15, FunctionNull, PullNone>>,
-    mosi_disabled: Option<Pin<Gpio12, FunctionNull, PullNone>>,
-    clk_disabled: Option<Pin<Gpio14, FunctionNull, PullNone>>,
-    cs_disabled: Option<Pin<Gpio13, FunctionNull, PullNone>>,
-    ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
-    dma_channel: Option<Channel<CH0>>,
-    payload_buffer: Option<&'static mut [u8; 2066]>,
-    crc_buffer: Option<&'static mut [u8; 32]>,
-}
-
-impl PiSpi {
-    pub fn new(
-        mosi: Pin<Gpio12, FunctionNull, PullNone>,
-        cs: Pin<Gpio13, FunctionNull, PullNone>,
-        clk: Pin<Gpio14, FunctionNull, PullNone>,
-        miso: Pin<Gpio15, FunctionNull, PullNone>,
-        ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
-        dma_channel: Channel<CH0>,
-        payload_buffer: &'static mut [u8; 2066],
-        crc_buffer: &'static mut [u8; 32],
-    ) -> PiSpi {
-        PiSpi {
-            spi: None,
-            cs_enabled: None,
-            mosi_disabled: Some(mosi),
-            cs_disabled: Some(cs),
-            clk_disabled: Some(clk),
-            miso_disabled: Some(miso),
-            ping,
-            dma_channel: Some(dma_channel),
-            payload_buffer: Some(payload_buffer),
-            crc_buffer: Some(crc_buffer),
-        }
-    }
-
-    pub fn enable(&mut self, spi: SPI1, resets: &mut RESETS) {
-        self.cs_enabled = Some(
-            self.cs_disabled
-                .take()
-                .unwrap()
-                .into_function::<FunctionSpi>()
-                .into_pull_type(),
-        );
-        let spi = Spi::<_, _, _, 8>::new(
-            spi,
-            (
-                self.miso_disabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionSpi>()
-                    .into_pull_type(),
-                self.mosi_disabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionSpi>()
-                    .into_pull_type(),
-                self.clk_disabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionSpi>()
-                    .into_pull_type(),
-            ),
-        )
-        .init_slave(resets, &embedded_hal::spi::MODE_3);
-        self.spi = Some(spi);
-        self.ping.set_low().unwrap();
-    }
-
-    pub fn send_message(&mut self, message_type: u8, payload: &[u8], dma_peripheral: &mut DMA) {
-        // The transfer header contains the transfer type (2x)
-        // the number of bytes to read for the payload (should this be twice?)
-        // the 16 bit crc of the payload (twice)
-
-        // It is followed by the payload itself
-
-        let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
-        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-
-        let crc = crc_check.checksum(&payload);
-        transfer_header[0] = message_type;
-        transfer_header[1] = message_type;
-        LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
-        LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32);
-        LittleEndian::write_u16(&mut transfer_header[10..12], crc);
-        LittleEndian::write_u16(&mut transfer_header[12..14], crc);
-        LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
-        LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
-
-        // info!("Writing header {}", &transfer_header);
-
-        self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
-            .copy_from_slice(&transfer_header);
-        self.payload_buffer.as_mut().unwrap()
-            [transfer_header.len()..transfer_header.len() + payload.len()]
-            .copy_from_slice(&payload);
-
-        let mut transmit_success = false;
-        while !transmit_success {
-            self.ping.set_high().unwrap();
-            {
-                // Enable sniffing on the channel
-                dma_peripheral.ch[0]
-                    .ch_ctrl_trig
-                    .write(|w| w.sniff_en().set_bit());
-                // Set which channel the sniffer is sniffing
-                dma_peripheral
-                    .sniff_ctrl
-                    .write(|w| unsafe { w.dmach().bits(0) });
-                //let payload = self.payload_buffer.take().unwrap();
-                {
-                    let mut transfer = single_buffer::Config::new(
-                        self.dma_channel.take().unwrap(),
-                        self.payload_buffer.take().unwrap(),
-                        self.spi.take().unwrap(),
-                    )
-                    .start();
-                    self.ping.set_low().unwrap();
-                    maybe_abort_dma_transfer(dma_peripheral, 0);
-                    let (r_ch0, r_buf, spi) = transfer.wait();
-                    self.dma_channel = Some(r_ch0);
-                    self.payload_buffer = Some(r_buf);
-                    self.spi = Some(spi);
-                }
-                //self.payload_buffer = Some(payload);
-            }
-            self.ping.set_high().unwrap();
-            // Now read the crc from the pi
-            {
-                // TODO: Is all the DMA state reset now?
-
-                let transfer = single_buffer::Config::new(
-                    self.dma_channel.take().unwrap(),
-                    self.spi.take().unwrap(),
-                    self.crc_buffer.take().unwrap(),
-                )
-                .start();
-                self.ping.set_low().unwrap();
-                maybe_abort_dma_transfer(dma_peripheral, 0);
-                let (r_ch0, spi, r_buf) = transfer.wait();
-                self.dma_channel = Some(r_ch0);
-
-                // Find offset crc in buffer:
-                if let Some(start) = r_buf.iter().position(|&x| x == 1) {
-                    if start < r_buf.len() - 8 {
-                        let prelude = &r_buf[start + 1..start + 4];
-                        if prelude[0] == 2 && prelude[1] == 3 && prelude[2] == 4 {
-                            let crc_from_remote =
-                                LittleEndian::read_u16(&r_buf[start + 4..start + 6]);
-                            let crc_from_remote_dup =
-                                LittleEndian::read_u16(&r_buf[start + 6..start + 8]);
-                            if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc {
-                                //info!("Success!");
-                                transmit_success = true;
-                            }
-                        }
-                    }
-                }
-                self.crc_buffer = Some(r_buf);
-                self.spi = Some(spi);
-            }
-        }
-    }
-
-    pub fn disable(&mut self) -> SPI1 {
-        let spi = self.spi.take().unwrap();
-        let spi_disabled = spi.disable();
-        let (spi_free, (miso, mosi, clk)) = spi_disabled.free();
-        self.mosi_disabled = Some(mosi.into_function::<FunctionNull>().into_pull_type());
-        self.cs_disabled = Some(
-            self.cs_enabled
-                .take()
-                .unwrap()
-                .into_function::<FunctionNull>()
-                .into_pull_type(),
-        );
-        self.clk_disabled = Some(clk.into_function::<FunctionNull>().into_pull_type());
-        self.miso_disabled = Some(miso.into_function::<FunctionNull>().into_pull_type());
-        spi_free
-    }
-
-    pub fn write(&mut self, bytes: &[u8]) {
-        self.spi.as_mut().unwrap().write(bytes).unwrap()
-    }
-
-    pub fn flush(&mut self) {
-        // while !self.is_empty() {
-        //     let b = self.read_byte();
-        // }
-        //self.spi.as_mut().unwrap().flush().unwrap();
-
-        //&mut hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>
-
-        //Option<hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>>::flush()
-    }
-
-    pub fn schmitt(&self) -> bool {
-        self.cs_enabled.as_ref().unwrap().get_schmitt_enabled()
-    }
-
-    pub fn align_sync(&mut self) {
-        //info!("Aligning");
-        //let pattern = [1, 2, 3, 4];
-        let mut buf = [0u8; 1];
-
-        // Master sends 255 continuously.
-        // When we get it, we reply with 1
-
-        // Master replies with 2
-        // Master breaks, we break;
-
-        loop {
-            // Looks like transfer to master is always offset by one byte in this scheme, a write, then a read,
-            // rather than shifting each out at the same time.
-            let response = self.spi.as_mut().unwrap().transfer(&mut buf).unwrap();
-            if response[0] == 255 {
-                buf[0] = 1;
-            } else if response[0] == 2 {
-                break;
-            }
-        }
-        //info!("Aligned");
-    }
-
-    pub fn transfer<'a>(&mut self, bytes: &'a mut [u8]) -> &'a [u8] {
-        self.spi.as_mut().unwrap().transfer(bytes).unwrap()
-    }
-
-    pub fn is_busy(&self) -> bool {
-        self.spi.as_ref().unwrap().is_busy()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.spi.as_ref().unwrap().is_empty()
-    }
-
-    pub fn read_byte(&mut self) -> u32 {
-        if !self.is_empty() {
-            self.spi.as_mut().unwrap().read().unwrap() as u32
-        } else {
-            1000u32
-        }
-    }
-}
-pub struct DoubleBuffer {
-    front: Mutex<RefCell<[FrameSeg; 4]>>,
-    back: Mutex<RefCell<[FrameSeg; 4]>>,
-    swapper: Mutex<RefCell<bool>>,
-}
-
-impl DoubleBuffer {
-    pub fn swap(&self) {
-        critical_section::with(|cs| {
-            let mut val = self.swapper.borrow_ref_mut(cs);
-            *val = !*val;
-        });
-    }
-
-    pub fn get_front(&self) -> &Mutex<RefCell<[FrameSeg; 4]>> {
-        let mut val = false;
-        critical_section::with(|cs| {
-            val = *self.swapper.borrow(cs).borrow();
-        });
-        if val {
-            &self.front
-        } else {
-            &self.back
-        }
-    }
-
-    pub fn get_back(&self) -> &Mutex<RefCell<[FrameSeg; 4]>> {
-        let mut val = false;
-        critical_section::with(|cs| {
-            val = *self.swapper.borrow(cs).borrow();
-        });
-        if val {
-            &self.back
-        } else {
-            &self.front
-        }
-    }
-}
 
 fn go_dormant_until_next_vsync<T: PinId>(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut Lepton<T>,
-    rosc_freq_hz: u32,
+    rosc_freq: HertzU32,
 ) -> RingOscillator<bsp::hal::rosc::Enabled> {
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
     let dormant_rosc = unsafe { rosc.dormant() };
     let disabled_rosc = RingOscillator::new(dormant_rosc.free());
-    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq_hz.Hz());
+    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
     initialized_rosc
-}
-
-fn maybe_abort_dma_transfer(dma: &mut DMA, channel: u32) {
-    // If the raspberry pi host requests less bytes than we want to send, we'd stall forever
-    // unless we keep tabs on whether or not the channel has stalled, and abort appropriately.
-    let mut prev_count = dma.ch[channel as usize].ch_trans_count.read().bits();
-    let mut prev_crc = dma.sniff_data.read().bits();
-    let mut same_count = 0;
-    let mut same_crc = 0;
-    let mut needs_abort = false;
-    loop {
-        let count = dma.ch[channel as usize].ch_trans_count.read().bits();
-        let crc = dma.sniff_data.read().bits();
-        if count == dma.ch0_dbg_tcr.read().bits() && crc != prev_crc {
-            // Completed full transfer successfully.
-            break;
-        }
-        if count == prev_count {
-            same_count += 1;
-        }
-        if crc == prev_crc {
-            same_crc += 1;
-        }
-        if same_count == 10_000 {
-            needs_abort = true;
-            break;
-        }
-        if same_crc == 10_000 {
-            needs_abort = true;
-            break;
-        }
-        prev_count = count;
-        prev_crc = crc;
-    }
-    if needs_abort && dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {
-        info!(
-            "Aborting dma transfer at count {} of {}, dreq {}",
-            prev_count,
-            dma.ch0_dbg_tcr.read().bits(),
-            dma.ch0_dbg_ctdreq.read().bits()
-        );
-        // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
-        let inte0 = dma.inte0.read().bits();
-        let inte1 = dma.inte1.read().bits();
-        let mask = (1u32 << channel).reverse_bits();
-        dma.inte0.write(|w| unsafe { w.bits(inte0 & mask) });
-        dma.inte1.write(|w| unsafe { w.bits(inte1 & mask) });
-        // Abort all dma transfers
-        dma.chan_abort.write(|w| unsafe { w.bits(1 << channel) });
-
-        while dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {}
-
-        dma.inte0.write(|w| unsafe { w.bits(inte0) });
-        dma.inte1.write(|w| unsafe { w.bits(inte1) });
-    }
-}
-
-fn get_crc_from_remote(pi_spi: &mut PiSpi, comparison_crc: u16) -> bool {
-    // For whatever reason, we need to get re-aligned here.
-    let mut success_crc = [0u8; 4];
-    let mut i = 0;
-    loop {
-        let mut b = 1000;
-        while b == 1000 {
-            b = pi_spi.read_byte();
-        }
-        success_crc[i] = b as u8;
-        i += 1;
-        if i == 4 {
-            break;
-        }
-    }
-
-    {
-        let crc_from_remote = LittleEndian::read_u16(&success_crc[0..2]);
-        let crc_from_remote_2 = LittleEndian::read_u16(&success_crc[2..4]);
-        if crc_from_remote == crc_from_remote_2 && crc_from_remote == comparison_crc {
-            true
-        } else {
-            // warn!(
-            //     "crc check failed, re-transmit, ({} vs {}) - ({:?})",
-            //     comparison_crc,
-            //     crc_from_remote,
-            //     &success_crc[2..4]
-            // );
-            false
-        }
-    }
 }
 
 fn go_dormant_until_woken<T: PinId, T2: PinId>(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     wake_pin: &mut Pin<T2, FunctionSio<SioInput>, PullNone>,
     lepton: &mut Lepton<T>,
-    rosc_freq_hz: u32,
+    rosc_freq: HertzU32,
 ) -> RingOscillator<bsp::hal::rosc::Enabled> {
     lepton
         .vsync
@@ -543,7 +129,7 @@ fn go_dormant_until_woken<T: PinId, T2: PinId>(
     let dormant_rosc = unsafe { rosc.dormant() };
     // Woken by pin
     let disabled_rosc = RingOscillator::new(dormant_rosc.free());
-    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq_hz.Hz());
+    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     initialized_rosc
 }
@@ -560,75 +146,22 @@ fn wake_raspberry_pi() {
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
 
-    let rosc_clock_freq: HertzU32 = 150_000_000.Hz(); //52.76mA, 25Mhz spi clock
-
-    // NOTE: Actual clock speed achieved will depend on multiplier with system clock.  In practice
-    //  the lepton seems happy enough at 28Mhz SPI.  Even at 37Mhz
+    let rosc_clock_freq: HertzU32 = 150_000_000.Hz();
     let lepton_spi_clock_freq: HertzU32 = 40_000_000.Hz();
 
     let mut peripherals = Peripherals::take().unwrap();
-
-    /*
-        let mut watchdog = Watchdog::new(peripherals.WATCHDOG);
-        let clocks = init_clocks_and_plls(
-            XOSC_CRYSTAL_FREQ,
-            peripherals.XOSC,
-            peripherals.CLOCKS,
-            peripherals.PLL_SYS,
-            peripherals.PLL_USB,
-            &mut peripherals.RESETS,
-            &mut watchdog,
-        )
-        .ok()
-        .unwrap();
-    */
-
-    //Enable the xosc, so that we can measure the rosc clock speed
-
-    let xosc = match setup_xosc_blocking(peripherals.XOSC, XOSC_CRYSTAL_FREQ.Hz()) {
-        Ok(xosc) => xosc,
-        Err(_) => crate::panic!("xosc"),
-    };
-
-    let mut clocks = ClocksManager::new(peripherals.CLOCKS);
-    clocks
-        .reference_clock
-        .configure_clock(&xosc, XOSC_CRYSTAL_FREQ.Hz())
-        .unwrap();
-
-    let measured_rosc_frequency =
-        utils::find_target_rosc_frequency(&peripherals.ROSC, rosc_clock_freq.to_Hz());
-    let rosc = RingOscillator::new(peripherals.ROSC);
-    let mut rosc = rosc.initialize_with_freq(measured_rosc_frequency.Hz());
-    let measured_hz: HertzU32 = measured_rosc_frequency.Hz();
+    let (clocks, mut rosc) = clock_utils::setup_rosc_as_system_clock(
+        peripherals.CLOCKS,
+        peripherals.XOSC,
+        peripherals.ROSC,
+        rosc_clock_freq,
+    );
     info!(
-        "Got {}, desired {}",
-        measured_hz.to_MHz(),
-        rosc_clock_freq.to_MHz()
+        "System clock speed {}MHz",
+        clocks.system_clock.freq().to_MHz()
     );
 
-    clocks
-        .system_clock
-        .configure_clock(&rosc, rosc.get_freq())
-        .unwrap();
-
-    info!("System clock speed {}", clocks.system_clock.freq().to_MHz());
-    let _xosc_disabled = xosc.disable();
-
-    clocks.usb_clock.disable();
-    clocks.gpio_output0_clock.disable();
-    clocks.gpio_output1_clock.disable();
-    clocks.gpio_output2_clock.disable();
-    clocks.gpio_output3_clock.disable();
-    clocks.adc_clock.disable();
-    clocks.rtc_clock.disable();
-
-    // NOTE: PLLs are disabled by default.
-    clocks
-        .peripheral_clock
-        .configure_clock(&clocks.system_clock, clocks.system_clock.freq())
-        .unwrap();
-
+    crate::unreachable!("Break");
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
 
@@ -648,8 +181,11 @@ fn main() -> ! {
     let num_seconds = 80;
     let num_frames_to_record = num_seconds * 9;
 
+    // TODO: I'd rather have these static arrays in ram.  Can we just unsafe pinky promise that they live for static?
     let crc_buf = singleton!(: [u8; 32] = [0x42; 32]).unwrap();
     let payload_buf = singleton!(: [u8; 2066] = [0x42; 2066]).unwrap();
+    let flash_page_buf = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
+    let flash_page_buf_2 = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
     {
         let pi_ping = pins.gpio5.into_push_pull_output();
         let cs = pins.gpio9.into_push_pull_output();
@@ -662,7 +198,7 @@ fn main() -> ! {
         let fs_clk = pins.gpio10.into_pull_down_disabled().into_pull_type();
         let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
-        let mut pi_spi = PiSpi::new(
+        let mut pi_spi = ExtSpiTransfers::new(
             pi_mosi,
             pi_cs,
             pi_clk,
@@ -675,18 +211,27 @@ fn main() -> ! {
 
         let mut spi_peripheral = Some(peripherals.SPI1);
         let clock_freq = clocks.peripheral_clock.freq();
-        let mut flash_storage = OnboardFlash::new(cs, fs_mosi, fs_clk, fs_miso);
+        let mut flash_storage = OnboardFlash::new(
+            cs,
+            fs_mosi,
+            fs_clk,
+            fs_miso,
+            flash_page_buf,
+            flash_page_buf_2,
+            dma_channels.ch1,
+            dma_channels.ch2,
+        );
         {
-            flash_storage.take_spi(
-                spi_peripheral.take().unwrap(),
-                &mut peripherals.RESETS,
-                clock_freq,
-            );
-            flash_storage.init();
-            info!(
-                "Finished scan, needs offload? {}",
-                flash_storage.has_files_to_offload()
-            );
+            // flash_storage.take_spi(
+            //     spi_peripheral.take().unwrap(),
+            //     &mut peripherals.RESETS,
+            //     clock_freq,
+            // );
+            // flash_storage.init();
+            // info!(
+            //     "Finished scan, needs offload? {}",
+            //     flash_storage.has_files_to_offload()
+            // );
         }
 
         // let (mut pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
@@ -711,7 +256,11 @@ fn main() -> ! {
                 LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
                 LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
 
-                pi_spi.send_message(CAMERA_CONNECT_INFO, &payload, &mut peripherals.DMA);
+                pi_spi.send_message(
+                    ExtTransferMessage::CameraConnectInfo,
+                    &payload,
+                    &mut peripherals.DMA,
+                );
 
                 let spi_free = pi_spi.disable();
                 flash_storage.take_spi(spi_free, &mut peripherals.RESETS, clock_freq);
@@ -719,8 +268,10 @@ fn main() -> ! {
             // TODO: Switch modes here.
             //  If there are files to upload, do that.
             //  If the pi requests raw frames, do that (as well as being able to write to flash)
+            //  Possibly we can get away with doing this via the PIO transfers?  Let's try!
+            //  And then we switch to spi at the end to do the read-back?
 
-            if flash_storage.has_files_to_offload() {
+            if false && flash_storage.has_files_to_offload() {
                 warn!("There are files to offload!");
                 if !raspberry_pi_is_awake {
                     wake_raspberry_pi();
@@ -737,21 +288,23 @@ fn main() -> ! {
                         //fs_pins.disable();
                         pi_spi.enable(spi, &mut peripherals.RESETS);
                         let transfer_type = if file_start && !is_last {
-                            CAMERA_BEGIN_FILE_TRANSFER
+                            ExtTransferMessage::BeginFileTransfer
                         } else if !file_start && !is_last {
-                            CAMERA_RESUME_FILE_TRANSFER
+                            ExtTransferMessage::ResumeFileTransfer
                         } else if is_last {
-                            CAMERA_END_FILE_TRANSFER
+                            ExtTransferMessage::EndFileTransfer
                         } else if file_start && is_last {
-                            CAMERA_BEGIN_AND_END_FILE_TRANSFER
+                            ExtTransferMessage::BeginAndEndFileTransfer
                         } else {
                             crate::unreachable!("Invalid file transfer state");
                         };
                         let tt = match transfer_type {
-                            CAMERA_BEGIN_FILE_TRANSFER => "BEGIN FILE TRANSFER",
-                            CAMERA_RESUME_FILE_TRANSFER => "CONTINUE FILE TRANSFER",
-                            CAMERA_END_FILE_TRANSFER => "END FILE TRANSFER",
-                            CAMERA_BEGIN_AND_END_FILE_TRANSFER => "BEGIN & END FILE TRANSFER",
+                            ExtTransferMessage::BeginFileTransfer => "BEGIN FILE TRANSFER",
+                            ExtTransferMessage::ResumeFileTransfer => "CONTINUE FILE TRANSFER",
+                            ExtTransferMessage::EndFileTransfer => "END FILE TRANSFER",
+                            ExtTransferMessage::BeginAndEndFileTransfer => {
+                                "BEGIN & END FILE TRANSFER"
+                            }
                             _ => crate::unreachable!("Invalid"),
                         };
                         //info!("tt {}, part len {}", tt, part.len());
@@ -1048,7 +601,7 @@ fn main() -> ! {
         }
         if got_sync && current_segment_num > last_segment_num_for_frame && !is_recording {
             // Go to sleep, skip dummy segment
-            rosc = go_dormant_until_next_vsync(rosc, &mut lepton, measured_rosc_frequency);
+            rosc = go_dormant_until_next_vsync(rosc, &mut lepton, clocks.system_clock.freq());
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
@@ -1347,7 +900,6 @@ fn main() -> ! {
         }
 
         // TODO Check when can't get frames from lepton also.
-
         // Run `i2cset -y 1 0x25 0x02 0x03` on the pi to make it look like the RPi is powered off.
         // Run `i2cset -y 1 0x25 0x02 0x01` on the pi to make it look like the RPi is powered on.
         // Note that those you will want to have the RPi powered separately.
@@ -1389,7 +941,7 @@ fn main() -> ! {
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
         if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
             //wake_interrupt_pin.set_low().unwrap();
-            rosc = go_dormant_until_next_vsync(rosc, &mut lepton, measured_rosc_frequency);
+            rosc = go_dormant_until_next_vsync(rosc, &mut lepton, clocks.system_clock.freq());
             //wake_interrupt_pin.set_high().unwrap();
         } else if current_segment_num == 3 {
             //warn!("Overrunning frame time");

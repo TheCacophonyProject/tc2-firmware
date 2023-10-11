@@ -844,7 +844,7 @@ impl<T: PinId> Lepton<T> {
         info!("de-assert reset");
         delay.delay_ms(2000);
         info!("Wait for ready");
-        self.wait_for_ready(true);
+        self.wait_for_ready(false);
         self.init();
     }
 
@@ -968,7 +968,7 @@ impl<T: PinId> Lepton<T> {
                 return LeptonError::from_i8((camera_status >> 8) as i8);
             } else {
                 failures += 1;
-                warn!("i2c error");
+                //warn!("i2c error");
                 if print {
                     info!("Booted {:#018b}", camera_status & LEPTON_BOOTED);
                     info!("Boot mode {:#018b}", camera_status & LEPTON_BOOT_MODE);

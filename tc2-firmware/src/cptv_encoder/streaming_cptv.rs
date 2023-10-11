@@ -374,6 +374,10 @@ fn make_crc_table() -> [u32; 256] {
     }
     table
 }
+
+// TODO: Re-use same page buffer for cptv stream and flash storage - hand one off to the other and back.
+// Although, DMA needs to transfer the whole buffer, modulo aborts, and they're quite different sizes.
+
 impl CptvStream {
     pub fn new(current_time: u64, flash_storage: &mut OnboardFlash) -> CptvStream {
         let starting_block_index = flash_storage.start_file();
