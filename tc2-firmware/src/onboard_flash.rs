@@ -219,7 +219,11 @@ impl Page {
     }
 }
 
-unsafe fn extend_lifetime<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
+unsafe fn extend_lifetime<'b>(r: &'b [u8]) -> &'static [u8] {
+    mem::transmute::<&'b [u8], &'static [u8]>(r)
+}
+
+unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
     mem::transmute::<&'b mut [u8], &'static mut [u8]>(r)
 }
 
@@ -299,15 +303,15 @@ impl OnboardFlash {
         self.scan();
         self.unlock_blocks();
         // if erase {
-        // info!("Erasing");
+        info!("Erasing");
         //
-        // for block in 0..2048 {
-        //     if !self.erase_block(block).is_ok() {
-        //         error!("Block erase failed for block {}", block);
-        //     }
+        for block in 0..2048 {
+            if !self.erase_block(block).is_ok() {
+                error!("Block erase failed for block {}", block);
+            }
+        }
+        self.scan();
         // }
-        // self.scan();
-        // // }
         // crate::unreachable!("Foo");
     }
 
@@ -328,8 +332,7 @@ impl OnboardFlash {
         // Find first good free block:
         {
             self.read_page(0, 1).unwrap();
-            self.read_page_from_cache(0);
-            info!("Page {:?}", self.current_page.inner.as_ref().unwrap());
+            self.read_page_metadata(0);
             self.wait_for_all_ready();
             if self.current_page.page_is_used() {
                 warn!("Page 1 has data");
@@ -344,9 +347,15 @@ impl OnboardFlash {
             // For simplicity at the moment, just read the full pages
             self.read_page(block_index, 0).unwrap();
             self.read_page_metadata(block_index);
+            info!(
+                "current_page {:?}, {:?}",
+                self.current_page.bad_block_data(),
+                self.current_page.user_metadata_1()
+            );
+
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
-                warn!("Found bad block {}", block_index);
+                //warn!("Found bad block {}", block_index);
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
@@ -664,20 +673,22 @@ impl OnboardFlash {
         let prev_page = self.prev_page.take();
         {
             self.cs.set_low().unwrap();
-            let target_offset = (offset - 4).max(0) as usize;
+
+            // If the offset is 2048, we want the actual offset in our buffer to be 2052, then the
+            // start is at 2048
+            let offset = offset as usize;
             let src_range = 0..length + 4;
-            let dst_range = target_offset..target_offset + length + 4;
-            //info!("Src {:?}, Dst {:?}", src_range, dst_range);
+            let dst_range = offset..offset + length + 4;
             crate::assert_eq!(src_range.len(), dst_range.len());
             let transfer = bidirectional::Config::new(
                 (
                     self.dma_channel_1.take().unwrap(),
                     self.dma_channel_2.take().unwrap(),
                 ),
-                unsafe { extend_lifetime(&mut current_page[src_range]) },
+                unsafe { extend_lifetime(&current_page[src_range]) },
                 self.spi.take().unwrap(),
                 // TO ensure the data is placed in the correct place on the page, offset by -4
-                unsafe { extend_lifetime(&mut prev_page[dst_range]) },
+                unsafe { extend_lifetime_mut(&mut prev_page[dst_range]) },
             )
             .start();
             let ((r_ch1, r_ch2), r_tx_buf, spi, r_rx_buf) = transfer.wait();
@@ -714,11 +725,11 @@ impl OnboardFlash {
     }
 
     pub fn read_page_metadata(&mut self, block: isize) {
-        self.read_from_cache_at_column_offset_spi(block, 2048, None);
+        self.read_from_cache_at_column_offset(block, 2048, None);
     }
 
     pub fn read_page_from_cache(&mut self, block: isize) {
-        self.read_from_cache_at_column_offset_spi(block, 0, None);
+        self.read_from_cache_at_column_offset(block, 0, None);
     }
     pub fn spi_write(&mut self, bytes: &[u8]) {
         self.cs.set_low().unwrap();
@@ -727,19 +738,16 @@ impl OnboardFlash {
     }
 
     pub fn spi_write_dma(&mut self, bytes: &[u8]) {
-        let page_buffer = self.current_page.take();
-        page_buffer[0..bytes.len()].copy_from_slice(bytes);
         self.cs.set_low().unwrap();
         let transfer = single_buffer::Config::new(
             self.dma_channel_1.take().unwrap(),
-            page_buffer,
+            unsafe { extend_lifetime(bytes) },
             self.spi.take().unwrap(),
         )
         .start();
         let (r_ch1, r_buf, spi) = transfer.wait();
         self.cs.set_high().unwrap();
         self.dma_channel_1 = Some(r_ch1);
-        self.current_page.inner = Some(r_buf);
         self.spi = Some(spi);
     }
 
@@ -785,6 +793,8 @@ impl OnboardFlash {
         page_index: Option<isize>,
     ) {
         self.write_enable();
+        // FIXME Are we now getting bubbles in our spi transfers?
+        // Maybe check we can write the id?
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
         assert_eq!(bytes.len(), 2112 + 4); // 2116
@@ -825,9 +835,11 @@ impl OnboardFlash {
         }
 
         //info!("Write address {:?}", address);
-        //self.spi_write_dma(&bytes[1..]);
-        self.spi_write(&bytes[1..]);
+        self.spi_write_dma(&bytes[1..]);
+        //self.spi_write(&bytes[1..]);
         self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+
+        // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
         let status = self.wait_for_ready();
 
         // TODO: Check ECC status, mark and relocate block if needed.

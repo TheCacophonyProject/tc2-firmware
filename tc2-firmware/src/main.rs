@@ -160,8 +160,10 @@ fn main() -> ! {
         "System clock speed {}MHz",
         clocks.system_clock.freq().to_MHz()
     );
+    if clocks.system_clock.freq().to_MHz() == 12 {
+        crate::panic!("Invalid clock speed");
+    }
 
-    crate::unreachable!("Break");
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
 
@@ -177,7 +179,7 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut peripherals.RESETS,
     );
-    let should_record_new = false;
+    let should_record_new = true;
     let num_seconds = 80;
     let num_frames_to_record = num_seconds * 9;
 
@@ -222,24 +224,48 @@ fn main() -> ! {
             dma_channels.ch2,
         );
         {
-            // flash_storage.take_spi(
-            //     spi_peripheral.take().unwrap(),
-            //     &mut peripherals.RESETS,
-            //     clock_freq,
-            // );
-            // flash_storage.init();
-            // info!(
-            //     "Finished scan, needs offload? {}",
-            //     flash_storage.has_files_to_offload()
-            // );
+            flash_storage.take_spi(
+                spi_peripheral.take().unwrap(),
+                &mut peripherals.RESETS,
+                clock_freq,
+            );
+            //delay.delay_ms(5000);
+            flash_storage.init();
+            info!(
+                "Finished scan, needs offload? {}",
+                flash_storage.has_files_to_offload()
+            );
+            let user_bytes = [0x00u8; 2048];
+            let mut bytes = [0xffu8; 2112 + 4];
+            bytes[0..user_bytes.len()].copy_from_slice(&user_bytes);
+            for block in 0..50 {
+                for page in 0..64 {
+                    let is_last = block == 49 && page == 63;
+                    flash_storage.append_file_bytes(&mut bytes[..], 2048, is_last, None, None);
+                }
+            }
+            for block in 0..50 {
+                for page in 0..64 {
+                    flash_storage.read_page(block, page).unwrap();
+                    flash_storage.read_page_from_cache(block);
+                    for (a, b) in flash_storage
+                        .current_page
+                        .user_data()
+                        .iter()
+                        .zip(&user_bytes)
+                    {
+                        crate::assert_eq!(*a, *b, "Got {}, should be {}", *a, *b);
+                    }
+                }
+            }
         }
-
-        // let (mut pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+        delay.delay_ms(1000);
+        crate::unreachable!("Break");
 
         let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
             // NOTE: This creates a buffer with a static lifetime, which is safe to access only this
             //  thread.
-            let raspberry_pi_is_awake = true;
+            let raspberry_pi_is_awake = false;
             let mut peripherals = unsafe { Peripherals::steal() };
             let core = unsafe { pac::CorePeripherals::steal() };
             let mut delay = Delay::new(core.SYST, sys_freq);
@@ -250,8 +276,8 @@ fn main() -> ! {
 
             if raspberry_pi_is_awake {
                 let mut payload = [0u8; 8];
-                //let free_spi = flash_storage.free_spi();
-                pi_spi.enable(spi_peripheral.take().unwrap(), &mut peripherals.RESETS);
+                let free_spi = flash_storage.free_spi();
+                pi_spi.enable(free_spi, &mut peripherals.RESETS);
 
                 LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
                 LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
