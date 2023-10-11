@@ -174,7 +174,6 @@ fn find_target_rosc_frequency(
     let mut measured_rosc_frequency;
     loop {
         measured_rosc_frequency = rosc_frequency_count_hz(clocks);
-        info!("measured {:?}", measured_rosc_frequency.to_Hz());
         // If it has overshot the target frequency, increase the divider and continue.
         if measured_rosc_frequency > target_frequency {
             div += 1;
@@ -185,7 +184,6 @@ fn find_target_rosc_frequency(
     }
     loop {
         measured_rosc_frequency = rosc_frequency_count_hz(clocks);
-        info!("measured {:?}", measured_rosc_frequency.to_Hz());
         if measured_rosc_frequency > target_frequency {
             // And probably want to step it down a notch?
             break;

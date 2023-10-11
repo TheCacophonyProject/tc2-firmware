@@ -250,8 +250,8 @@ fn main() -> ! {
 
             if raspberry_pi_is_awake {
                 let mut payload = [0u8; 8];
-                let free_spi = flash_storage.free_spi();
-                pi_spi.enable(free_spi, &mut peripherals.RESETS);
+                //let free_spi = flash_storage.free_spi();
+                pi_spi.enable(spi_peripheral.take().unwrap(), &mut peripherals.RESETS);
 
                 LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
                 LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
