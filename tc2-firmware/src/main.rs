@@ -317,7 +317,7 @@ fn main() -> ! {
             //  Possibly we can get away with doing this via the PIO transfers?  Let's try!
             //  And then we switch to spi at the end to do the read-back?
 
-            if false && flash_storage.has_files_to_offload() {
+            if flash_storage.has_files_to_offload() {
                 warn!("There are files to offload!");
                 if !raspberry_pi_is_awake {
                     wake_raspberry_pi();
@@ -397,6 +397,8 @@ fn main() -> ! {
             let mut paused_cptv_recording_with_static_target_in_frame = false;
             let mut frames_written = 0;
             let mut frames_seen = 0;
+            let mut prev_frame_number = 0;
+            let mut prev_time_on_ms = 0;
             loop {
                 let input = sio.fifo.read_blocking();
                 crate::debug_assert_eq!(
@@ -432,10 +434,6 @@ fn main() -> ! {
                 let frame_buffer = unsafe { &mut FRAME_BUFFER[4..] };
                 let frame_telemetry = read_telemetry(&frame_buffer);
                 frames_seen += 1;
-                // TODO: Add the frame to the current CPTV encode
-
-                // TODO: Reserve next free page in storage for the cptv header, which will be written out
-                // after the rest of the file.
                 let should_start_new_recording = !motion_has_triggered
                     && this_frame_has_motion
                     && cptv_stream.is_none()
@@ -447,8 +445,6 @@ fn main() -> ! {
                     && cptv_stream.is_some();
 
                 let raw_frame = unsafe { u8_slice_to_u16(&FRAME_BUFFER[644..]) }; // Telemetry + 4 byte header skipped
-
-                //crate::assert_ne!(should_start_new_recording, should_end_current_recording);
                 if should_start_new_recording && frames_written < num_frames_to_record {
                     error!("Starting new recording");
                     motion_has_triggered = true;
@@ -456,7 +452,8 @@ fn main() -> ! {
                     // TODO: Record the current time when recording starts
 
                     // TODO: Pass in various cptv header info bits.
-                    let mut cptv_streamer = CptvStream::new(0, &mut flash_storage);
+                    let lepton_version = if radiometry_enabled { 35 } else { 3 };
+                    let mut cptv_streamer = CptvStream::new(0, lepton_version, &mut flash_storage);
                     cptv_streamer.init(&mut flash_storage, false);
                     cptv_stream = Some(cptv_streamer);
 
@@ -465,15 +462,29 @@ fn main() -> ! {
                     // Write out the cptv header, with placeholders, then write out the previous
                     // frame and the current frame.  Going dormant on the main thread gets turned off?  Maybe, we'll see
                 }
-                if let Some(cptv_stream) = &mut cptv_stream {
-                    // TODO: double buffer prev/current raw frames?
-                    // At this point, do we really even want two cores running in tandem?
-                    //wake_interrupt_pin.set_high().unwrap();
-                    cptv_stream.push_frame(raw_frame, &frame_telemetry, &mut flash_storage);
-                    //wake_interrupt_pin.set_low().unwrap();
-                    frames_written += 1;
-                }
-                if should_end_current_recording || frames_written == num_frames_to_record {
+                if !should_end_current_recording && frames_written != num_frames_to_record {
+                    if let Some(cptv_stream) = &mut cptv_stream {
+                        // TODO: double buffer prev/current raw frames?
+                        // At this point, do we really even want two cores running in tandem?
+                        //wake_interrupt_pin.set_high().unwrap();
+                        if frame_telemetry.frame_num == prev_frame_number {
+                            warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                        }
+                        if frame_telemetry.msec_on == prev_time_on_ms {
+                            warn!(
+                                "Duplicate frame {} (same time {})",
+                                frame_telemetry.frame_num, frame_telemetry.msec_on
+                            );
+                        }
+                        prev_frame_number = frame_telemetry.frame_num;
+                        prev_time_on_ms = frame_telemetry.msec_on;
+                        cptv_stream.push_frame(raw_frame, &frame_telemetry, &mut flash_storage);
+                        //wake_interrupt_pin.set_low().unwrap();
+                        frames_written += 1;
+                    }
+                } else {
+                    // Finalise on a a different frame period to writing out the prev/last frame,
+                    // to give more breathing room.
                     if let Some(cptv_stream) = &mut cptv_stream {
                         error!("Ending current recording");
                         cptv_stream.finalise(&mut flash_storage);
@@ -928,8 +939,18 @@ fn main() -> ! {
                     if let Some(message) = sio.fifo.read() {
                         if message == CORE1_RECORDING_STARTED {
                             is_recording = true;
+                            let message = sio.fifo.read_blocking();
+                            if message == CORE1_TASK_COMPLETE {
+                                transferring_prev_frame = false;
+                                prev_frame_needs_transfer = false;
+                            }
                         } else if message == CORE1_RECORDING_ENDED {
                             is_recording = false;
+                            let message = sio.fifo.read_blocking();
+                            if message == CORE1_TASK_COMPLETE {
+                                transferring_prev_frame = false;
+                                prev_frame_needs_transfer = false;
+                            }
                         } else if message == CORE1_TASK_COMPLETE {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;

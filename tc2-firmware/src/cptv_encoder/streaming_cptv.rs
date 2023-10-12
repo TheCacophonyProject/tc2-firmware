@@ -379,7 +379,11 @@ fn make_crc_table() -> [u32; 256] {
 // Although, DMA needs to transfer the whole buffer, modulo aborts, and they're quite different sizes.
 
 impl CptvStream {
-    pub fn new(current_time: u64, flash_storage: &mut OnboardFlash) -> CptvStream {
+    pub fn new(
+        current_time: u64,
+        lepton_version: u8,
+        flash_storage: &mut OnboardFlash,
+    ) -> CptvStream {
         let starting_block_index = flash_storage.start_file();
         CptvStream {
             cursor: BitCursor::new(),
@@ -388,7 +392,7 @@ impl CptvStream {
             total_uncompressed: 0,
             starting_block_index: starting_block_index as u16,
             prev_frame: [0u16; FRAME_WIDTH * FRAME_HEIGHT + 1],
-            cptv_header: Cptv2Header::new(current_time),
+            cptv_header: Cptv2Header::new(current_time, lepton_version),
         }
     }
 
@@ -765,7 +769,7 @@ pub struct Cptv2Header {
 }
 
 impl Cptv2Header {
-    pub fn new(timestamp: u64) -> Cptv2Header {
+    pub fn new(timestamp: u64, lepton_version: u8) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
@@ -787,7 +791,11 @@ impl Cptv2Header {
         };
         let device_name = b"<unknown>";
         header.device_name[0..device_name.len()].copy_from_slice(device_name);
-        let model = b"lepton3.5";
+        let model = if lepton_version == 3 {
+            b"lepton3.5"
+        } else {
+            b"lepton3"
+        };
         header.model[0..model.len()].copy_from_slice(model);
 
         header
