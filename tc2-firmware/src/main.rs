@@ -180,7 +180,7 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
     let should_record_new = true;
-    let num_seconds = 80;
+    let num_seconds = 180;
     let num_frames_to_record = num_seconds * 9;
 
     // TODO: I'd rather have these static arrays in ram.  Can we just unsafe pinky promise that they live for static?
@@ -229,58 +229,13 @@ fn main() -> ! {
                 &mut peripherals.RESETS,
                 clock_freq,
             );
-            delay.delay_ms(5000);
+            //delay.delay_ms(5000);
             flash_storage.init();
             info!(
                 "Finished scan, needs offload? {}",
                 flash_storage.has_files_to_offload()
             );
-            let test = false;
-            if test {
-                let mut user_bytes = [0x00u8; 2048];
-                let mut i = 0;
-                for b in &mut user_bytes {
-                    *b = i;
-                    i += 1;
-                }
-                info!("User bytes {:?}", user_bytes);
-                let mut bytes = [0xffu8; 2112 + 4];
-                bytes[4..user_bytes.len() + 4].copy_from_slice(&user_bytes);
-                for block in 0..2048 {
-                    for page in 0..64 {
-                        let is_last = block == 49 && page == 63;
-                        flash_storage.append_file_bytes(&mut bytes[..], 2048, is_last, None, None);
-                    }
-                }
-                for block in 0..2048 {
-                    for page in 0..64 {
-                        flash_storage.read_page(block, page).unwrap();
-                        flash_storage.read_page_from_cache(block);
-                        for (i, (a, b)) in flash_storage
-                            .current_page
-                            .user_data()
-                            .iter()
-                            .zip(&user_bytes)
-                            .enumerate()
-                        {
-                            crate::assert_eq!(
-                                *a,
-                                *b,
-                                "Got {}, should be {} at {}:{}:{}, {:?}",
-                                *a,
-                                *b,
-                                block,
-                                page,
-                                i,
-                                flash_storage.current_page.user_data()
-                            );
-                        }
-                    }
-                }
-            }
         }
-        // delay.delay_ms(1000);
-        // crate::unreachable!("Break");
 
         let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
             // NOTE: This creates a buffer with a static lifetime, which is safe to access only this
@@ -303,9 +258,12 @@ fn main() -> ! {
                 LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
                 LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
 
+                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                let crc = crc_check.checksum(&payload);
                 pi_spi.send_message(
                     ExtTransferMessage::CameraConnectInfo,
                     &payload,
+                    crc,
                     &mut peripherals.DMA,
                 );
 
@@ -331,7 +289,7 @@ fn main() -> ! {
                     let mut part_count = 0;
 
                     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-                    while let Some((part, is_last, spi)) = flash_storage.get_file_part() {
+                    while let Some(((part, crc), is_last, spi)) = flash_storage.get_file_part() {
                         //fs_pins.disable();
                         pi_spi.enable(spi, &mut peripherals.RESETS);
                         let transfer_type = if file_start && !is_last {
@@ -355,7 +313,15 @@ fn main() -> ! {
                             _ => crate::unreachable!("Invalid"),
                         };
                         //info!("tt {}, part len {}", tt, part.len());
-                        pi_spi.send_message(transfer_type, &part, &mut peripherals.DMA);
+
+                        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                        let current_crc = crc_check.checksum(&part);
+                        pi_spi.send_message(
+                            transfer_type,
+                            &part,
+                            current_crc,
+                            &mut peripherals.DMA,
+                        );
 
                         part_count += 1;
                         if is_last {
@@ -370,6 +336,7 @@ fn main() -> ! {
                         let spi = pi_spi.disable();
                         flash_storage.take_spi(spi, &mut peripherals.RESETS, clock_freq);
                     }
+                    info!("Completed file offload, transferred {} files", file_count);
                     // TODO: Some validation from the raspberry pi that the transfer completed
                     //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
 
@@ -382,7 +349,9 @@ fn main() -> ! {
                 }
             }
 
-            // Let Core0 know that it can start the frame loop
+            // NOTE: Let Core0 know that it can start the frame loop
+            // TODO: This could potentially start earlier to get lepton up and synced,
+            //  we just need core 0 to not block on core 1 until this message is sent.
             info!("Tell core 0 to start frame loop");
             sio.fifo.write_blocking(CORE1_TASK_READY);
 
@@ -446,6 +415,7 @@ fn main() -> ! {
                     && cptv_stream.is_some();
 
                 let raw_frame = unsafe { u8_slice_to_u16(&FRAME_BUFFER[644..]) }; // Telemetry + 4 byte header skipped
+
                 if should_start_new_recording && frames_written < num_frames_to_record {
                     error!("Starting new recording");
                     motion_has_triggered = true;
@@ -492,7 +462,7 @@ fn main() -> ! {
                     cptv_stream = None;
                     sio.fifo.write(CORE1_RECORDING_ENDED);
                 }
-                // TODO: Encode and transfer to flash.  If rpi is awake, also transfer to rpi?
+                // TODO: If rpi is awake, also transfer to rpi via PIO?
 
                 // Check if we need to trigger:  Mostly at the moment we want to see what frame data
                 // structures can be shared with encoding.

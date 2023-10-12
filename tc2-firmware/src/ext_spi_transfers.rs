@@ -111,6 +111,7 @@ impl ExtSpiTransfers {
         &mut self,
         message_type: ExtTransferMessage,
         payload: &[u8],
+        crc: u16,
         dma_peripheral: &mut DMA,
     ) {
         // The transfer header contains the transfer type (2x)
@@ -120,9 +121,6 @@ impl ExtSpiTransfers {
         // It is followed by the payload itself
 
         let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
-        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-
-        let crc = crc_check.checksum(&payload);
         transfer_header[0] = message_type as u8;
         transfer_header[1] = message_type as u8;
         LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);

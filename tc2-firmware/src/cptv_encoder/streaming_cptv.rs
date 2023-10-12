@@ -444,7 +444,7 @@ impl CptvStream {
         frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
     ) {
-        let (bit_width, max_value, min_value) =
+        let (bit_width, min_value, max_value) =
             delta_encode_frame_data(&mut self.prev_frame, raw_frame);
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
         let frame_header = CptvFrameHeader {
@@ -791,7 +791,7 @@ impl Cptv2Header {
         };
         let device_name = b"<unknown>";
         header.device_name[0..device_name.len()].copy_from_slice(device_name);
-        let model = if lepton_version == 3 {
+        let model = if lepton_version == 35 {
             &b"lepton3.5"[..]
         } else {
             &b"lepton3"[..]

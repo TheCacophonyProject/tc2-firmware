@@ -79,7 +79,7 @@ impl BitCursor {
     }
 
     pub fn end_aligned(&mut self) -> bool {
-        info!("End aligned with {} bits in acc", self.used_bits);
+        //info!("End aligned with {} bits in acc", self.used_bits);
         if self.used_bits != 0 {
             let extra_bytes = if self.used_bits <= 8 {
                 1
@@ -95,10 +95,10 @@ impl BitCursor {
             if num_bits != 0 {
                 self.write_bits(0, num_bits);
             }
-            info!(
-                "Padding with {} bits, then flushing out {} bytes",
-                num_bits, extra_bytes
-            );
+            // info!(
+            //     "Padding with {} bits, then flushing out {} bytes",
+            //     num_bits, extra_bytes
+            // );
 
             let mut parts = [0u8; 4];
             LittleEndian::write_u32(&mut parts, self.accumulator);

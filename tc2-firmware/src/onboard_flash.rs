@@ -14,6 +14,7 @@
 use crate::bsp::pac::SPI1;
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
+use crc::{Crc, CRC_16_XMODEM};
 use defmt::{error, info, println, warn};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
@@ -204,6 +205,15 @@ impl Page {
 
     pub fn page_bytes_used(&self) -> usize {
         LittleEndian::read_u16(&self.user_metadata_1()[2..=3]) as usize
+    }
+
+    pub fn page_crc(&self) -> u16 {
+        let crc_1 = LittleEndian::read_u16(&self.user_metadata_1()[8..=9]);
+        let crc_2 = LittleEndian::read_u16(&self.user_metadata_1()[10..=11]);
+        if crc_1 != crc_2 {
+            warn!("crc mismatch {} vs {}", crc_1, crc_2);
+        }
+        crc_1
     }
 
     fn cache_data_mut(&mut self) -> &mut [u8] {
@@ -509,7 +519,7 @@ impl OnboardFlash {
 
         spi
     }
-    pub fn get_file_part(&mut self) -> Option<(&[u8], bool, SPI1)> {
+    pub fn get_file_part(&mut self) -> Option<((&[u8], u16), bool, SPI1)> {
         // TODO: Could interleave using cache_random_read
         if self
             .read_page(self.current_block_index, self.current_page_index)
@@ -519,6 +529,7 @@ impl OnboardFlash {
             //self.wait_for_all_ready();
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
+                let crc = self.current_page.page_crc();
                 let is_last_page_for_file = self.current_page.is_last_page_for_file();
                 // info!(
                 //     "Get file part {:?}, {:?}, at {}:{}, length {}, was last {}",
@@ -532,7 +543,7 @@ impl OnboardFlash {
                 self.advance_file_cursor(is_last_page_for_file);
                 let spi = self.free_spi();
                 Some((
-                    &self.current_page.user_data()[0..length],
+                    (&self.current_page.user_data()[0..length], crc),
                     is_last_page_for_file,
                     spi,
                 ))
@@ -799,6 +810,8 @@ impl OnboardFlash {
         let p = page_index.unwrap_or(self.current_page_index);
         let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let crc = crc_check.checksum(&bytes[4..4 + user_bytes_length]);
         bytes[1] = PROGRAM_LOAD;
         bytes[2] = plane;
         bytes[3] = 0;
@@ -816,8 +829,16 @@ impl OnboardFlash {
             bytes[4..][0x820..=0x83f][4] = b as u8;
             bytes[4..][0x820..=0x83f][5] = p as u8;
             {
-                let space2 = &mut bytes[4..][0x820..=0x83f][6..=7];
-                LittleEndian::write_u16(space2, user_bytes_length as u16);
+                let space = &mut bytes[4..][0x820..=0x83f][6..=7];
+                LittleEndian::write_u16(space, user_bytes_length as u16);
+            }
+            {
+                let space = &mut bytes[4..][0x820..=0x83f][8..=9];
+                LittleEndian::write_u16(space, crc);
+            }
+            {
+                let space = &mut bytes[4..][0x820..=0x83f][10..=11];
+                LittleEndian::write_u16(space, crc);
             }
             //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }
