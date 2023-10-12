@@ -792,9 +792,9 @@ impl Cptv2Header {
         let device_name = b"<unknown>";
         header.device_name[0..device_name.len()].copy_from_slice(device_name);
         let model = if lepton_version == 3 {
-            b"lepton3.5"
+            &b"lepton3.5"[..]
         } else {
-            b"lepton3"
+            &b"lepton3"[..]
         };
         header.model[0..model.len()].copy_from_slice(model);
 

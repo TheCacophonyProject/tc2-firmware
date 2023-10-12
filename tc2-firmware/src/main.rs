@@ -292,7 +292,8 @@ fn main() -> ! {
             let mut sio = Sio::new(peripherals.SIO);
             sio.fifo.write_blocking(CORE1_TASK_READY);
             let radiometry_enabled = sio.fifo.read_blocking();
-            info!("Got radiometry enabled? {}", radiometry_enabled);
+            info!("Got radiometry enabled? {}", radiometry_enabled == 1);
+            let lepton_version = if radiometry_enabled == 1 { 35 } else { 3 };
 
             if raspberry_pi_is_awake {
                 let mut payload = [0u8; 8];
@@ -452,7 +453,6 @@ fn main() -> ! {
                     // TODO: Record the current time when recording starts
 
                     // TODO: Pass in various cptv header info bits.
-                    let lepton_version = if radiometry_enabled { 35 } else { 3 };
                     let mut cptv_streamer = CptvStream::new(0, lepton_version, &mut flash_storage);
                     cptv_streamer.init(&mut flash_storage, false);
                     cptv_stream = Some(cptv_streamer);
