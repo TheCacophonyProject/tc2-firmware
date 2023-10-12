@@ -519,7 +519,7 @@ impl OnboardFlash {
 
         spi
     }
-    pub fn get_file_part(&mut self) -> Option<((&[u8], u16), bool, SPI1)> {
+    pub fn get_file_part(&mut self) -> Option<((&[u8], u16, isize, isize), bool, SPI1)> {
         // TODO: Could interleave using cache_random_read
         if self
             .read_page(self.current_block_index, self.current_page_index)
@@ -543,7 +543,12 @@ impl OnboardFlash {
                 self.advance_file_cursor(is_last_page_for_file);
                 let spi = self.free_spi();
                 Some((
-                    (&self.current_page.user_data()[0..length], crc),
+                    (
+                        &self.current_page.user_data()[0..length],
+                        crc,
+                        self.current_block_index,
+                        self.current_page_index,
+                    ),
                     is_last_page_for_file,
                     spi,
                 ))

@@ -289,7 +289,7 @@ fn main() -> ! {
                     let mut part_count = 0;
 
                     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-                    while let Some(((part, crc), is_last, spi)) = flash_storage.get_file_part() {
+                    while let Some(((part, crc, block_index, page_index), is_last, spi)) = flash_storage.get_file_part() {
                         //fs_pins.disable();
                         pi_spi.enable(spi, &mut peripherals.RESETS);
                         let transfer_type = if file_start && !is_last {
@@ -316,6 +316,14 @@ fn main() -> ! {
 
                         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                         let current_crc = crc_check.checksum(&part);
+                        if current_crc != crc {
+                            warn!(
+                                "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                                part_count,
+                                block_index,
+                                page_index
+                            );
+                        }
                         pi_spi.send_message(
                             transfer_type,
                             &part,
