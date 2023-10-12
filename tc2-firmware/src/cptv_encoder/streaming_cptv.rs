@@ -456,19 +456,18 @@ impl CptvStream {
             frame_temp_c: frame_telemetry.fpa_temp_c,
         };
         let frame_header_iter = frame_header_iter(&frame_header);
+        let delta_encoded = unsafe { &u16_slice_to_u8(&self.prev_frame)[0..frame_size as usize] };
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
-        // Delta encode iterator.
         {
-            //let frame_bytes = unsafe { u16_slice_to_u8(raw_frame) };
             if self.cptv_header.total_frame_count % 10 == 0 {
                 info!(
                     "Write frame #{}, {}",
                     self.cptv_header.total_frame_count, frame_telemetry.frame_num
                 );
             }
-            for byte in frame_header_iter {
+            for byte in frame_header_iter.chain(delta_encoded) {
                 self.total_uncompressed += 1;
                 self.crc_val = self.crc_val ^ 0xffffffff;
                 self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
@@ -476,23 +475,6 @@ impl CptvStream {
                 self.crc_val = self.crc_val ^ 0xffffffff;
                 let entry = &HUFFMAN_TABLE[byte as usize];
                 self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-                if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                    flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                }
-            }
-            let delta_encoded =
-                unsafe { &u16_slice_to_u8(&self.prev_frame)[0..frame_size as usize] };
-            let mut bits = 0u32;
-            for byte in delta_encoded {
-                self.total_uncompressed += 1;
-                self.crc_val = self.crc_val ^ 0xffffffff;
-                self.crc_val = self.crc_table[((self.crc_val ^ *byte as u32) & 0xff) as usize]
-                    ^ (self.crc_val >> 8);
-                self.crc_val = self.crc_val ^ 0xffffffff;
-                let entry = &HUFFMAN_TABLE[*byte as usize];
-                self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-                bits += entry.bits as u32;
-                // TODO: Do we need to somehow do this async to keep times down?
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
                 }

@@ -39,6 +39,7 @@ impl BitCursor {
         self.used_bits += len;
     }
 
+    #[inline(always)]
     pub fn do_flush(&mut self) -> bool {
         while self.used_bits >= 8 {
             self.buffer[PAGE_COMMAND_ADDRESS..PAGE_COMMAND_ADDRESS + USER_BUFFER_LENGTH]
@@ -68,6 +69,7 @@ impl BitCursor {
         self.cursor == USER_BUFFER_LENGTH
     }
 
+    #[inline(always)]
     pub fn should_flush(&mut self) -> Option<(&mut PageBuffer, usize)> {
         if self.used_bits >= 17 && self.do_flush() {
             let num_bytes = self.cursor;

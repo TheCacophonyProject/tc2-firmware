@@ -179,7 +179,7 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut peripherals.RESETS,
     );
-    let should_record_new = true;
+    let should_record_new = false;
     let num_seconds = 180;
     let num_frames_to_record = num_seconds * 9;
 
@@ -350,10 +350,10 @@ fn main() -> ! {
 
                     // Once we've successfully offloaded all files, we can erase the flash and we're
                     // ready to start recording new CPTV files there.
-                    if should_record_new {
-                        info!("Erasing after successful offload");
-                        flash_storage.erase_all_good_used_blocks();
-                    }
+                    // if should_record_new {
+                    //     info!("Erasing after successful offload");
+                    //     flash_storage.erase_all_good_used_blocks();
+                    // }
                 }
             }
 
