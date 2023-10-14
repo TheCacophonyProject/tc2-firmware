@@ -29,8 +29,8 @@ rp2040-hal = { path = "../rp-hal-0.9.0/rp2040-hal", features = ["defmt", "eh1_0_
 #rp2040-hal = "0.9.0"
 pcf8563 = "0.1.2"
 
-#pio = "0.2.1"
-#pio-proc = "0.2.1"
+pio = "0.2.1"
+pio-proc = "0.2.1"
 
 [features]
 # This is the set of features we enable by default

@@ -467,7 +467,7 @@ impl CptvStream {
                     self.cptv_header.total_frame_count, frame_telemetry.frame_num
                 );
             }
-            for byte in frame_header_iter.chain(delta_encoded) {
+            for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
                 self.total_uncompressed += 1;
                 self.crc_val = self.crc_val ^ 0xffffffff;
                 self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]

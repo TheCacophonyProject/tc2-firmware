@@ -1,4 +1,7 @@
-use crate::bsp::pac::{DMA, RESETS, SPI1};
+use crate::bsp;
+use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1};
+use crate::onboard_flash::{extend_lifetime, extend_lifetime_mut};
+use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::info;
@@ -7,10 +10,14 @@ use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
     _embedded_hal_spi_FullDuplex,
 };
+use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, CH0};
 use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
 use rp2040_hal::gpio::{
-    FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
+    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
+};
+use rp2040_hal::pio::{
+    PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM0,
 };
 use rp2040_hal::Spi;
 
@@ -43,10 +50,19 @@ pub struct ExtSpiTransfers {
     mosi_disabled: Option<Pin<Gpio12, FunctionNull, PullNone>>,
     clk_disabled: Option<Pin<Gpio14, FunctionNull, PullNone>>,
     cs_disabled: Option<Pin<Gpio13, FunctionNull, PullNone>>,
+
+    miso_pio: Option<Pin<Gpio15, FunctionPio0, PullNone>>,
+    clk_pio: Option<Pin<Gpio14, FunctionPio0, PullNone>>,
+    cs_pio: Option<Pin<Gpio13, FunctionPio0, PullNone>>,
+
     ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
     dma_channel: Option<Channel<CH0>>,
     payload_buffer: Option<&'static mut [u8; 2066]>,
     crc_buffer: Option<&'static mut [u8; 32]>,
+    pio: PIO<PIO0>,
+    state_machine_0_uninit: Option<UninitStateMachine<(PIO0, SM0)>>,
+    state_machine_0_running: Option<(StateMachine<(PIO0, SM0), Running>, Rx<(PIO0, SM0)>)>,
+    pio_tx: Option<Tx<(PIO0, SM0)>>,
 }
 
 impl ExtSpiTransfers {
@@ -59,6 +75,8 @@ impl ExtSpiTransfers {
         dma_channel: Channel<CH0>,
         payload_buffer: &'static mut [u8; 2066],
         crc_buffer: &'static mut [u8; 32],
+        pio: PIO<PIO0>,
+        state_machine_0_uninit: UninitStateMachine<(PIO0, SM0)>,
     ) -> ExtSpiTransfers {
         ExtSpiTransfers {
             spi: None,
@@ -67,10 +85,19 @@ impl ExtSpiTransfers {
             cs_disabled: Some(cs),
             clk_disabled: Some(clk),
             miso_disabled: Some(miso),
+
+            miso_pio: None,
+            clk_pio: None,
+            cs_pio: None,
+
             ping,
             dma_channel: Some(dma_channel),
             payload_buffer: Some(payload_buffer),
             crc_buffer: Some(crc_buffer),
+            pio,
+            state_machine_0_uninit: Some(state_machine_0_uninit),
+            state_machine_0_running: None,
+            pio_tx: None,
         }
     }
 
@@ -105,6 +132,128 @@ impl ExtSpiTransfers {
         .init_slave(resets, &embedded_hal::spi::MODE_3);
         self.spi = Some(spi);
         self.ping.set_low().unwrap();
+    }
+
+    pub fn begin_message(
+        &mut self,
+        message_type: ExtTransferMessage,
+        payload: &mut [u8],
+        crc: u16,
+        is_recording: bool,
+        dma_peripheral: &mut DMA,
+    ) -> Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>> {
+        // The transfer header contains the transfer type (2x)
+        // the number of bytes to read for the payload (should this be twice?)
+        // the 16 bit crc of the payload (twice)
+
+        // It is followed by the payload itself
+        let recording = if is_recording { 1 } else { 0 };
+
+        let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
+        transfer_header[0] = message_type as u8;
+        transfer_header[1] = message_type as u8;
+        LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
+        LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32);
+        LittleEndian::write_u16(&mut transfer_header[10..12], recording);
+        LittleEndian::write_u16(&mut transfer_header[12..14], recording);
+        LittleEndian::write_u16(&mut transfer_header[14..16], recording.reverse_bits());
+        LittleEndian::write_u16(&mut transfer_header[16..=17], recording.reverse_bits());
+        payload[0..transfer_header.len()].copy_from_slice(&transfer_header);
+
+        // Enable sniffing on the channel
+        dma_peripheral.ch[0]
+            .ch_ctrl_trig
+            .write(|w| w.sniff_en().set_bit());
+        // Set which channel the sniffer is sniffing
+        dma_peripheral
+            .sniff_ctrl
+            .write(|w| unsafe { w.dmach().bits(0) });
+
+        self.ping.set_high().unwrap();
+        let mut config = single_buffer::Config::new(
+            self.dma_channel.take().unwrap(),
+            unsafe { u8_slice_to_u32(extend_lifetime(&payload[..])) },
+            self.pio_tx.take().unwrap(),
+        );
+        config.bswap(true);
+        let transfer = config.start();
+        self.ping.set_low().unwrap();
+
+        transfer
+    }
+
+    pub fn end_message(
+        &mut self,
+        transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
+    ) {
+        // Wait for the DMA transfer to finish
+        let (r_ch0, _r_buf, tx) = transfer.wait();
+        self.dma_channel = Some(r_ch0);
+        self.pio_tx = Some(tx);
+    }
+
+    pub fn enable_pio_spi(&mut self) {
+        self.miso_pio = Some(
+            self.miso_disabled
+                .take()
+                .unwrap()
+                .into_function()
+                .into_pull_type(),
+        );
+        self.cs_pio = Some(
+            self.cs_disabled
+                .take()
+                .unwrap()
+                .into_function()
+                .into_pull_type(),
+        );
+        self.clk_pio = Some(
+            self.clk_disabled
+                .take()
+                .unwrap()
+                .into_function()
+                .into_pull_type(),
+        );
+        let spi_cs_pin_id = 13;
+        let miso_id = 15;
+        // Setup a PIO-based SPI slave interface to send bytes to the raspberry pi
+        let program_with_defines = pio_proc::pio_file!("./src/soft_spi_slave.pio");
+        let installed = self.pio.install(&program_with_defines.program).unwrap();
+        let (mut sm, rx, tx) = PIOBuilder::from_program(installed)
+            .out_pins(miso_id, 1)
+            .jmp_pin(spi_cs_pin_id)
+            .out_shift_direction(ShiftDirection::Left)
+            .pull_threshold(32)
+            .autopush(true)
+            .autopull(true)
+            .build(self.state_machine_0_uninit.take().unwrap());
+        sm.set_pindirs([(miso_id, bsp::hal::pio::PinDir::Output)]);
+        self.state_machine_0_running = Some((sm.start(), rx));
+        self.pio_tx = Some(tx);
+    }
+
+    pub fn disable_pio_spi(&mut self) {
+        let (sm, rx) = self.state_machine_0_running.take().unwrap();
+        let tx = self.pio_tx.take().unwrap();
+        let (sm, _program) = sm.uninit(rx, tx);
+
+        self.miso_disabled = Some(
+            self.miso_pio
+                .take()
+                .unwrap()
+                .into_function()
+                .into_pull_type(),
+        );
+        self.cs_disabled = Some(self.cs_pio.take().unwrap().into_function().into_pull_type());
+        self.clk_disabled = Some(
+            self.clk_pio
+                .take()
+                .unwrap()
+                .into_function()
+                .into_pull_type(),
+        );
+
+        self.state_machine_0_uninit = Some(sm);
     }
 
     pub fn send_message(
@@ -237,34 +386,6 @@ impl ExtSpiTransfers {
         //Option<hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>>::flush()
     }
 
-    pub fn schmitt(&self) -> bool {
-        self.cs_enabled.as_ref().unwrap().get_schmitt_enabled()
-    }
-
-    pub fn align_sync(&mut self) {
-        //info!("Aligning");
-        //let pattern = [1, 2, 3, 4];
-        let mut buf = [0u8; 1];
-
-        // Master sends 255 continuously.
-        // When we get it, we reply with 1
-
-        // Master replies with 2
-        // Master breaks, we break;
-
-        loop {
-            // Looks like transfer to master is always offset by one byte in this scheme, a write, then a read,
-            // rather than shifting each out at the same time.
-            let response = self.spi.as_mut().unwrap().transfer(&mut buf).unwrap();
-            if response[0] == 255 {
-                buf[0] = 1;
-            } else if response[0] == 2 {
-                break;
-            }
-        }
-        //info!("Aligned");
-    }
-
     pub fn transfer<'a>(&mut self, bytes: &'a mut [u8]) -> &'a [u8] {
         self.spi.as_mut().unwrap().transfer(bytes).unwrap()
     }
@@ -274,14 +395,6 @@ impl ExtSpiTransfers {
     }
     pub fn is_empty(&self) -> bool {
         self.spi.as_ref().unwrap().is_empty()
-    }
-
-    pub fn read_byte(&mut self) -> u32 {
-        if !self.is_empty() {
-            self.spi.as_mut().unwrap().read().unwrap() as u32
-        } else {
-            1000u32
-        }
     }
 }
 

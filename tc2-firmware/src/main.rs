@@ -15,12 +15,12 @@ mod motion_detector;
 mod onboard_flash;
 
 use crate::cptv_encoder::streaming_cptv::CptvStream;
-use crate::cptv_encoder::FRAME_WIDTH;
+use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::double_frame_buffer::FRAME_SEGMENT_BUFFER;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::read_telemetry;
 use crate::onboard_flash::OnboardFlash;
-use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
+use crate::utils::{any_as_u8_slice, u8_slice_to_u16, u8_slice_to_u32};
 use bsp::{
     entry,
     hal::{
@@ -50,10 +50,10 @@ use lepton::Lepton;
 use panic_probe as _;
 use rp2040_hal::dma::{DMAExt, SingleChannel};
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
+use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
 use rp2040_hal::I2C;
-
 // This is 128KB, or half of our available memory
-static mut CORE1_STACK: Stack<32768> = Stack::new();
+static mut CORE1_STACK: Stack<43000> = Stack::new();
 
 // CORE1 consts
 pub const START_TIMER: u32 = 0xfb;
@@ -74,7 +74,7 @@ const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
 pub const A_SEGMENT_LENGTH: usize = 9768; //9764;
 pub const FULL_CHUNK_LENGTH: usize = A_SEGMENT_LENGTH / 4;
 pub const CHUNK_LENGTH: usize = (A_SEGMENT_LENGTH - 4) / 4;
-pub static mut FRAME_BUFFER: [u8; FRAME_LENGTH + 4] = [0u8; FRAME_LENGTH + 4];
+// pub static mut FRAME_BUFFER: [u8; FRAME_LENGTH + 4] = [0u8; FRAME_LENGTH + 4];
 pub const SEGMENT_LENGTH: usize = (FRAME_WIDTH * 122) / 4;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins
 
@@ -179,8 +179,8 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut peripherals.RESETS,
     );
-    let should_record_new = false;
-    let num_seconds = 180;
+    let should_record_new = true;
+    let num_seconds = 10;
     let num_frames_to_record = num_seconds * 9;
 
     // TODO: I'd rather have these static arrays in ram.  Can we just unsafe pinky promise that they live for static?
@@ -200,6 +200,8 @@ fn main() -> ! {
         let fs_clk = pins.gpio10.into_pull_down_disabled().into_pull_type();
         let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
+        let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+
         let mut pi_spi = ExtSpiTransfers::new(
             pi_mosi,
             pi_cs,
@@ -209,6 +211,8 @@ fn main() -> ! {
             dma_channels.ch0,
             payload_buf,
             crc_buf,
+            pio0,
+            sm0,
         );
 
         let mut spi_peripheral = Some(peripherals.SPI1);
@@ -238,8 +242,16 @@ fn main() -> ! {
         }
 
         let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
-            // NOTE: This creates a buffer with a static lifetime, which is safe to access only this
-            //  thread.
+
+            // FIXME: Allocate all the buffers we need in this thread up front.
+            let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
+            // Cptv Stream also holds another buffer of 1 frame length.
+            // There is a 2K buffer for pi_spi transfers
+            // There is another 2K+ buffer for flash_storage page
+            // There is a 1K buffer for crc table in cptv stream.
+            // It may be worth copying the huffman/lz77 table into RAM for speed also.
+            // Try to put the FrameSeg buffer in ram on core 0?
+
             let raspberry_pi_is_awake = true;
             let mut peripherals = unsafe { Peripherals::steal() };
             let core = unsafe { pac::CorePeripherals::steal() };
@@ -350,13 +362,14 @@ fn main() -> ! {
 
                     // Once we've successfully offloaded all files, we can erase the flash and we're
                     // ready to start recording new CPTV files there.
-                    // if should_record_new {
-                    //     info!("Erasing after successful offload");
-                    //     flash_storage.erase_all_good_used_blocks();
-                    // }
+                    if should_record_new {
+                        info!("Erasing after successful offload");
+                        flash_storage.erase_all_good_used_blocks();
+                    }
                 }
             }
 
+            pi_spi.enable_pio_spi();
             // NOTE: Let Core0 know that it can start the frame loop
             // TODO: This could potentially start earlier to get lepton up and synced,
             //  we just need core 0 to not block on core 1 until this message is sent.
@@ -394,22 +407,28 @@ fn main() -> ! {
                         .enumerate()
                     {
                         let slice = frame_seg.as_u8_slice();
-                        unsafe {
-                            // Write the slice length to read
-                            LittleEndian::write_u32(
-                                &mut FRAME_BUFFER[0..4],
-                                0x2 << 28 | FRAME_LENGTH as u32,
-                            );
-                            let start = seg_num * slice.len();
-                            let end = start + slice.len();
-                            let frame_buffer = &mut FRAME_BUFFER[4..];
-                            frame_buffer[start..end].copy_from_slice(slice);
-                        }
+                        // Write the slice length to read
+
+                        // FIXME - This was here because we were using frame_buffer to transmit
+                            //  directly to rPi raw frames.
+                        let start = seg_num * slice.len();
+                        let end = start + slice.len();
+                        let frame_buffer = &mut thread_local_frame_buffer[18..];
+                        frame_buffer[start..end].copy_from_slice(slice);
                     }
                 });
 
+                // Transfer RAW frame to pi if it is available.
+                let transfer = pi_spi.begin_message(
+                    ExtTransferMessage::CameraRawFrameTransfer,
+                    &mut thread_local_frame_buffer,
+                    0,
+                    cptv_stream.is_some(),
+                    &mut peripherals.DMA
+                );
+
                 // Read the telemetry:
-                let frame_buffer = unsafe { &mut FRAME_BUFFER[4..] };
+                let frame_buffer = &mut thread_local_frame_buffer[18..];
                 let frame_telemetry = read_telemetry(&frame_buffer);
                 frames_seen += 1;
                 let should_start_new_recording = !motion_has_triggered
@@ -422,7 +441,7 @@ fn main() -> ! {
                         && thirty_seconds_have_passed_since_motion_disappeared_in_frame))
                     && cptv_stream.is_some();
 
-                let raw_frame = unsafe { u8_slice_to_u16(&FRAME_BUFFER[644..]) }; // Telemetry + 4 byte header skipped
+                let raw_frame = unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
 
                 if should_start_new_recording && frames_written < num_frames_to_record {
                     error!("Starting new recording");
@@ -470,17 +489,9 @@ fn main() -> ! {
                     cptv_stream = None;
                     sio.fifo.write(CORE1_RECORDING_ENDED);
                 }
-                // TODO: If rpi is awake, also transfer to rpi via PIO?
-
                 // Check if we need to trigger:  Mostly at the moment we want to see what frame data
                 // structures can be shared with encoding.
-
-                // Wait on the DMA transfer to the Pi.  In the future we can be doing other work here while we wait.
-                // if let Some(tx_transfer) = tx_transfer {
-                //     let (ch0, _, tx_ret) = tx_transfer.wait();
-                //     tx = tx_ret;
-                //     dma_ch0 = ch0;
-                // }
+                pi_spi.end_message(transfer);
                 sio.fifo.write(CORE1_TASK_COMPLETE);
             }
 

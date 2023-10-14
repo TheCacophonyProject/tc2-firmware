@@ -229,11 +229,11 @@ impl Page {
     }
 }
 
-unsafe fn extend_lifetime<'b>(r: &'b [u8]) -> &'static [u8] {
+pub unsafe fn extend_lifetime<'b>(r: &'b [u8]) -> &'static [u8] {
     mem::transmute::<&'b [u8], &'static [u8]>(r)
 }
 
-unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
+pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
     mem::transmute::<&'b mut [u8], &'static mut [u8]>(r)
 }
 
@@ -312,7 +312,7 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
-        let erase = false;
+        let erase = true;
         if erase {
             info!("Erasing");
             //
