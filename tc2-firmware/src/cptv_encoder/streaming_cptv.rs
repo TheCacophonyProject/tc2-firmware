@@ -1,5 +1,5 @@
 use crate::cptv_encoder::bit_cursor::BitCursor;
-use crate::cptv_encoder::huffman::HUFFMAN_TABLE;
+use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
@@ -342,24 +342,32 @@ fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
     iter_state
 }
 
-const STATIC_HUFFMAN_AND_BLOCK_HEADER: [u8; 46] = [
+/// This is a pre-computed dynamic LZ77 (deflate) header.
+/// It starts with the block type b10 (dynamic) and is followed by the pre-computed huffman table
+/// code length descriptions see: (Deflate spec)[https://www.ietf.org/rfc/rfc1951.txt]
+/// For our purposes of writing out CPTV files, we only use a 1:1 byte mapping of literal values to
+/// huffman codes, we don't attempt to do matching of longer patterns in the data stream,
+/// since this would a) take more memory, and b) have a less constant performance profile.
+///
+/// Important: the last item of this array is only a 5 bit value.
+const STATIC_LZ77_DYNAMIC_BLOCK_HEADER: [u8; 46] = [
     5, 224, 3, 152, 109, 105, 182, 6, 106, 190, 255, 24, 107, 70, 196, 222, 153, 89, 85, 231, 182,
     109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 219, 182, 109, 119, 223, 83, 200, 220, 59,
     34, 230, 26, 227, 235, 7,
 ];
-const BITS_UNUSED: u16 = 3;
 
-pub struct CptvStream {
+pub struct CptvStream<'a> {
     cptv_header: Cptv2Header,
     pub cursor: BitCursor,
-    crc_table: [u32; 256],
+    crc_table: &'a [u32; 256],
+    huffman_table: &'a [HuffmanEntry; 257],
     crc_val: u32,
     total_uncompressed: u32,
     starting_block_index: u16,
     prev_frame: [u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1],
 }
 
-fn make_crc_table() -> [u32; 256] {
+pub fn make_crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     for n in 0..256 {
         let mut c = n as u32;
@@ -375,19 +383,19 @@ fn make_crc_table() -> [u32; 256] {
     table
 }
 
-// TODO: Re-use same page buffer for cptv stream and flash storage - hand one off to the other and back.
-// Although, DMA needs to transfer the whole buffer, modulo aborts, and they're quite different sizes.
-
-impl CptvStream {
+impl<'a> CptvStream<'a> {
     pub fn new(
         current_time: u64,
         lepton_version: u8,
         flash_storage: &mut OnboardFlash,
-    ) -> CptvStream {
+        huffman_table: &'a [HuffmanEntry; 257],
+        crc_table: &'a [u32; 256],
+    ) -> CptvStream<'a> {
         let starting_block_index = flash_storage.start_file();
         CptvStream {
             cursor: BitCursor::new(),
-            crc_table: make_crc_table(), // TODO - This only needs to be computed at startup
+            crc_table,
+            huffman_table,
             crc_val: 0,
             total_uncompressed: 0,
             starting_block_index: starting_block_index as u16,
@@ -396,48 +404,28 @@ impl CptvStream {
         }
     }
 
-    pub fn init(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
+    /// Writes out the standard gzip header, which says that the following block is the *last* block in
+    /// the gzip 'member' - which is a self-contained valid gzip stream.  Then write out the beginning
+    /// of a 'dynamic' gzip block, with pre-calculated huffman tables describing only literals
+    /// (not match lengths or distances).  This will always be smaller than our page size of 2048 bytes
+    /// so there's no need to check if we need to flush out to flash memory.
+    pub fn init_gzip_stream(&mut self) {
+        self.crc_val = 0;
+        self.total_uncompressed = 0;
         let gzip_header: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff];
-        let (block_index, page_index) = if at_header_location {
-            (Some(self.starting_block_index as isize), Some(0isize))
-        } else {
-            (None, None)
-        };
-
-        for byte in gzip_header {
-            self.cursor.write_byte(byte);
-            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                flash_storage.append_file_bytes(
-                    to_flush,
-                    num_bytes,
-                    false,
-                    block_index,
-                    page_index,
-                );
-            }
-        }
-
-        for byte in &STATIC_HUFFMAN_AND_BLOCK_HEADER[..STATIC_HUFFMAN_AND_BLOCK_HEADER.len() - 1] {
+        for byte in gzip_header
+            .iter()
+            .chain(&STATIC_LZ77_DYNAMIC_BLOCK_HEADER[..STATIC_LZ77_DYNAMIC_BLOCK_HEADER.len() - 1])
+        {
             self.cursor.write_byte(*byte);
-            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                flash_storage.append_file_bytes(
-                    to_flush,
-                    num_bytes,
-                    false,
-                    block_index,
-                    page_index,
-                );
-            }
         }
         self.cursor.write_bits(
-            STATIC_HUFFMAN_AND_BLOCK_HEADER[STATIC_HUFFMAN_AND_BLOCK_HEADER.len() - 1] as u32,
+            STATIC_LZ77_DYNAMIC_BLOCK_HEADER[STATIC_LZ77_DYNAMIC_BLOCK_HEADER.len() - 1] as u32,
             5,
         );
-        if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
-        }
     }
 
+    /// Add a new frame to the current CPTV stream, flushing out pages to the flash storage as needed.
     pub fn push_frame(
         &mut self,
         raw_frame: &[u16],
@@ -477,31 +465,37 @@ impl CptvStream {
                 self.cursor.write_bits(entry.code as u32, entry.bits as u32);
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
+                    self.cursor.flush_residual_bits();
                 }
             }
         }
         self.prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(raw_frame);
     }
 
-    fn write_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
+    fn write_gzip_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
         let (block_index, page_index) = if at_header_location {
             (Some(self.starting_block_index as isize), Some(0isize))
         } else {
             (None, None)
         };
 
+        // End the actual data stream by writing out the end of stream literal.
         let entry = &HUFFMAN_TABLE[256];
         self.cursor.write_bits(entry.code as u32, entry.bits as u32);
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
             flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
+            self.cursor.flush_residual_bits();
         }
 
+        // Align to the nearest full byte after finishing the stream.
         let needs_flush = self.cursor.end_aligned();
         if needs_flush {
             let (to_flush, num_bytes) = self.cursor.flush();
             flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
+            self.cursor.flush_residual_bits();
         }
-        // Write CRC value
+
+        // Write the CRC value for the uncompressed input date of the gzip stream.
         let mut buf = [0u8; 4];
         LittleEndian::write_u32(&mut buf, self.crc_val);
         for b in buf {
@@ -514,9 +508,10 @@ impl CptvStream {
                     block_index,
                     page_index,
                 );
+                self.cursor.flush_residual_bits();
             }
         }
-        // Write total uncompressed length of input data
+        // Write the total uncompressed length of input data
         LittleEndian::write_u32(&mut buf, self.total_uncompressed);
         for b in buf {
             self.cursor.write_byte(b);
@@ -528,9 +523,11 @@ impl CptvStream {
                     block_index,
                     page_index,
                 );
+                self.cursor.flush_residual_bits();
             }
         }
-        // Shouldn't be necessary as we're already aligned
+        // Flush out any remaining bits in the accumulator, align them to the nearest full byte,
+        // and write out to storage.
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
         flash_storage.append_file_bytes(
@@ -541,16 +538,19 @@ impl CptvStream {
             page_index,
         );
     }
-    pub fn finalise(&mut self, flash_storage: &mut OnboardFlash) {
-        self.write_trailer(flash_storage, false);
-        // TODO: Now write the header into the first page of the starting block as a separate gzip member
 
-        self.init(flash_storage, true);
-        // Now write header
-        self.crc_val = 0;
-        self.total_uncompressed = 0;
-        let header_iter = push_header_iterator(&self.cptv_header);
-        for byte in header_iter {
+    /// End the current CPTV stream, and write out the CPTV header as a separate gzip member which
+    /// will be prepended to the main data stream when transferred out to the raspberry pi.  These
+    /// two gzip 'members' or self-contained gip streams when concatenated are themselves a valid
+    /// gzip stream, and therefore make up a valid CPTV file.
+    pub fn finalise(&mut self, flash_storage: &mut OnboardFlash) {
+        // Write out the gzip trailer for the main data - the CPTV frames.
+        self.write_gzip_trailer(flash_storage, false);
+
+        // Now write the CPTV header into the first page of the starting block as a separate gzip member,
+        // now that we know the total frame count for the recording, and the min/max pixel values.
+        self.init_gzip_stream();
+        for byte in push_header_iterator(&self.cptv_header) {
             self.total_uncompressed += 1;
             self.crc_val = self.crc_val ^ 0xffffffff;
             self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
@@ -560,9 +560,10 @@ impl CptvStream {
             self.cursor.write_bits(entry.code as u32, entry.bits as u32);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
+                self.cursor.flush_residual_bits();
             }
         }
-        self.write_trailer(flash_storage, true);
+        self.write_gzip_trailer(flash_storage, true);
     }
 }
 

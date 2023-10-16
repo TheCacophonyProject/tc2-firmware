@@ -1,3 +1,4 @@
+#[derive(Copy, Clone)]
 pub struct HuffmanEntry {
     pub code: u16,
     pub bits: u8,

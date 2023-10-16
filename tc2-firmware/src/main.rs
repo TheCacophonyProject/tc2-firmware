@@ -14,7 +14,8 @@ mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
 
-use crate::cptv_encoder::streaming_cptv::CptvStream;
+use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
+use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::double_frame_buffer::FRAME_SEGMENT_BUFFER;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
@@ -52,6 +53,7 @@ use rp2040_hal::dma::{DMAExt, SingleChannel};
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
 use rp2040_hal::I2C;
+
 // This is 128KB, or half of our available memory
 static mut CORE1_STACK: Stack<43000> = Stack::new();
 
@@ -245,6 +247,15 @@ fn main() -> ! {
 
             // FIXME: Allocate all the buffers we need in this thread up front.
             let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
+
+            // Create the GZIP crc table once on startup, then reuse, since it's expensive to
+            // re-create inline.
+            let crc_table = make_crc_table();
+
+            // Copy huffman table into ram for faster access.
+            let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
+            huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
+
             // Cptv Stream also holds another buffer of 1 frame length.
             // There is a 2K buffer for pi_spi transfers
             // There is another 2K+ buffer for flash_storage page
@@ -449,9 +460,12 @@ fn main() -> ! {
                     // Begin cptv file
                     // TODO: Record the current time when recording starts
 
+                    // TODO - compute crc table and copt huffman table as part of startup, and only
+                    // do it once, so that we won't stutter on new streams.
+
                     // TODO: Pass in various cptv header info bits.
-                    let mut cptv_streamer = CptvStream::new(0, lepton_version, &mut flash_storage);
-                    cptv_streamer.init(&mut flash_storage, false);
+                    let mut cptv_streamer = CptvStream::new(0, lepton_version, &mut flash_storage, &huffman_table, &crc_table);
+                    cptv_streamer.init_gzip_stream();
                     cptv_stream = Some(cptv_streamer);
 
                     info!("Created CPTV stream");
