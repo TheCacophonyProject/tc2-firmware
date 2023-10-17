@@ -312,7 +312,7 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
-        let erase = true;
+        let erase = false;
         if erase {
             info!("Erasing");
             //

@@ -55,7 +55,7 @@ use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
 use rp2040_hal::I2C;
 
 // This is 128KB, or half of our available memory
-static mut CORE1_STACK: Stack<43000> = Stack::new();
+static mut CORE1_STACK: Stack<43500> = Stack::new();
 
 // CORE1 consts
 pub const START_TIMER: u32 = 0xfb;
@@ -429,14 +429,14 @@ fn main() -> ! {
                     }
                 });
 
-                // Transfer RAW frame to pi if it is available.
-                let transfer = pi_spi.begin_message(
-                    ExtTransferMessage::CameraRawFrameTransfer,
-                    &mut thread_local_frame_buffer,
-                    0,
-                    cptv_stream.is_some(),
-                    &mut peripherals.DMA
-                );
+                // // Transfer RAW frame to pi if it is available.
+                // let (transfer, transfer_end_address) = pi_spi.begin_message(
+                //     ExtTransferMessage::CameraRawFrameTransfer,
+                //     &mut thread_local_frame_buffer,
+                //     0,
+                //     cptv_stream.is_some(),
+                //     &mut peripherals.DMA
+                // );
 
                 // Read the telemetry:
                 let frame_buffer = &mut thread_local_frame_buffer[18..];
@@ -505,7 +505,7 @@ fn main() -> ! {
                 }
                 // Check if we need to trigger:  Mostly at the moment we want to see what frame data
                 // structures can be shared with encoding.
-                pi_spi.end_message(transfer);
+                //pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
                 sio.fifo.write(CORE1_TASK_COMPLETE);
             }
 
@@ -942,17 +942,21 @@ fn main() -> ! {
                     if let Some(message) = sio.fifo.read() {
                         if message == CORE1_RECORDING_STARTED {
                             is_recording = true;
-                            let message = sio.fifo.read_blocking();
-                            if message == CORE1_TASK_COMPLETE {
-                                transferring_prev_frame = false;
-                                prev_frame_needs_transfer = false;
+                            delay.delay_ms(1);
+                            if let Some(message) = sio.fifo.read() {
+                                if message == CORE1_TASK_COMPLETE {
+                                    transferring_prev_frame = false;
+                                    prev_frame_needs_transfer = false;
+                                }
                             }
                         } else if message == CORE1_RECORDING_ENDED {
                             is_recording = false;
-                            let message = sio.fifo.read_blocking();
-                            if message == CORE1_TASK_COMPLETE {
-                                transferring_prev_frame = false;
-                                prev_frame_needs_transfer = false;
+                            delay.delay_ms(1);
+                            if let Some(message) = sio.fifo.read() {
+                                if message == CORE1_TASK_COMPLETE {
+                                    transferring_prev_frame = false;
+                                    prev_frame_needs_transfer = false;
+                                }
                             }
                         } else if message == CORE1_TASK_COMPLETE {
                             transferring_prev_frame = false;

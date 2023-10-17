@@ -461,7 +461,7 @@ impl<'a> CptvStream<'a> {
                 self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
                     ^ (self.crc_val >> 8);
                 self.crc_val = self.crc_val ^ 0xffffffff;
-                let entry = &HUFFMAN_TABLE[byte as usize];
+                let entry = &self.huffman_table[byte as usize];
                 self.cursor.write_bits(entry.code as u32, entry.bits as u32);
                 if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                     flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
@@ -480,7 +480,7 @@ impl<'a> CptvStream<'a> {
         };
 
         // End the actual data stream by writing out the end of stream literal.
-        let entry = &HUFFMAN_TABLE[256];
+        let entry = &self.huffman_table[256];
         self.cursor.write_bits(entry.code as u32, entry.bits as u32);
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
             flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
@@ -556,7 +556,7 @@ impl<'a> CptvStream<'a> {
             self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
                 ^ (self.crc_val >> 8);
             self.crc_val = self.crc_val ^ 0xffffffff;
-            let entry = &HUFFMAN_TABLE[byte as usize];
+            let entry = &self.huffman_table[byte as usize];
             self.cursor.write_bits(entry.code as u32, entry.bits as u32);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);

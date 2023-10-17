@@ -4,14 +4,14 @@ use crate::onboard_flash::{extend_lifetime, extend_lifetime_mut};
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{Crc, CRC_16_XMODEM};
-use defmt::info;
+use defmt::{info, Format};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
     _embedded_hal_spi_FullDuplex,
 };
 use rp2040_hal::dma::single_buffer::Transfer;
-use rp2040_hal::dma::{single_buffer, Channel, CH0};
+use rp2040_hal::dma::{double_buffer, single_buffer, Channel, CH0, CH1};
 use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
@@ -22,7 +22,7 @@ use rp2040_hal::pio::{
 use rp2040_hal::Spi;
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Format)]
 pub enum ExtTransferMessage {
     CameraConnectInfo = 0x1,
     CameraRawFrameTransfer = 0x2,
@@ -56,7 +56,8 @@ pub struct ExtSpiTransfers {
     cs_pio: Option<Pin<Gpio13, FunctionPio0, PullNone>>,
 
     ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
-    dma_channel: Option<Channel<CH0>>,
+    dma_channel_0: Option<Channel<CH0>>,
+    //dma_channel_1: Option<Channel<CH1>>,
     payload_buffer: Option<&'static mut [u8; 2066]>,
     crc_buffer: Option<&'static mut [u8; 32]>,
     pio: PIO<PIO0>,
@@ -72,7 +73,8 @@ impl ExtSpiTransfers {
         clk: Pin<Gpio14, FunctionNull, PullNone>,
         miso: Pin<Gpio15, FunctionNull, PullNone>,
         ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
-        dma_channel: Channel<CH0>,
+        dma_channel_0: Channel<CH0>,
+        //dma_channel_1: Channel<CH1>,
         payload_buffer: &'static mut [u8; 2066],
         crc_buffer: &'static mut [u8; 32],
         pio: PIO<PIO0>,
@@ -91,7 +93,8 @@ impl ExtSpiTransfers {
             cs_pio: None,
 
             ping,
-            dma_channel: Some(dma_channel),
+            dma_channel_0: Some(dma_channel_0),
+            //dma_channel_1: Some(dma_channel_1),
             payload_buffer: Some(payload_buffer),
             crc_buffer: Some(crc_buffer),
             pio,
@@ -141,12 +144,13 @@ impl ExtSpiTransfers {
         crc: u16,
         is_recording: bool,
         dma_peripheral: &mut DMA,
-    ) -> Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>> {
+    ) -> (Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>, u32) {
         // The transfer header contains the transfer type (2x)
         // the number of bytes to read for the payload (should this be twice?)
         // the 16 bit crc of the payload (twice)
 
         // It is followed by the payload itself
+        let length = payload.len() as u32;
         let recording = if is_recording { 1 } else { 0 };
 
         let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
@@ -160,35 +164,35 @@ impl ExtSpiTransfers {
         LittleEndian::write_u16(&mut transfer_header[16..=17], recording.reverse_bits());
         payload[0..transfer_header.len()].copy_from_slice(&transfer_header);
 
-        // Enable sniffing on the channel
-        dma_peripheral.ch[0]
-            .ch_ctrl_trig
-            .write(|w| w.sniff_en().set_bit());
-        // Set which channel the sniffer is sniffing
-        dma_peripheral
-            .sniff_ctrl
-            .write(|w| unsafe { w.dmach().bits(0) });
-
         self.ping.set_high().unwrap();
         let mut config = single_buffer::Config::new(
-            self.dma_channel.take().unwrap(),
+            self.dma_channel_0.take().unwrap(),
+            // Does this need to be aligned?  Maybe not.
             unsafe { u8_slice_to_u32(extend_lifetime(&payload[..])) },
             self.pio_tx.take().unwrap(),
         );
         config.bswap(true);
         let transfer = config.start();
+        let start_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
+        //info!("Start read at {}", start_read_address);
         self.ping.set_low().unwrap();
 
-        transfer
+        (transfer, start_read_address + length)
     }
 
     pub fn end_message(
         &mut self,
+        dma_peripheral: &mut DMA,
+        transfer_end_address: u32,
         transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
     ) {
+        maybe_abort_dma_transfer(dma_peripheral, 0, transfer_end_address);
+
+        let end_read_addr = dma_peripheral.ch[0].ch_read_addr.read().bits();
+        //info!("End address {}", end_read_addr);
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
-        self.dma_channel = Some(r_ch0);
+        self.dma_channel_0 = Some(r_ch0);
         self.pio_tx = Some(tx);
     }
 
@@ -268,19 +272,21 @@ impl ExtSpiTransfers {
         // the 16 bit crc of the payload (twice)
 
         // It is followed by the payload itself
-
+        let length = payload.len() as u32;
+        //info!("Send message {:?} of length {}", message_type, length);
         let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
         transfer_header[0] = message_type as u8;
         transfer_header[1] = message_type as u8;
-        LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
-        LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32);
+        LittleEndian::write_u32(&mut transfer_header[2..6], length);
+        LittleEndian::write_u32(&mut transfer_header[6..10], length);
         LittleEndian::write_u16(&mut transfer_header[10..12], crc);
         LittleEndian::write_u16(&mut transfer_header[12..14], crc);
         LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
         LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
 
-        // info!("Writing header {}", &transfer_header);
+        // TODO: We can uses chained double buffer here to avoid these copies + static buffer?
 
+        // info!("Writing header {}", &transfer_header);
         self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
             .copy_from_slice(&transfer_header);
         self.payload_buffer.as_mut().unwrap()
@@ -289,48 +295,46 @@ impl ExtSpiTransfers {
 
         let mut transmit_success = false;
         while !transmit_success {
-            self.ping.set_high().unwrap();
             {
-                // Enable sniffing on the channel
-                dma_peripheral.ch[0]
-                    .ch_ctrl_trig
-                    .write(|w| w.sniff_en().set_bit());
-                // Set which channel the sniffer is sniffing
-                dma_peripheral
-                    .sniff_ctrl
-                    .write(|w| unsafe { w.dmach().bits(0) });
-                //let payload = self.payload_buffer.take().unwrap();
-                {
-                    let mut transfer = single_buffer::Config::new(
-                        self.dma_channel.take().unwrap(),
-                        self.payload_buffer.take().unwrap(),
-                        self.spi.take().unwrap(),
-                    )
-                    .start();
-                    self.ping.set_low().unwrap();
-                    maybe_abort_dma_transfer(dma_peripheral, 0);
-                    let (r_ch0, r_buf, spi) = transfer.wait();
-                    self.dma_channel = Some(r_ch0);
-                    self.payload_buffer = Some(r_buf);
-                    self.spi = Some(spi);
-                }
-                //self.payload_buffer = Some(payload);
+                self.ping.set_high().unwrap();
+                let mut transfer = single_buffer::Config::new(
+                    self.dma_channel_0.take().unwrap(),
+                    self.payload_buffer.take().unwrap(),
+                    self.spi.take().unwrap(),
+                )
+                .start();
+                let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
+                self.ping.set_low().unwrap();
+                // info!("Transfer from {}", transfer_read_address + length);
+                maybe_abort_dma_transfer_old(dma_peripheral, 0, transfer_read_address + length);
+                // info!("Await transfer to {}", transfer_read_address + length);
+                let (r_ch0, r_buf, spi) = transfer.wait();
+                //info!("Got transfer 1");
+                self.dma_channel_0 = Some(r_ch0);
+                self.payload_buffer = Some(r_buf);
+                self.spi = Some(spi);
             }
-            self.ping.set_high().unwrap();
+
             // Now read the crc from the pi
             {
+                self.ping.set_high().unwrap();
                 // TODO: Is all the DMA state reset now?
 
                 let transfer = single_buffer::Config::new(
-                    self.dma_channel.take().unwrap(),
+                    self.dma_channel_0.take().unwrap(),
                     self.spi.take().unwrap(),
                     self.crc_buffer.take().unwrap(),
                 )
                 .start();
+
+                let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 self.ping.set_low().unwrap();
-                maybe_abort_dma_transfer(dma_peripheral, 0);
+                //info!("Maybe abort crc?");
+                maybe_abort_dma_transfer(dma_peripheral, 0, transfer_read_address + 32);
+                //info!("Await transfer 2");
                 let (r_ch0, spi, r_buf) = transfer.wait();
-                self.dma_channel = Some(r_ch0);
+                //info!("Got transfer 2");
+                self.dma_channel_0 = Some(r_ch0);
 
                 // Find offset crc in buffer:
                 if let Some(start) = r_buf.iter().position(|&x| x == 1) {
@@ -398,7 +402,7 @@ impl ExtSpiTransfers {
     }
 }
 
-fn maybe_abort_dma_transfer(dma: &mut DMA, channel: u32) {
+fn maybe_abort_dma_transfer_old(dma: &mut DMA, channel: u32, add: u32) {
     // If the raspberry pi host requests less bytes than we want to send, we'd stall forever
     // unless we keep tabs on whether or not the channel has stalled, and abort appropriately.
     let mut prev_count = dma.ch[channel as usize].ch_trans_count.read().bits();
@@ -447,6 +451,68 @@ fn maybe_abort_dma_transfer(dma: &mut DMA, channel: u32) {
         dma.chan_abort.write(|w| unsafe { w.bits(1 << channel) });
 
         while dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {}
+
+        dma.inte0.write(|w| unsafe { w.bits(inte0) });
+        dma.inte1.write(|w| unsafe { w.bits(inte1) });
+    }
+}
+
+fn maybe_abort_dma_transfer(dma: &mut DMA, channel: u32, transfer_end_address: u32) {
+    // If the raspberry pi host requests less bytes than we want to send, we'd stall forever
+    // unless we keep tabs on whether or not the channel has stalled, and abort appropriately.
+    let mut same_address = 0;
+    let mut prev_read_address = 0;
+    let mut needs_abort = false;
+    // Check that the FIFOs are empty too.
+    loop {
+        if dma.ch[channel as usize]
+            .ch_ctrl_trig
+            .read()
+            .busy()
+            .bit_is_set()
+        {
+            let current_transfer_read_address = dma.ch[channel as usize].ch_read_addr.read().bits();
+            // if current_transfer_read_address >= transfer_end_address {
+            //     needs_abort = true;
+            //     break;
+            // }
+            if prev_read_address == current_transfer_read_address {
+                same_address += 1;
+            }
+            if same_address == 1_000_000 {
+                // We went 10,000 iterations without the crc changing, surely that means the transfer has stalled?
+                needs_abort = true;
+                break;
+            }
+            prev_read_address = current_transfer_read_address;
+        } else {
+            break;
+        }
+    }
+    if needs_abort
+        && dma.ch[channel as usize]
+            .ch_ctrl_trig
+            .read()
+            .busy()
+            .bit_is_set()
+    {
+        info!("Aborting dma transfer at {}", prev_read_address);
+        //info!("Aborting dma transfer");
+        // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
+        let inte0 = dma.inte0.read().bits();
+        let inte1 = dma.inte1.read().bits();
+        let mask = (1u32 << channel).reverse_bits();
+        dma.inte0.write(|w| unsafe { w.bits(inte0 & mask) });
+        dma.inte1.write(|w| unsafe { w.bits(inte1 & mask) });
+        // Abort all dma transfers
+        dma.chan_abort.write(|w| unsafe { w.bits(1 << channel) });
+
+        while dma.ch[channel as usize]
+            .ch_ctrl_trig
+            .read()
+            .busy()
+            .bit_is_set()
+        {}
 
         dma.inte0.write(|w| unsafe { w.bits(inte0) });
         dma.inte1.write(|w| unsafe { w.bits(inte1) });
