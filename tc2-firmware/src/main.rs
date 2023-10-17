@@ -182,7 +182,7 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
     let should_record_new = true;
-    let num_seconds = 10;
+    let num_seconds = 180;
     let num_frames_to_record = num_seconds * 9;
 
     // TODO: I'd rather have these static arrays in ram.  Can we just unsafe pinky promise that they live for static?
@@ -314,6 +314,10 @@ fn main() -> ! {
                     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
                     while let Some(((part, crc, block_index, page_index), is_last, spi)) = flash_storage.get_file_part() {
                         //fs_pins.disable();
+                        if part_count == 0 {
+                            info!("Start len {} {:?}", part.len(), &part);
+                        }
+
                         pi_spi.enable(spi, &mut peripherals.RESETS);
                         let transfer_type = if file_start && !is_last {
                             ExtTransferMessage::BeginFileTransfer
@@ -465,7 +469,7 @@ fn main() -> ! {
 
                     // TODO: Pass in various cptv header info bits.
                     let mut cptv_streamer = CptvStream::new(0, lepton_version, &mut flash_storage, &huffman_table, &crc_table);
-                    cptv_streamer.init_gzip_stream();
+                    cptv_streamer.init_gzip_stream(&mut flash_storage, false);
                     cptv_stream = Some(cptv_streamer);
 
                     info!("Created CPTV stream");

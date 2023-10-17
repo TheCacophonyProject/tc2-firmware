@@ -409,20 +409,41 @@ impl<'a> CptvStream<'a> {
     /// of a 'dynamic' gzip block, with pre-calculated huffman tables describing only literals
     /// (not match lengths or distances).  This will always be smaller than our page size of 2048 bytes
     /// so there's no need to check if we need to flush out to flash memory.
-    pub fn init_gzip_stream(&mut self) {
+    pub fn init_gzip_stream(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
         self.crc_val = 0;
         self.total_uncompressed = 0;
+
+        let (block_index, page_index) = if at_header_location {
+            (Some(self.starting_block_index as isize), Some(0isize))
+        } else {
+            (None, None)
+        };
+
         let gzip_header: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff];
         for byte in gzip_header
             .iter()
             .chain(&STATIC_LZ77_DYNAMIC_BLOCK_HEADER[..STATIC_LZ77_DYNAMIC_BLOCK_HEADER.len() - 1])
         {
             self.cursor.write_byte(*byte);
+            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+                flash_storage.append_file_bytes(
+                    to_flush,
+                    num_bytes,
+                    false,
+                    block_index,
+                    page_index,
+                );
+                self.cursor.flush_residual_bits();
+            }
         }
         self.cursor.write_bits(
             STATIC_LZ77_DYNAMIC_BLOCK_HEADER[STATIC_LZ77_DYNAMIC_BLOCK_HEADER.len() - 1] as u32,
             5,
         );
+        if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+            flash_storage.append_file_bytes(to_flush, num_bytes, false, block_index, page_index);
+            self.cursor.flush_residual_bits();
+        }
     }
 
     /// Add a new frame to the current CPTV stream, flushing out pages to the flash storage as needed.
@@ -549,7 +570,7 @@ impl<'a> CptvStream<'a> {
 
         // Now write the CPTV header into the first page of the starting block as a separate gzip member,
         // now that we know the total frame count for the recording, and the min/max pixel values.
-        self.init_gzip_stream();
+        self.init_gzip_stream(flash_storage, true);
         for byte in push_header_iterator(&self.cptv_header) {
             self.total_uncompressed += 1;
             self.crc_val = self.crc_val ^ 0xffffffff;
