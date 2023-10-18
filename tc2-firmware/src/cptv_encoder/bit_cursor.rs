@@ -1,5 +1,4 @@
 use byteorder::{ByteOrder, LittleEndian};
-use defmt::info;
 
 const PAGE_COMMAND_ADDRESS: usize = 4;
 const USER_BUFFER_LENGTH: usize = 2048;

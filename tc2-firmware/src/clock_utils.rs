@@ -221,11 +221,6 @@ pub fn setup_rosc_as_system_clock(
     let rosc = rosc.initialize_with_freq(measured_rosc_frequency);
 
     let mut clocks = ClocksManager::new(clocks_peripheral);
-    info!(
-        "Rosc {:?}, target {:?}",
-        rosc.get_freq().to_Hz(),
-        desired_rosc_freq.to_Hz()
-    );
     clocks
         .system_clock
         .configure_clock(&rosc, rosc.get_freq())

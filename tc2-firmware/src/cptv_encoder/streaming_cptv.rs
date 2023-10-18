@@ -1,5 +1,5 @@
 use crate::cptv_encoder::bit_cursor::BitCursor;
-use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
+use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;

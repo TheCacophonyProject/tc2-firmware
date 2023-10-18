@@ -1,15 +1,18 @@
+use crate::bsp;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
 use core::mem;
 use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
 use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
-use defmt::Format;
 use defmt::{info, warn};
+use defmt::{trace, Format};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::spi::MODE_3;
-use fugit::HertzU32;
-use rp2040_hal::gpio::bank0::{Gpio20, Gpio21, Gpio22, Gpio23};
-use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PinId, PullDown, PullNone, SioInput, SioOutput};
+use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
+use rp2040_hal::gpio::{
+    FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, SioInput, SioOutput,
+};
 
 use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
 use crate::bsp::hal::gpio::FunctionSpi;
@@ -17,6 +20,7 @@ use crate::bsp::hal::spi::Enabled;
 use crate::bsp::hal::{Spi, I2C as I2CInterface};
 use crate::bsp::pac::{RESETS, SPI0};
 use crate::bsp::{hal::gpio::Pin, pac::I2C0};
+use crate::core0_task::LEPTON_SPI_CLOCK_FREQ;
 use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 
 pub enum LeptonCommandType {
@@ -198,37 +202,29 @@ impl LeptonError {
     }
 }
 
-pub type LeptonCciI2c = I2CInterface<
-    I2C0,
-    (
-        Pin<Gpio24, FunctionI2C, PullDown>,
-        Pin<Gpio25, FunctionI2C, PullDown>,
-    ),
->;
-
-type VsyncPin = Pin<Gpio19, FunctionSio<SioInput>, PullDown>;
-
-pub struct Lepton<T: PinId> {
-    pub spi: Option<
-        Spi<
-            Enabled,
-            SPI0,
-            (
-                Pin<Gpio23, FunctionSpi, PullDown>, // TX
-                Pin<Gpio20, FunctionSpi, PullDown>, // RX
-                Pin<Gpio22, FunctionSpi, PullDown>, // SCK
-            ),
-            16,
-        >,
-    >,
-    cs: Option<Pin<Gpio21, FunctionSpi, PullDown>>, // CS
-    pub vsync: VsyncPin,
+type Vsync = Pin<Gpio19, FunctionSio<SioInput>, PullDown>;
+type SpiCs = Pin<Gpio21, FunctionSpi, PullDown>;
+type SpiTx = Pin<Gpio23, FunctionSpi, PullDown>;
+type SpiRx = Pin<Gpio20, FunctionSpi, PullDown>;
+type SpiClk = Pin<Gpio22, FunctionSpi, PullDown>;
+type Sda = Pin<Gpio24, FunctionI2C, PullDown>;
+type Scl = Pin<Gpio25, FunctionI2C, PullDown>;
+type LeptonCciI2c = I2CInterface<I2C0, (Sda, Scl)>;
+type PowerEnable = Pin<Gpio18, FunctionSio<SioOutput>, PullDown>;
+type PowerDown = Pin<Gpio28, FunctionSio<SioOutput>, PullDown>;
+type Reset = Pin<Gpio29, FunctionSio<SioOutput>, PullDown>;
+type ClkDisable = Pin<Gpio27, FunctionSio<SioOutput>, PullDown>;
+type MasterClk = Pin<Gpio26, FunctionSio<SioInput>, PullNone>;
+pub struct LeptonModule {
+    spi: Option<Spi<Enabled, SPI0, (SpiTx, SpiRx, SpiClk), 16>>,
+    cs: Option<SpiCs>,
+    pub vsync: Vsync,
     cci: LeptonCciI2c,
-    power_enable: Pin<T, FunctionSio<SioOutput>, PullDown>, //Gpio18
-    power_down: Pin<Gpio28, FunctionSio<SioOutput>, PullDown>,
-    reset: Pin<Gpio29, FunctionSio<SioOutput>, PullDown>,
-    pub clk_disable: Pin<Gpio27, FunctionSio<SioOutput>, PullDown>,
-    master_clk: Pin<Gpio26, FunctionSio<SioInput>, PullNone>,
+    power_enable: PowerEnable,
+    power_down: PowerDown,
+    reset: Reset,
+    clk_disable: ClkDisable,
+    master_clk: MasterClk,
 }
 
 #[repr(C)]
@@ -296,7 +292,7 @@ impl FFCState {
     }
 }
 
-impl<T: PinId> Lepton<T> {
+impl LeptonModule {
     pub fn new(
         i2c: LeptonCciI2c,
         spi: Spi<
@@ -310,14 +306,14 @@ impl<T: PinId> Lepton<T> {
             16,
         >,
         cs: Pin<Gpio21, FunctionSpi, PullDown>,
-        vsync: VsyncPin,
-        power_enable: Pin<T, FunctionSio<SioOutput>, PullDown>, // Gpio18
+        vsync: Vsync,
+        power_enable: Pin<Gpio18, FunctionSio<SioOutput>, PullDown>,
         power_down: Pin<Gpio28, FunctionSio<SioOutput>, PullDown>,
         reset: Pin<Gpio29, FunctionSio<SioOutput>, PullDown>,
         clk_disable: Pin<Gpio27, FunctionSio<SioOutput>, PullDown>,
         master_clk: Pin<Gpio26, FunctionSio<SioInput>, PullNone>,
-    ) -> Lepton<T> {
-        Lepton {
+    ) -> LeptonModule {
+        LeptonModule {
             spi: Some(spi),
             cs: Some(cs),
             vsync,
@@ -344,13 +340,7 @@ impl<T: PinId> Lepton<T> {
                 • If Bit 0 is 0, then the interface is ready for receiving commands.
         */
         info!("=== Init lepton module ===");
-        //self.
-
-        //self.reset_spi(delay);
-        //self.ping();
-        //self.enable_focus_metric();
         info!("Disable FFC");
-
         // NOTE: It's actually quite good if we don't have FFC interrupt the video feed - we can
         //  just discard those frames later based on the telemetry, and this helps with sync.
         let success = self.disable_automatic_ffc();
@@ -365,16 +355,8 @@ impl<T: PinId> Lepton<T> {
         }
         info!("Telemetry enabled? {}", self.telemetry_enabled());
         info!("Telemetry location? {}", self.telemetry_location());
-        // let telemetry_location = self.telemetry_location();
-        // match telemetry_location {
-        //     Ok(location) => {
-        //         info!("Telemetry in footer? {}", location == TelemetryLocation::Footer)
-        //     },
-        //     Err(err) => warn!("{:?}", err)
-        // };
-        //self.setup_spot_meter_roi();
-        info!("Disable post-processing");
-        let success = self.disable_post_processing();
+        info!("Enable post-processing");
+        let success = self.enable_post_processing();
         if !success.is_ok() {
             warn!("{}", success);
         }
@@ -385,13 +367,6 @@ impl<T: PinId> Lepton<T> {
         if !success.is_ok() {
             warn!("{}", success);
         }
-        //self.vsync.set_interrupt_enabled(Interrupt::EdgeHigh, true);
-
-        //info!("Got ping? {}", self.ping());
-        //info!("AGC enabled? {}", self.acg_enabled());
-        //info!("Focus metric enabled? {}", self.focus_metric_enabled());
-        //info!("Output format RAW14? {}", self.output_raw14());
-
         info!("Enable vsync");
         let success = self.enable_vsync();
         if !success.is_ok() {
@@ -415,7 +390,9 @@ impl<T: PinId> Lepton<T> {
         )
     }
 
-    fn disable_post_processing(&mut self) -> Result<bool, LeptonError> {
+    fn enable_post_processing(&mut self) -> Result<bool, LeptonError> {
+        // This is probably the default post-processing settings on lepton startup,
+        // but it doesn't hurt to set them anyway
         let success = self.set_attribute_i32(
             lepton_command(
                 LEPTON_SUB_SYSTEM_OEM,
@@ -468,15 +445,6 @@ impl<T: PinId> Lepton<T> {
             warn!("{}", success);
         }
         success
-        // self.set_attribute_i32(
-        //     lepton_command(
-        //         LEPTON_SUB_SYSTEM_OEM,
-        //         LEP_OEM_VIDEO_OUTPUT_SOURCE,
-        //         LeptonCommandType::Set,
-        //         true,
-        //     ),
-        //     3, // Output raw, without post-processing
-        // )
     }
 
     pub fn enable_video_output(&mut self, enabled: bool) -> Result<bool, LeptonError> {
@@ -807,16 +775,16 @@ impl<T: PinId> Lepton<T> {
 
     pub fn power_down_sequence(&mut self, delay: &mut Delay) {
         // Putting lepton into standby mode, uses about 5mW in standby mode.
-        info!("power down asserted");
+        trace!("power down asserted");
         self.power_down.set_low().unwrap();
 
         // Datasheet says to wait at least 100ms before turning off clock after power down.
         delay.delay_ms(100);
-        info!("clk disabled");
+        trace!("clk disabled");
         self.clk_disable.set_low().unwrap();
 
         // power off disables the 3.0V, 2.8V and 1.2V
-        info!("power off");
+        trace!("power off");
         self.power_enable.set_low().unwrap();
         delay.delay_ms(200);
     }
@@ -841,9 +809,9 @@ impl<T: PinId> Lepton<T> {
     }
 
     pub fn cci_init(&mut self, delay: &mut Delay) {
-        info!("de-assert reset");
+        trace!("de-assert reset");
         delay.delay_ms(2000);
-        info!("Wait for ready");
+        trace!("Wait for ready");
         self.wait_for_ready(false);
         self.init();
     }
@@ -855,6 +823,7 @@ impl<T: PinId> Lepton<T> {
     }
 
     pub fn radiometric_mode_enabled(&mut self) -> Result<bool, LeptonError> {
+        // Try to enable radiometric mode if available.
         let success = match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_RAD,
             LEPTON_RAD_ENABLE_STATE,
@@ -1261,4 +1230,70 @@ pub fn read_telemetry(buf: &[u8]) -> Telemetry {
         fpa_temp_c,
         fpa_temp_c_at_last_ffc,
     }
+}
+
+pub struct LeptonPins {
+    pub(crate) tx: SpiTx,
+    pub(crate) rx: SpiRx,
+    pub(crate) clk: SpiClk,
+    pub(crate) cs: SpiCs,
+
+    pub(crate) vsync: Vsync,
+
+    pub(crate) sda: Sda,
+    pub(crate) scl: Scl,
+
+    pub(crate) power_down: PowerDown,
+    pub(crate) power_enable: PowerEnable,
+    pub(crate) reset: Reset,
+    pub(crate) clk_disable: ClkDisable,
+    pub(crate) master_clk: MasterClk,
+}
+
+pub fn init_lepton_module(
+    spi_peripheral: SPI0,
+    ic2_peripheral: I2C0,
+    system_clock_freq_hz: u32,
+    resets: &mut RESETS,
+    delay: &mut Delay,
+    pins: LeptonPins,
+) -> LeptonModule {
+    let spi = Spi::new(spi_peripheral, (pins.tx, pins.rx, pins.clk)).init(
+        resets,
+        system_clock_freq_hz.Hz(),
+        LEPTON_SPI_CLOCK_FREQ.Hz(),
+        &MODE_3,
+    );
+    let mut lepton = LeptonModule::new(
+        bsp::hal::I2C::i2c0(
+            ic2_peripheral,
+            pins.sda,
+            pins.scl,
+            100.kHz(),
+            resets,
+            system_clock_freq_hz.Hz(),
+        ),
+        spi,
+        pins.cs,
+        pins.vsync,
+        pins.power_enable,
+        pins.power_down,
+        pins.reset,
+        pins.clk_disable,
+        pins.master_clk,
+    );
+
+    // TODO: When going dormant, can we make sure we don't have any gpio pins in a pullup/down mode.
+    lepton
+        .vsync
+        .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
+    info!("Lepton startup sequence");
+    lepton.power_down_sequence(delay);
+    lepton.power_on_sequence(delay);
+    // Set wake from dormant on vsync
+    lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+    lepton
+        .vsync
+        .set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
+    lepton
 }

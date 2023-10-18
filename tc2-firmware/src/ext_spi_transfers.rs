@@ -1,17 +1,15 @@
 use crate::bsp;
 use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1};
-use crate::onboard_flash::{extend_lifetime, extend_lifetime_mut};
+use crate::onboard_flash::extend_lifetime;
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
-use crc::{Crc, CRC_16_XMODEM};
 use defmt::{info, Format};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
-    _embedded_hal_spi_FullDuplex,
 };
 use rp2040_hal::dma::single_buffer::Transfer;
-use rp2040_hal::dma::{double_buffer, single_buffer, Channel, CH0, CH1};
+use rp2040_hal::dma::{single_buffer, Channel, CH0};
 use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
@@ -74,7 +72,6 @@ impl ExtSpiTransfers {
         miso: Pin<Gpio15, FunctionNull, PullNone>,
         ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
         dma_channel_0: Channel<CH0>,
-        //dma_channel_1: Channel<CH1>,
         payload_buffer: &'static mut [u8; 2066],
         crc_buffer: &'static mut [u8; 32],
         pio: PIO<PIO0>,
@@ -94,7 +91,6 @@ impl ExtSpiTransfers {
 
             ping,
             dma_channel_0: Some(dma_channel_0),
-            //dma_channel_1: Some(dma_channel_1),
             payload_buffer: Some(payload_buffer),
             crc_buffer: Some(crc_buffer),
             pio,
@@ -297,7 +293,7 @@ impl ExtSpiTransfers {
         while !transmit_success {
             {
                 self.ping.set_high().unwrap();
-                let mut transfer = single_buffer::Config::new(
+                let transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
                     self.spi.take().unwrap(),

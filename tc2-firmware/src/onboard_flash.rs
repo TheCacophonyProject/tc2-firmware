@@ -12,12 +12,9 @@
 // in blocks of a certain size.
 
 use crate::bsp::pac::SPI1;
-use crate::FrameSeg;
 use byteorder::{ByteOrder, LittleEndian};
-use core::cell::RefCell;
 use core::mem;
 use crc::{Crc, CRC_16_XMODEM};
-use critical_section::Mutex;
 use defmt::{error, info, println, warn};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
@@ -446,10 +443,10 @@ impl OnboardFlash {
 
     pub fn has_files_to_offload(&self) -> bool {
         // When we did our initial scan, did we encounter any used blocks?
-        info!(
-            "First used block {:?}, last used {:?}",
-            self.first_used_block_index, self.last_used_block_index
-        );
+        // info!(
+        //     "First used block {:?}, last used {:?}",
+        //     self.first_used_block_index, self.last_used_block_index
+        // );
         self.first_used_block_index.is_some()
     }
 
