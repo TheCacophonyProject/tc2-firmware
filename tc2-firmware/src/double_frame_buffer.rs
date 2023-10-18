@@ -2,21 +2,21 @@ use crate::FrameSeg;
 use core::cell::RefCell;
 use critical_section::Mutex;
 
-pub static FRAME_SEGMENT_BUFFER: DoubleBuffer = DoubleBuffer {
-    front: Mutex::new(RefCell::new([
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-    ])),
-    back: Mutex::new(RefCell::new([
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-    ])),
-    swapper: Mutex::new(RefCell::new(true)),
-};
+// pub static FRAME_SEGMENT_BUFFER: DoubleBuffer = DoubleBuffer {
+//     front: Mutex::new(RefCell::new([
+//         FrameSeg::new(),
+//         FrameSeg::new(),
+//         FrameSeg::new(),
+//         FrameSeg::new(),
+//     ])),
+//     back: Mutex::new(RefCell::new([
+//         FrameSeg::new(),
+//         FrameSeg::new(),
+//         FrameSeg::new(),
+//         FrameSeg::new(),
+//     ])),
+//     swapper: Mutex::new(RefCell::new(true)),
+// };
 
 pub struct DoubleBuffer {
     front: Mutex<RefCell<[FrameSeg; 4]>>,

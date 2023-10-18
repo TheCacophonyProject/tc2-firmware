@@ -1,8 +1,8 @@
 //! Timer Peripheral
 //!
-//! The Timer peripheral on RP2040 consists of a 64-bit counter and 4 alarms.  
-//! The Counter is incremented once per microsecond. It obtains its clock source from the watchdog peripheral, you must enable the watchdog before using this peripheral.  
-//! Since it would take thousands of years for this counter to overflow you do not need to write logic for dealing with this if using get_counter.  
+//! The Timer peripheral on RP2040 consists of a 64-bit counter and 4 alarms.
+//! The Counter is incremented once per microsecond. It obtains its clock source from the watchdog peripheral, you must enable the watchdog before using this peripheral.
+//! Since it would take thousands of years for this counter to overflow you do not need to write logic for dealing with this if using get_counter.
 //!
 //! Each of the 4 alarms can match on the lower 32 bits of Counter and trigger an interrupt.
 //!
@@ -59,7 +59,7 @@ impl Timer {
     /// Make sure that clocks and watchdog are configured, so
     /// that timer ticks happen at a frequency of 1MHz.
     /// Otherwise, `Timer` won't work as expected.
-    pub fn new(timer: TIMER, resets: &mut RESETS, _clocks: &ClocksManager) -> Self {
+    pub fn new(timer: TIMER, resets: &mut RESETS) -> Self {
         timer.reset_bring_down(resets);
         timer.reset_bring_up(resets);
         Self { _private: () }

@@ -17,11 +17,11 @@ mod onboard_flash;
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::double_frame_buffer::FRAME_SEGMENT_BUFFER;
+//use crate::double_frame_buffer::FRAME_SEGMENT_BUFFER;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::read_telemetry;
-use crate::onboard_flash::OnboardFlash;
-use crate::utils::{any_as_u8_slice, u8_slice_to_u16, u8_slice_to_u32};
+use crate::onboard_flash::{extend_lifetime_generic, OnboardFlash};
+use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 use bsp::{
     entry,
     hal::{
@@ -35,27 +35,32 @@ use bsp::{
     pac::Peripherals,
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use core::cell::RefCell;
+use core::ops::Deref;
 use cortex_m::delay::Delay;
 use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
+use critical_section::Mutex;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_spi_Transfer,
     _embedded_hal_blocking_spi_Write, _embedded_hal_spi_FullDuplex,
+    _embedded_hal_watchdog_WatchdogEnable,
 };
 use fugit::HertzU32;
 use fugit::RateExtU32;
 use lepton::Lepton;
 use panic_probe as _;
+use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::dma::{DMAExt, SingleChannel};
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
-use rp2040_hal::pio::{PIOBuilder, PIOExt, ShiftDirection};
+use rp2040_hal::pio::PIOExt;
 use rp2040_hal::I2C;
 
 // This is 128KB, or half of our available memory
-static mut CORE1_STACK: Stack<43500> = Stack::new();
+static mut CORE1_STACK: Stack<43500> = Stack::new(); // 174,000 bytes
 
 // CORE1 consts
 pub const START_TIMER: u32 = 0xfb;
@@ -64,6 +69,7 @@ pub const CORE1_TASK_COMPLETE: u32 = 0xEE;
 pub const CORE1_TASK_READY: u32 = 0xDB;
 pub const CORE1_TASK_START_WITH_FRAME_SEGMENT: u32 = 0xAC;
 pub const CORE1_TASK_START_WITH_FULL_FRAME: u32 = 0xAE;
+pub const CORE1_TASK_GOT_FULL_FRAME: u32 = 0xAB;
 
 pub const CORE1_RECORDING_STARTED: u32 = 0xBC;
 pub const CORE1_RECORDING_ENDED: u32 = 0xBE;
@@ -151,6 +157,12 @@ fn main() -> ! {
     let rosc_clock_freq: HertzU32 = 150_000_000.Hz();
     let lepton_spi_clock_freq: HertzU32 = 40_000_000.Hz();
 
+    // Make sure the reference xosc clock is running properly?
+    // For better power saving, we may actually want the ROSC to have a higher divider, and lower
+    // frequency.
+
+    // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
+
     let mut peripherals = Peripherals::take().unwrap();
     let (clocks, mut rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
@@ -158,10 +170,12 @@ fn main() -> ! {
         peripherals.ROSC,
         rosc_clock_freq,
     );
+    let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
     info!(
         "System clock speed {}MHz",
         clocks.system_clock.freq().to_MHz()
     );
+
     if clocks.system_clock.freq().to_MHz() == 12 {
         crate::panic!("Invalid clock speed");
     }
@@ -181,9 +195,21 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut peripherals.RESETS,
     );
-    let should_record_new = true;
-    let num_seconds = 180;
-    let num_frames_to_record = num_seconds * 9;
+
+    let fb_l = Mutex::new(RefCell::new([
+        FrameSeg::new(),
+        FrameSeg::new(),
+        FrameSeg::new(),
+        FrameSeg::new(),
+    ]));
+    // Shenanigans to convince the second thread that all these values exist for the lifetime of the
+    // program.
+    let frame_buffer_local: &'static Mutex<RefCell<[FrameSeg; 4]>> =
+        unsafe { extend_lifetime_generic(&fb_l) };
+    let system_clock_freq = clocks.system_clock.freq().to_Hz();
+    let clock_freq = clocks.peripheral_clock.freq();
+    let system_clock_freq = unsafe { extend_lifetime_generic(&system_clock_freq) };
+    let clock_freq = unsafe { extend_lifetime_generic(&clock_freq) };
 
     // TODO: I'd rather have these static arrays in ram.  Can we just unsafe pinky promise that they live for static?
     let crc_buf = singleton!(: [u8; 32] = [0x42; 32]).unwrap();
@@ -191,60 +217,69 @@ fn main() -> ! {
     let flash_page_buf = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
     let flash_page_buf_2 = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
     {
-        let pi_ping = pins.gpio5.into_push_pull_output();
-        let cs = pins.gpio9.into_push_pull_output();
-        let pi_miso = pins.gpio15.into_floating_disabled();
-        let pi_mosi = pins.gpio12.into_floating_disabled();
-        let pi_cs = pins.gpio13.into_floating_disabled();
-        let pi_clk = pins.gpio14.into_floating_disabled();
-        let fs_miso = pins.gpio8.into_pull_down_disabled().into_pull_type();
-        let fs_mosi = pins.gpio11.into_pull_down_disabled().into_pull_type();
-        let fs_clk = pins.gpio10.into_pull_down_disabled().into_pull_type();
-        let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+        let _ = core1.spawn(unsafe { &mut CORE1_STACK.mem }, || {
+            let mut peripherals = unsafe { Peripherals::steal() };
+            let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
+            watchdog.enable_tick_generation((*system_clock_freq / 1_000_000) as u8);
+            let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
 
-        let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+            let pi_ping = pins.gpio5.into_push_pull_output();
+            let cs = pins.gpio9.into_push_pull_output();
+            let pi_miso = pins.gpio15.into_floating_disabled();
+            let pi_mosi = pins.gpio12.into_floating_disabled();
+            let pi_cs = pins.gpio13.into_floating_disabled();
+            let pi_clk = pins.gpio14.into_floating_disabled();
+            let fs_miso = pins.gpio8.into_pull_down_disabled().into_pull_type();
+            let fs_mosi = pins.gpio11.into_pull_down_disabled().into_pull_type();
+            let fs_clk = pins.gpio10.into_pull_down_disabled().into_pull_type();
+            let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
-        let mut pi_spi = ExtSpiTransfers::new(
-            pi_mosi,
-            pi_cs,
-            pi_clk,
-            pi_miso,
-            pi_ping,
-            dma_channels.ch0,
-            payload_buf,
-            crc_buf,
-            pio0,
-            sm0,
-        );
+            let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
 
-        let mut spi_peripheral = Some(peripherals.SPI1);
-        let clock_freq = clocks.peripheral_clock.freq();
-        let mut flash_storage = OnboardFlash::new(
-            cs,
-            fs_mosi,
-            fs_clk,
-            fs_miso,
-            flash_page_buf,
-            flash_page_buf_2,
-            dma_channels.ch1,
-            dma_channels.ch2,
-        );
-        {
-            flash_storage.take_spi(
-                spi_peripheral.take().unwrap(),
-                &mut peripherals.RESETS,
-                clock_freq,
+            let mut pi_spi = ExtSpiTransfers::new(
+                pi_mosi,
+                pi_cs,
+                pi_clk,
+                pi_miso,
+                pi_ping,
+                dma_channels.ch0,
+                payload_buf,
+                crc_buf,
+                pio0,
+                sm0,
             );
-            //delay.delay_ms(5000);
-            flash_storage.init();
-            info!(
-                "Finished scan, needs offload? {}",
-                flash_storage.has_files_to_offload()
+
+            let mut spi_peripheral = Some(peripherals.SPI1);
+            let mut flash_storage = OnboardFlash::new(
+                cs,
+                fs_mosi,
+                fs_clk,
+                fs_miso,
+                flash_page_buf,
+                flash_page_buf_2,
+                dma_channels.ch1,
+                dma_channels.ch2,
+                false,
             );
-        }
+            {
+                flash_storage.take_spi(
+                    spi_peripheral.take().unwrap(),
+                    &mut peripherals.RESETS,
+                    *clock_freq,
+                );
+                //delay.delay_ms(5000);
+                flash_storage.init();
+                info!(
+                    "Finished scan, needs offload? {}",
+                    flash_storage.has_files_to_offload()
+                );
+            }
 
-        let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
 
+            let should_record_new = true;
+            let should_record_to_flash = false;
+            let num_seconds = 10;
+            let num_frames_to_record = num_seconds * 9;
             // FIXME: Allocate all the buffers we need in this thread up front.
             let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
 
@@ -266,7 +301,7 @@ fn main() -> ! {
             let raspberry_pi_is_awake = true;
             let mut peripherals = unsafe { Peripherals::steal() };
             let core = unsafe { pac::CorePeripherals::steal() };
-            let mut delay = Delay::new(core.SYST, sys_freq);
+            //let delay = Delay::new(core.SYST, system_clock_freq);
             let mut sio = Sio::new(peripherals.SIO);
             sio.fifo.write_blocking(CORE1_TASK_READY);
             let radiometry_enabled = sio.fifo.read_blocking();
@@ -291,7 +326,7 @@ fn main() -> ! {
                 );
 
                 let spi_free = pi_spi.disable();
-                flash_storage.take_spi(spi_free, &mut peripherals.RESETS, clock_freq);
+                flash_storage.take_spi(spi_free, &mut peripherals.RESETS, *clock_freq);
             }
             // TODO: Switch modes here.
             //  If there are files to upload, do that.
@@ -313,11 +348,6 @@ fn main() -> ! {
 
                     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
                     while let Some(((part, crc, block_index, page_index), is_last, spi)) = flash_storage.get_file_part() {
-                        //fs_pins.disable();
-                        if part_count == 0 {
-                            info!("Start len {} {:?}", part.len(), &part);
-                        }
-
                         pi_spi.enable(spi, &mut peripherals.RESETS);
                         let transfer_type = if file_start && !is_last {
                             ExtTransferMessage::BeginFileTransfer
@@ -369,7 +399,7 @@ fn main() -> ! {
 
                         // Give spi peripheral back to flash storage.
                         let spi = pi_spi.disable();
-                        flash_storage.take_spi(spi, &mut peripherals.RESETS, clock_freq);
+                        flash_storage.take_spi(spi, &mut peripherals.RESETS, *clock_freq);
                     }
                     info!("Completed file offload, transferred {} files", file_count);
                     // TODO: Some validation from the raspberry pi that the transfer completed
@@ -405,25 +435,26 @@ fn main() -> ! {
             let mut frames_seen = 0;
             let mut prev_frame_number = 0;
             let mut prev_time_on_ms = 0;
+            let mut slowest_frame = 0;
             loop {
                 let input = sio.fifo.read_blocking();
-                crate::debug_assert_eq!(
+                crate::assert_eq!(
                     input,
                     CORE1_TASK_START_WITH_FULL_FRAME,
                     "Got unknown fifo input to core1 task loop {}",
                     input
                 );
-
+                let start = *&timer.get_counter();
+                // TODO: Could we indeed have a local double-buffer, and just allow the use of this
+                // memory unsafely without copying it?
                 critical_section::with(|cs| {
-                    for (seg_num, frame_seg) in FRAME_SEGMENT_BUFFER
-                        .get_back()
+                    for (seg_num, frame_seg) in frame_buffer_local
                         .borrow_ref(cs)
                         .iter()
                         .enumerate()
                     {
                         let slice = frame_seg.as_u8_slice();
                         // Write the slice length to read
-
                         // FIXME - This was here because we were using frame_buffer to transmit
                             //  directly to rPi raw frames.
                         let start = seg_num * slice.len();
@@ -432,16 +463,17 @@ fn main() -> ! {
                         frame_buffer[start..end].copy_from_slice(slice);
                     }
                 });
-
+                let e = *&timer.get_counter();
+                info!("Got frame in {}µs", (e - start).to_micros());
+                sio.fifo.write(CORE1_TASK_GOT_FULL_FRAME);
                 // // Transfer RAW frame to pi if it is available.
-                // let (transfer, transfer_end_address) = pi_spi.begin_message(
-                //     ExtTransferMessage::CameraRawFrameTransfer,
-                //     &mut thread_local_frame_buffer,
-                //     0,
-                //     cptv_stream.is_some(),
-                //     &mut peripherals.DMA
-                // );
-
+                let (transfer, transfer_end_address) = pi_spi.begin_message(
+                    ExtTransferMessage::CameraRawFrameTransfer,
+                    &mut thread_local_frame_buffer,
+                    0,
+                    cptv_stream.is_some(),
+                    &mut peripherals.DMA
+                );
                 // Read the telemetry:
                 let frame_buffer = &mut thread_local_frame_buffer[18..];
                 let frame_telemetry = read_telemetry(&frame_buffer);
@@ -449,7 +481,7 @@ fn main() -> ! {
                 let should_start_new_recording = !motion_has_triggered
                     && this_frame_has_motion
                     && cptv_stream.is_none()
-                    && frames_seen > 100; // wait until lepton stabilises before recording
+                    && frames_seen > 20; // wait until lepton stabilises before recording
                 let should_end_current_recording = ((motion_left_frame
                     && five_seconds_have_passed_since_motion_left_frame)
                     || (motion_disappeared_in_frame
@@ -457,7 +489,7 @@ fn main() -> ! {
                     && cptv_stream.is_some();
 
                 let raw_frame = unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
-
+                let mut ended_recording = false;
                 if should_start_new_recording && frames_written < num_frames_to_record {
                     error!("Starting new recording");
                     motion_has_triggered = true;
@@ -471,9 +503,7 @@ fn main() -> ! {
                     let mut cptv_streamer = CptvStream::new(0, lepton_version, &mut flash_storage, &huffman_table, &crc_table);
                     cptv_streamer.init_gzip_stream(&mut flash_storage, false);
                     cptv_stream = Some(cptv_streamer);
-
                     info!("Created CPTV stream");
-                    sio.fifo.write(CORE1_RECORDING_STARTED);
                     // Write out the cptv header, with placeholders, then write out the previous
                     // frame and the current frame.  Going dormant on the main thread gets turned off?  Maybe, we'll see
                 }
@@ -503,13 +533,25 @@ fn main() -> ! {
                     if let Some(cptv_stream) = &mut cptv_stream {
                         error!("Ending current recording");
                         cptv_stream.finalise(&mut flash_storage);
+                        ended_recording = true;
                     }
                     cptv_stream = None;
-                    sio.fifo.write(CORE1_RECORDING_ENDED);
                 }
                 // Check if we need to trigger:  Mostly at the moment we want to see what frame data
                 // structures can be shared with encoding.
-                //pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
+                pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
+                let end = *&timer.get_counter();
+                let frame_time_us = (end - start).to_micros();
+                slowest_frame = slowest_frame.max(frame_time_us);
+                if frames_seen % 100 == 0 {
+                    info!("Frame processing {}µs, worst case {}µs", (end - start).to_micros(), slowest_frame);
+                }
+                if should_start_new_recording && cptv_stream.is_some() {
+                    sio.fifo.write(CORE1_RECORDING_STARTED);
+                }
+                if ended_recording && cptv_stream.is_none() {
+                    sio.fifo.write(CORE1_RECORDING_ENDED);
+                }
                 sio.fifo.write(CORE1_TASK_COMPLETE);
             }
 
@@ -591,6 +633,7 @@ fn main() -> ! {
     let mut attempt = 1;
     let mut transferring_prev_frame = false;
     let mut is_recording = false;
+    let mut recording_ended = false;
     let mut prev_frame_needs_transfer = false;
 
     // Each frame has 4 equally sized segments.
@@ -651,6 +694,7 @@ fn main() -> ! {
     // ].iter().enumerate() {
     //     info!("#{}: {}: {}, {}", i, unit, bcd2dec(cmd[i] & mask), bcd2dec(cmd[i]));
     // }
+
     let mut printed_telemetry_version = false;
     let mut frame_counter = 0;
     let mut unverified_frame_counter = 0;
@@ -663,16 +707,25 @@ fn main() -> ! {
                 current_segment_num = 1;
             }
         }
-        if got_sync && current_segment_num > last_segment_num_for_frame && !is_recording {
+        if got_sync
+            && current_segment_num > last_segment_num_for_frame
+            && !is_recording
+            && !transferring_prev_frame
+        {
             // Go to sleep, skip dummy segment
             rosc = go_dormant_until_next_vsync(rosc, &mut lepton, clocks.system_clock.freq());
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
-            FRAME_SEGMENT_BUFFER.swap();
+
+            // Maybe if this copy is fast enough, we don't need to have a double buffer to swap?
+            // If it's just a straight memcpy of RAM?  Can it be a Mutex which just "takes/replaces" it with another in memory buffer?
+            //FRAME_SEGMENT_BUFFER.swap();
             //info!("Hand off frame to core 1");
             sio.fifo.write(CORE1_TASK_START_WITH_FULL_FRAME);
+            let message = sio.fifo.read_blocking();
+            crate::assert_eq!(message, CORE1_TASK_GOT_FULL_FRAME);
             transferring_prev_frame = true;
             prev_frame_needs_transfer = false;
         }
@@ -709,13 +762,13 @@ fn main() -> ! {
                         // Check if we need an FFC
                         let telemetry = &scanline_buffer[2..];
 
-                        // Let's check the telemetry version...
-                        if !printed_telemetry_version {
-                            printed_telemetry_version = true;
-                            let telemetry_version =
-                                LittleEndian::write_u16_into(&telemetry[0..1], &mut buf[0..2]);
-                            info!("Lepton telemetry revision {}.{}", buf[1], buf[0]);
-                        }
+                        // // Let's check the telemetry version...
+                        // if !printed_telemetry_version {
+                        //     printed_telemetry_version = true;
+                        //     let telemetry_version =
+                        //         LittleEndian::write_u16_into(&telemetry[0..1], &mut buf[0..2]);
+                        //     info!("Lepton telemetry revision {}.{}", buf[1], buf[0]);
+                        // }
 
                         LittleEndian::write_u16_into(&telemetry[1..=2], &mut buf);
                         let time_on_ms = LittleEndian::read_u32(&buf);
@@ -820,8 +873,7 @@ fn main() -> ! {
                     critical_section::with(|cs| {
                         let segment_index =
                             ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
-                        let frame_seg =
-                            &mut FRAME_SEGMENT_BUFFER.get_front().borrow_ref_mut(cs)[segment_index];
+                        let frame_seg = &mut frame_buffer_local.borrow_ref_mut(cs)[segment_index];
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
                         //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
                         LittleEndian::write_u16_into(
@@ -861,11 +913,13 @@ fn main() -> ! {
                                 }
                             }
                             if !got_sync && frame_counter == prev_frame_counter + 1 {
-                                // TODO: Only set got sync if frame_count is = frame_count + 1 from previous frame.
-
+                                // Only set got sync if frame_count is = frame_count + 1 from previous frame.
                                 got_sync = true;
                                 current_segment_num = valid_frame_current_segment_num;
-                                warn!("Got sync");
+                                warn!(
+                                    "Got sync at seg {} frame {} prev frame {}",
+                                    current_segment_num, frame_counter, prev_frame_counter
+                                );
                             }
 
                             attempt = 0;
@@ -884,69 +938,56 @@ fn main() -> ! {
                 if started_segment && !packets_are_in_order {
                     if got_sync {
                         got_sync = false;
+                        warn!(
+                            "Lost sync at seg {}, frame {}, prev frame {}",
+                            current_segment_num, frame_counter, prev_frame_counter
+                        );
                         current_segment_num = 0;
-                        warn!("Lost sync");
                     }
                     // Packet order mismatch
                     attempt += 1;
                     valid_frame_current_segment_num = 0;
                     started_segment = false;
                     prev_segment_was_4 = false;
-                    if attempt > 250 && attempt % 5 == 0 {
-                        warn!(
-                            "Packet order mismatch current: {}, prev: {}, seg {} #{}",
-                            packet_id, prev_packet_id, current_segment_num, attempt
-                        );
-                        lepton.wait_for_ready(false);
-                        lepton.reset_spi(
-                            &mut delay,
-                            &mut peripherals.RESETS,
-                            clocks.peripheral_clock.freq(),
-                            lepton_spi_clock_freq,
-                            false,
-                        );
-                        if !has_done_initial_ffc {
-                            info!("Requesting FFC");
-                            let success = lepton.do_ffc();
-                            match success {
-                                Ok(success) => {
-                                    info!("Success requesting FFC");
-                                }
-                                Err(e) => {
-                                    info!("Failed to request FFC {:?}", e);
-                                }
-                            }
-                            has_done_initial_ffc = true;
-                        }
-                        break 'scanline;
-                    } else {
-                        continue 'scanline;
-                    }
+
+                    //if attempt > 250 && attempt % 5 == 0 {
+                    // warn!(
+                    //     "Packet order mismatch current: {}, prev: {}, seg {} #{}",
+                    //     packet_id, prev_packet_id, current_segment_num, attempt
+                    // );
+                    // lepton.wait_for_ready(false);
+                    // lepton.reset_spi(
+                    //     &mut delay,
+                    //     &mut peripherals.RESETS,
+                    //     clocks.peripheral_clock.freq(),
+                    //     lepton_spi_clock_freq,
+                    //     false,
+                    // );
+                    // if !has_done_initial_ffc {
+                    //     info!("Requesting FFC");
+                    //     let success = lepton.do_ffc();
+                    //     match success {
+                    //         Ok(success) => {
+                    //             info!("Success requesting FFC");
+                    //         }
+                    //         Err(e) => {
+                    //             info!("Failed to request FFC {:?}", e);
+                    //         }
+                    //     }
+                    //     has_done_initial_ffc = true;
+                    // }
+                    break 'scanline;
+                    //} else {
+                    //continue 'scanline;
+                    //}
                 }
                 prev_packet_id = packet_id;
 
-                // Check if the previous frame is has finished transferring.
-                // if transferring_prev_frame {
-                //     if let Some(message) = sio.fifo.read() {
-                //         if message == START_TIMER {
-                //             let mut count = 0u32;
-                //             while sio.fifo.read().is_none() {
-                //                 count += 1;
-                //             }
-                //             sio.fifo.write(count);
-                //         } else if message == CORE1_TASK_COMPLETE {
-                //             transferring_prev_frame = false;
-                //             prev_frame_needs_transfer = false;
-                //         }
-                //     }
-                // }
                 if transferring_prev_frame {
-                    // TODO: Shouldn't we block and wait for core1 to complete?
-
+                    // Should we always read blocking here?
                     if let Some(message) = sio.fifo.read() {
                         if message == CORE1_RECORDING_STARTED {
                             is_recording = true;
-                            delay.delay_ms(1);
                             if let Some(message) = sio.fifo.read() {
                                 if message == CORE1_TASK_COMPLETE {
                                     transferring_prev_frame = false;
@@ -954,8 +995,7 @@ fn main() -> ! {
                                 }
                             }
                         } else if message == CORE1_RECORDING_ENDED {
-                            is_recording = false;
-                            delay.delay_ms(1);
+                            recording_ended = true;
                             if let Some(message) = sio.fifo.read() {
                                 if message == CORE1_TASK_COMPLETE {
                                     transferring_prev_frame = false;
@@ -967,12 +1007,6 @@ fn main() -> ! {
                             prev_frame_needs_transfer = false;
                         }
                     }
-
-                    // let message = sio.fifo.read_blocking();
-                    // if message == CORE1_TASK_COMPLETE {
-                    //     transferring_prev_frame = false;
-                    //     prev_frame_needs_transfer = false;
-                    // }
                 }
             }
         }
@@ -1017,6 +1051,9 @@ fn main() -> ! {
 
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
+        if recording_ended && !transferring_prev_frame && current_segment_num == 3 {
+            is_recording = false;
+        }
         if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
             //wake_interrupt_pin.set_low().unwrap();
             rosc = go_dormant_until_next_vsync(rosc, &mut lepton, clocks.system_clock.freq());
@@ -1024,5 +1061,7 @@ fn main() -> ! {
         } else if current_segment_num == 3 {
             //warn!("Overrunning frame time");
         }
+
+        // Maybe set the is_recording here?
     }
 }

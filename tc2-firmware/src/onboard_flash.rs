@@ -12,9 +12,12 @@
 // in blocks of a certain size.
 
 use crate::bsp::pac::SPI1;
+use crate::FrameSeg;
 use byteorder::{ByteOrder, LittleEndian};
+use core::cell::RefCell;
 use core::mem;
 use crc::{Crc, CRC_16_XMODEM};
+use critical_section::Mutex;
 use defmt::{error, info, println, warn};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
@@ -233,9 +236,23 @@ pub unsafe fn extend_lifetime<'b>(r: &'b [u8]) -> &'static [u8] {
     mem::transmute::<&'b [u8], &'static [u8]>(r)
 }
 
+pub unsafe fn extend_lifetime_generic<'b, T>(r: &'b T) -> &'static T {
+    mem::transmute::<&'b T, &'static T>(r)
+}
+
+// pub unsafe fn extend_lifetime_a<'b>(
+//     r: &'b Mutex<RefCell<[FrameSeg; 4]>>,
+// ) -> &'static Mutex<RefCell<[FrameSeg; 4]>> {
+//     mem::transmute::<&'b Mutex<RefCell<[FrameSeg; 4]>>, &'static Mutex<RefCell<[FrameSeg; 4]>>>(r)
+// }
+
 pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
     mem::transmute::<&'b mut [u8], &'static mut [u8]>(r)
 }
+
+// pub unsafe fn extend_lifetime_mut<'b, T>(r: &'b mut T) -> &'static mut T {
+//     mem::transmute::<&'b mut T, &'static mut T>(r)
+// }
 
 pub struct OnboardFlash {
     spi: Option<
@@ -263,6 +280,7 @@ pub struct OnboardFlash {
     pub prev_page: Page,
     dma_channel_1: Option<Channel<CH1>>,
     dma_channel_2: Option<Channel<CH2>>,
+    record_to_flash: bool,
 }
 
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
@@ -280,6 +298,7 @@ impl OnboardFlash {
         flash_page_buf_2: &'static mut [u8; 4 + 2048 + 128],
         dma_channel_1: Channel<CH1>,
         dma_channel_2: Channel<CH2>,
+        should_record: bool,
     ) -> OnboardFlash {
         OnboardFlash {
             cs,
@@ -296,6 +315,7 @@ impl OnboardFlash {
             prev_page: Page::new(flash_page_buf_2),
             dma_channel_1: Some(dma_channel_1),
             dma_channel_2: Some(dma_channel_2),
+            record_to_flash: should_record,
         }
     }
     pub fn init(&mut self) {
@@ -855,10 +875,11 @@ impl OnboardFlash {
             warn!("Ending file at {}:{}", b, p);
         }
 
-        //info!("Write address {:?}", address);
         //self.spi_write_dma(&bytes[1..]);
-        self.spi_write(&bytes[1..]);
-        self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+        if self.record_to_flash {
+            self.spi_write(&bytes[1..]);
+            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+        }
 
         // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
         let status = self.wait_for_ready();

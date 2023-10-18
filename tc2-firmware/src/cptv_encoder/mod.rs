@@ -1,4 +1,4 @@
-mod bit_cursor;
+pub mod bit_cursor;
 pub mod huffman;
 pub mod streaming_cptv;
 

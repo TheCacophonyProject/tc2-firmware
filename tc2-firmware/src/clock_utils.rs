@@ -1,6 +1,6 @@
 use crate::bsp;
 use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
-use crate::bsp::pac::{CLOCKS, ROSC, XOSC};
+use crate::bsp::pac::{Peripherals, CLOCKS, ROSC, XOSC};
 use crate::bsp::XOSC_CRYSTAL_FREQ;
 use defmt::info;
 use fugit::{HertzU32, RateExtU32};
@@ -147,7 +147,7 @@ fn rosc_frequency_count_hz(clocks: &CLOCKS) -> HertzU32 {
         .write(|w| unsafe { w.fc0_min_khz().bits(0) });
     clocks
         .fc0_max_khz
-        .write(|w| unsafe { w.fc0_max_khz().bits(0xffffffff) });
+        .write(|w| unsafe { w.fc0_max_khz().bits(0x1fff_ffff) });
 
     // To measure rosc directly we use the value 0x03.
     clocks.fc0_src.write(|w| unsafe { w.fc0_src().bits(0x03) });
@@ -169,6 +169,9 @@ fn find_target_rosc_frequency(
     clocks: &CLOCKS,
     target_frequency: HertzU32,
 ) -> HertzU32 {
+    // Make sure xosc is set as the reference clock source.
+    clocks.clk_ref_ctrl.write(|w| w.src().xosc_clksrc());
+
     reset_rosc_operating_frequency(rosc);
     let mut div = 1;
     let mut measured_rosc_frequency;
@@ -206,7 +209,9 @@ pub fn setup_rosc_as_system_clock(
     desired_rosc_freq: HertzU32,
 ) -> (ClocksManager, RingOscillator<bsp::hal::rosc::Enabled>) {
     // Setup the crystal oscillator to do accurate measurements against
+    let peripherals = unsafe { Peripherals::steal() };
     let xosc = setup_xosc_blocking(xosc_peripheral, XOSC_CRYSTAL_FREQ.Hz()).unwrap();
+
     // Find appropriate settings for the desired ring oscillator frequency.
     let measured_rosc_frequency =
         find_target_rosc_frequency(&rosc_peripheral, &clocks_peripheral, desired_rosc_freq);
@@ -229,6 +234,11 @@ pub fn setup_rosc_as_system_clock(
     clocks
         .peripheral_clock
         .configure_clock(&clocks.system_clock, clocks.system_clock.freq())
+        .unwrap();
+
+    clocks
+        .reference_clock
+        .configure_clock(&rosc, rosc.get_freq())
         .unwrap();
 
     // Now we can disable the crystal oscillator and run off the ring oscillator, for power savings.
