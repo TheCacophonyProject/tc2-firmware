@@ -8,9 +8,10 @@ use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::read_telemetry;
+use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::u8_slice_to_u16;
-use crate::{bsp, FrameSeg, FIRMWARE_VERSION};
+use crate::{bsp, FrameBuffer, FIRMWARE_VERSION};
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use cortex_m::singleton;
@@ -58,7 +59,7 @@ pub struct Core1Pins {
     pub(crate) fs_miso: Pin<Gpio8, FunctionNull, PullNone>,
 }
 const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
-
+const WAIT_N_FRAMES_FOR_STABLE: u8 = 20;
 pub fn wake_raspberry_pi() {
     // TODO: Send a wake signal to the attiny, and poll its registers
     //  until we see that the raspberry pi is awake (and ideally that tc2-agent is running).
@@ -68,7 +69,7 @@ pub fn wake_raspberry_pi() {
 }
 
 pub fn core_1_task(
-    frame_buffer_local: &'static Mutex<RefCell<[FrameSeg; 4]>>,
+    frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>>,
     clock_freq: u32,
     pins: Core1Pins,
 ) {
@@ -78,8 +79,6 @@ pub fn core_1_task(
     let flash_page_buf_2 = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
 
     let mut peripherals = unsafe { Peripherals::steal() };
-    let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
-    watchdog.enable_tick_generation((clock_freq / 1_000_000) as u8);
     let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
@@ -122,10 +121,10 @@ pub fn core_1_task(
         }
     }
 
-    let should_record_new = true;
+    //let should_record_new = true;
     let should_record_to_flash = false;
-    let num_seconds = 10;
-    let num_frames_to_record = num_seconds * 9;
+    // let num_seconds = 10;
+    // let num_frames_to_record = num_seconds * 9;
     // FIXME: Allocate all the buffers we need in this thread up front.
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
@@ -248,10 +247,9 @@ pub fn core_1_task(
 
             // Once we've successfully offloaded all files, we can erase the flash and we're
             // ready to start recording new CPTV files there.
-            if should_record_new {
-                info!("Erasing after successful offload");
-                flash_storage.erase_all_good_used_blocks();
-            }
+
+            info!("Erasing after successful offload");
+            flash_storage.erase_all_good_used_blocks();
         }
     }
 
@@ -262,21 +260,18 @@ pub fn core_1_task(
     warn!("Core 1 is ready to receive frames");
     sio.fifo.write_blocking(Core1Task::Ready.into());
 
-    //pi_ping.set_low().unwrap();
-    let mut motion_has_triggered = false;
-    let mut this_frame_has_motion = should_record_new;
     let mut cptv_stream: Option<CptvStream> = None;
+    let mut prev_frame: [u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1] =
+        [0u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1];
 
-    let mut motion_left_frame = false;
-    let mut five_seconds_have_passed_since_motion_left_frame = false;
-    let mut thirty_seconds_have_passed_since_motion_disappeared_in_frame = false;
-    let mut motion_disappeared_in_frame = false;
-    let mut paused_cptv_recording_with_static_target_in_frame = false;
     let mut frames_written = 0;
     let mut frames_seen = 0;
     let mut prev_frame_number = 0;
     let mut prev_time_on_ms = 0;
     let mut slowest_frame = 0;
+
+    let mut motion_detection: Option<MotionTracking> = None;
+
     loop {
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
@@ -285,23 +280,16 @@ pub fn core_1_task(
             "Got unknown fifo input to core1 task loop {}",
             input
         );
-        let start = *&timer.get_counter();
+        let start = timer.get_counter();
+
         // TODO: Could we indeed have a local double-buffer, and just allow the use of this
-        // memory unsafely without copying it?
+        // memory unsafely without copying it?  I think we surely could.
         critical_section::with(|cs| {
-            for (seg_num, frame_seg) in frame_buffer_local.borrow_ref(cs).iter().enumerate() {
-                let slice = frame_seg.as_u8_slice();
-                // Write the slice length to read
-                // FIXME - This was here because we were using frame_buffer to transmit
-                //  directly to rPi raw frames.
-                let start = seg_num * slice.len();
-                let end = start + slice.len();
-                let frame_buffer = &mut thread_local_frame_buffer[18..];
-                frame_buffer[start..end].copy_from_slice(slice);
-            }
+            thread_local_frame_buffer[18..18 + 39040]
+                .copy_from_slice(&frame_buffer_local.borrow_ref(cs).as_u8_slice());
         });
-        let e = *&timer.get_counter();
-        info!("Got frame in {}µs", (e - start).to_micros());
+        let e = timer.get_counter();
+        //info!("Got frame in {}µs", (e - start).to_micros());
         sio.fifo.write(Core1Task::GotFrame.into());
         // // Transfer RAW frame to pi if it is available.
         let (transfer, transfer_end_address) = pi_spi.begin_message(
@@ -311,80 +299,103 @@ pub fn core_1_task(
             cptv_stream.is_some(),
             &mut peripherals.DMA,
         );
-        // Read the telemetry:
         let frame_buffer = &mut thread_local_frame_buffer[18..];
+        // Read the telemetry:
         let frame_telemetry = read_telemetry(&frame_buffer);
-        frames_seen += 1;
-        let should_start_new_recording = !motion_has_triggered
-            && this_frame_has_motion
-            && cptv_stream.is_none()
-            && frames_seen > 20; // wait until lepton stabilises before recording
-        let should_end_current_recording = ((motion_left_frame
-            && five_seconds_have_passed_since_motion_left_frame)
-            || (motion_disappeared_in_frame
-                && thirty_seconds_have_passed_since_motion_disappeared_in_frame))
-            && cptv_stream.is_some();
-
-        let raw_frame =
-            unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
-        let mut ended_recording = false;
-        if should_start_new_recording && frames_written < num_frames_to_record {
-            error!("Starting new recording");
-            motion_has_triggered = true;
-            // Begin cptv file
-            // TODO: Record the current time when recording starts
-
-            // TODO - compute crc table and copt huffman table as part of startup, and only
-            // do it once, so that we won't stutter on new streams.
-
-            // TODO: Pass in various cptv header info bits.
-            let mut cptv_streamer = CptvStream::new(
-                0,
-                lepton_version,
-                &mut flash_storage,
-                &huffman_table,
-                &crc_table,
+        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 5000;
+        if too_close_to_ffc_event {
+            error!(
+                "Detected FFC event {}ms ago",
+                frame_telemetry.msec_since_last_ffc
             );
-            cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-            cptv_stream = Some(cptv_streamer);
-            info!("Created CPTV stream");
-            // Write out the cptv header, with placeholders, then write out the previous
-            // frame and the current frame.  Going dormant on the main thread gets turned off?  Maybe, we'll see
         }
-        if !should_end_current_recording && frames_written != num_frames_to_record {
-            if let Some(cptv_stream) = &mut cptv_stream {
-                // TODO: double buffer prev/current raw frames?
-                // At this point, do we really even want two cores running in tandem?
-                //wake_interrupt_pin.set_high().unwrap();
-                if frame_telemetry.frame_num == prev_frame_number {
-                    warn!("Duplicate frame {}", frame_telemetry.frame_num);
-                }
-                if frame_telemetry.msec_on == prev_time_on_ms {
-                    warn!(
-                        "Duplicate frame {} (same time {})",
-                        frame_telemetry.frame_num, frame_telemetry.msec_on
+        let mut ended_recording = false;
+        let mut should_start_new_recording = false;
+        if !too_close_to_ffc_event && frames_seen > WAIT_N_FRAMES_FOR_STABLE {
+            let current_raw_frame =
+                unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
+
+            // Now start doing motion detection.
+            let start = timer.get_counter();
+            let this_frame_motion_detection = track_motion(
+                &current_raw_frame,
+                &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
+                motion_detection,
+            );
+            let end = timer.get_counter();
+            // info!(
+            //     "motion detection took {}µs, new trigger {}, active trigger {}",
+            //     (end - start).to_micros(),
+            //     this_frame_motion_detection.got_new_trigger(),
+            //     this_frame_motion_detection.has_triggered()
+            // );
+            should_start_new_recording =
+                this_frame_motion_detection.got_new_trigger() && cptv_stream.is_none(); // wait until lepton stabilises before recording
+
+            let should_end_current_recording =
+                this_frame_motion_detection.triggering_ended() && cptv_stream.is_some();
+            motion_detection = Some(this_frame_motion_detection);
+
+            if should_start_new_recording {
+                error!("Starting new recording");
+                // Begin cptv file
+                // TODO: Record the current time when recording starts
+                // TODO: Pass in various cptv header info bits.
+                let mut cptv_streamer = CptvStream::new(
+                    0,
+                    lepton_version,
+                    &mut flash_storage,
+                    &huffman_table,
+                    &crc_table,
+                );
+                cptv_streamer.init_gzip_stream(&mut flash_storage, false);
+                cptv_stream = Some(cptv_streamer);
+                info!("Created CPTV stream");
+                // Write out the cptv header, with placeholders, then write out the previous
+                // frame and the current frame.  Going dormant on the main thread gets turned off?  Maybe, we'll see
+            }
+            if !should_end_current_recording {
+                if let Some(cptv_stream) = &mut cptv_stream {
+                    // TODO: double buffer prev/current raw frames?
+                    // At this point, do we really even want two cores running in tandem?
+                    //wake_interrupt_pin.set_high().unwrap();
+                    if frame_telemetry.frame_num == prev_frame_number {
+                        warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                    }
+                    if frame_telemetry.msec_on == prev_time_on_ms {
+                        warn!(
+                            "Duplicate frame {} (same time {})",
+                            frame_telemetry.frame_num, frame_telemetry.msec_on
+                        );
+                    }
+                    prev_frame_number = frame_telemetry.frame_num;
+                    prev_time_on_ms = frame_telemetry.msec_on;
+                    cptv_stream.push_frame(
+                        current_raw_frame,
+                        &mut prev_frame,
+                        &frame_telemetry,
+                        &mut flash_storage,
                     );
+                    //wake_interrupt_pin.set_low().unwrap();
+                    frames_written += 1;
                 }
-                prev_frame_number = frame_telemetry.frame_num;
-                prev_time_on_ms = frame_telemetry.msec_on;
-                cptv_stream.push_frame(raw_frame, &frame_telemetry, &mut flash_storage);
-                //wake_interrupt_pin.set_low().unwrap();
-                frames_written += 1;
+            } else {
+                // Finalise on a a different frame period to writing out the prev/last frame,
+                // to give more breathing room.
+                if let Some(cptv_stream) = &mut cptv_stream {
+                    error!("Ending current recording");
+                    cptv_stream.finalise(&mut flash_storage);
+                    ended_recording = true;
+                }
+                cptv_stream = None;
             }
-        } else {
-            // Finalise on a a different frame period to writing out the prev/last frame,
-            // to give more breathing room.
-            if let Some(cptv_stream) = &mut cptv_stream {
-                error!("Ending current recording");
-                cptv_stream.finalise(&mut flash_storage);
-                ended_recording = true;
-            }
-            cptv_stream = None;
+            prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
         }
+        frames_seen += 1;
         // Check if we need to trigger:  Mostly at the moment we want to see what frame data
         // structures can be shared with encoding.
         pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
-        let end = *&timer.get_counter();
+        let end = timer.get_counter();
         let frame_time_us = (end - start).to_micros();
         slowest_frame = slowest_frame.max(frame_time_us);
         if frames_seen % 100 == 0 {
@@ -395,13 +406,14 @@ pub fn core_1_task(
             );
         }
         if should_start_new_recording && cptv_stream.is_some() {
+            info!("Send start recording message to core0");
             sio.fifo.write(Core1Task::StartRecording.into());
         }
         if ended_recording && cptv_stream.is_none() {
+            info!("Send end recording message to core0");
             sio.fifo.write(Core1Task::EndRecording.into());
         }
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
-
     // TODO: Need a way to exit this loop, and then offload files, and then re-enter the loop.
 }

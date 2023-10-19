@@ -11,7 +11,6 @@ mod clock_utils;
 mod core0_task;
 mod core1_task;
 mod cptv_encoder;
-mod double_frame_buffer;
 mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
@@ -52,18 +51,24 @@ static mut CORE1_STACK: Stack<43500> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
-pub struct FrameSeg([FramePacketData; 61]);
 
-impl FrameSeg {
-    pub const fn new() -> FrameSeg {
-        FrameSeg([[0u8; FRAME_WIDTH]; 61])
+pub struct FrameBuffer([[FramePacketData; 61]; 4]);
+
+impl FrameBuffer {
+    pub const fn new() -> FrameBuffer {
+        FrameBuffer([[[0u8; FRAME_WIDTH]; 61]; 4])
+    }
+
+    pub fn seg_as_u8_slice(&self, segment: usize) -> &[u8] {
+        unsafe { any_as_u8_slice(&self.0[segment]) }
     }
 
     pub fn as_u8_slice(&self) -> &[u8] {
         unsafe { any_as_u8_slice(&self.0) }
     }
-    pub fn packet(&mut self, packet_id: usize) -> &mut FramePacketData {
-        &mut self.0[packet_id]
+
+    pub fn packet(&mut self, segment: usize, packet_id: usize) -> &mut FramePacketData {
+        &mut self.0[segment][packet_id]
     }
 }
 
@@ -85,6 +90,9 @@ fn main() -> ! {
         "System clock speed {}MHz",
         clocks.system_clock.freq().to_MHz()
     );
+    // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
+    let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
+    watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
@@ -101,15 +109,10 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
 
-    let frame_buffer = Mutex::new(RefCell::new([
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-        FrameSeg::new(),
-    ]));
+    let frame_buffer = Mutex::new(RefCell::new(FrameBuffer::new()));
     // Shenanigans to convince the second thread that all these values exist for the lifetime of the
     // program.
-    let frame_buffer_local: &'static Mutex<RefCell<[FrameSeg; 4]>> =
+    let frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>> =
         unsafe { extend_lifetime_generic(&frame_buffer) };
     {
         let pins = Core1Pins {

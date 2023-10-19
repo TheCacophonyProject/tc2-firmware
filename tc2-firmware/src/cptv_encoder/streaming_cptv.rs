@@ -364,7 +364,6 @@ pub struct CptvStream<'a> {
     crc_val: u32,
     total_uncompressed: u32,
     starting_block_index: u16,
-    prev_frame: [u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1],
 }
 
 pub fn make_crc_table() -> [u32; 256] {
@@ -399,7 +398,6 @@ impl<'a> CptvStream<'a> {
             crc_val: 0,
             total_uncompressed: 0,
             starting_block_index: starting_block_index as u16,
-            prev_frame: [0u16; FRAME_WIDTH * FRAME_HEIGHT + 1],
             cptv_header: Cptv2Header::new(current_time, lepton_version),
         }
     }
@@ -449,12 +447,12 @@ impl<'a> CptvStream<'a> {
     /// Add a new frame to the current CPTV stream, flushing out pages to the flash storage as needed.
     pub fn push_frame(
         &mut self,
-        raw_frame: &[u16],
+        current_frame: &[u16],
+        prev_frame: &mut [u16],
         frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
     ) {
-        let (bit_width, min_value, max_value) =
-            delta_encode_frame_data(&mut self.prev_frame, raw_frame);
+        let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
         let frame_header = CptvFrameHeader {
             time_on: frame_telemetry.msec_on,
@@ -465,32 +463,30 @@ impl<'a> CptvStream<'a> {
             frame_temp_c: frame_telemetry.fpa_temp_c,
         };
         let frame_header_iter = frame_header_iter(&frame_header);
-        let delta_encoded = unsafe { &u16_slice_to_u8(&self.prev_frame)[0..frame_size as usize] };
+        let delta_encoded = unsafe { &u16_slice_to_u8(&prev_frame)[0..frame_size as usize] };
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
-        {
-            if self.cptv_header.total_frame_count % 10 == 0 {
-                info!(
-                    "Write frame #{}, {}",
-                    self.cptv_header.total_frame_count, frame_telemetry.frame_num
-                );
-            }
-            for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
-                self.total_uncompressed += 1;
-                self.crc_val = self.crc_val ^ 0xffffffff;
-                self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
-                    ^ (self.crc_val >> 8);
-                self.crc_val = self.crc_val ^ 0xffffffff;
-                let entry = &self.huffman_table[byte as usize];
-                self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-                if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                    flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                    self.cursor.flush_residual_bits();
-                }
+
+        if self.cptv_header.total_frame_count % 10 == 0 {
+            info!(
+                "Write frame #{}, {}",
+                self.cptv_header.total_frame_count, frame_telemetry.frame_num
+            );
+        }
+        for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
+            self.total_uncompressed += 1;
+            self.crc_val = self.crc_val ^ 0xffffffff;
+            self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
+                ^ (self.crc_val >> 8);
+            self.crc_val = self.crc_val ^ 0xffffffff;
+            let entry = &self.huffman_table[byte as usize];
+            self.cursor.write_bits(entry.code as u32, entry.bits as u32);
+            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+                flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
+                self.cursor.flush_residual_bits();
             }
         }
-        self.prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(raw_frame);
     }
 
     fn write_gzip_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {

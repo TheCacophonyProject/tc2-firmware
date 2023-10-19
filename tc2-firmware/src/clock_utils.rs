@@ -2,7 +2,6 @@ use crate::bsp;
 use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
 use crate::bsp::pac::{Peripherals, CLOCKS, ROSC, XOSC};
 use crate::bsp::XOSC_CRYSTAL_FREQ;
-use defmt::info;
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::clocks::{ClockSource, ClocksManager, StoppableClock};
 use rp2040_hal::rosc::RingOscillator;

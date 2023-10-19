@@ -1,6 +1,6 @@
 use crate::core1_task::Core1Task;
 use crate::lepton::LeptonModule;
-use crate::{bsp, FrameSeg, FFC_INTERVAL_MS};
+use crate::{bsp, FrameBuffer, FFC_INTERVAL_MS};
 use bsp::hal::clocks::ClocksManager;
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
@@ -54,9 +54,8 @@ pub fn begin_frame_acquisition_loop(
     clocks: &ClocksManager,
     delay: &mut Delay,
     resets: &mut RESETS,
-    frame_buffer_local: &'static Mutex<RefCell<[FrameSeg; 4]>>,
+    frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>>,
 ) -> ! {
-    let mut printed_telemetry_version = false;
     let mut frame_counter = 0;
     let mut unverified_frame_counter = 0;
     let mut prev_frame_counter = 0;
@@ -266,12 +265,13 @@ pub fn begin_frame_acquisition_loop(
                     critical_section::with(|cs| {
                         let segment_index =
                             ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
-                        let frame_seg = &mut frame_buffer_local.borrow_ref_mut(cs)[segment_index];
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
                         //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
                         LittleEndian::write_u16_into(
                             &scanline_buffer[2..],
-                            frame_seg.packet(packet_id as usize),
+                            frame_buffer_local
+                                .borrow_ref_mut(cs)
+                                .packet(segment_index, packet_id as usize),
                         );
                     });
 
@@ -446,6 +446,7 @@ pub fn begin_frame_acquisition_loop(
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
         if recording_ended && !transferring_prev_frame && current_segment_num == 3 {
             is_recording = false;
+            recording_ended = false;
         }
         if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
             //wake_interrupt_pin.set_low().unwrap();

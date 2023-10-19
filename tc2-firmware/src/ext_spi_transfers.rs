@@ -230,6 +230,7 @@ impl ExtSpiTransfers {
         sm.set_pindirs([(miso_id, bsp::hal::pio::PinDir::Output)]);
         self.state_machine_0_running = Some((sm.start(), rx));
         self.pio_tx = Some(tx);
+        self.ping.set_low().unwrap();
     }
 
     pub fn disable_pio_spi(&mut self) {
@@ -254,6 +255,7 @@ impl ExtSpiTransfers {
         );
 
         self.state_machine_0_uninit = Some(sm);
+        self.ping.set_low().unwrap();
     }
 
     pub fn send_message(
