@@ -242,12 +242,24 @@ enum FFCTempLockoutState {
 }
 
 #[repr(C)]
-#[derive(PartialEq, Format)]
+#[derive(PartialEq, Format, Debug)]
 pub enum FFCStatus {
     NeverCommanded = 0,
     Imminent = 1,
-    InProcess = 2,
+    InProgress = 2,
     Done = 3,
+}
+
+impl From<u8> for FFCStatus {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => FFCStatus::NeverCommanded,
+            1 => FFCStatus::Imminent,
+            2 => FFCStatus::InProgress,
+            3 => FFCStatus::Done,
+            _ => unreachable!("Invalid FFC value {}", value),
+        }
+    }
 }
 
 #[repr(C)]
@@ -629,7 +641,7 @@ impl LeptonModule {
                 let ffc_status: FFCStatus = match ffc_status {
                     0 => FFCStatus::NeverCommanded,
                     1 => FFCStatus::Imminent,
-                    2 => FFCStatus::InProcess,
+                    2 => FFCStatus::InProgress,
                     3 => FFCStatus::Done,
                     _ => panic!("Unknown FFC Status {}", ffc_status),
                 };
@@ -1203,19 +1215,21 @@ pub struct Telemetry {
     pub time_at_last_ffc: u32,
     pub fpa_temp_c: f32,
     pub fpa_temp_c_at_last_ffc: f32,
+    pub ffc_status: FFCStatus,
 }
 
 struct CentiK {
     inner: u16,
 }
+
 pub fn read_telemetry(buf: &[u8]) -> Telemetry {
     let frame_num = LittleEndian::read_u32(&buf[40..44]);
     let msec_on = LittleEndian::read_u32(&buf[2..6]);
     let time_at_last_ffc = LittleEndian::read_u32(&buf[60..64]);
     let msec_since_last_ffc = msec_on - time_at_last_ffc;
     let status_bits = LittleEndian::read_u32(&buf[6..10]);
-    let ffc_state = (status_bits >> 4) & 0b11;
-    let ffc_in_progress = ffc_state == 0b10;
+    let ffc_state = (((status_bits >> 4) & 0b11) as u8).into();
+    let ffc_in_progress = ffc_state == FFCStatus::InProgress;
     let fpa_temp_kelvin_x_100 = LittleEndian::read_u16(&buf[48..=49]);
     let fpa_temp_kelvin_x_100_at_last_ffc = LittleEndian::read_u16(&buf[58..=59]);
 
@@ -1229,6 +1243,7 @@ pub fn read_telemetry(buf: &[u8]) -> Telemetry {
         msec_since_last_ffc,
         fpa_temp_c,
         fpa_temp_c_at_last_ffc,
+        ffc_status: ffc_state,
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use defmt::info;
+use defmt::{info, warn};
 
 const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;
@@ -70,6 +70,18 @@ impl MotionTracking {
     pub fn got_new_trigger(&self) -> bool {
         self.triggered_this_frame
     }
+
+    pub fn hot_bits(&self) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+        for y in 0..SEG_DIV {
+            for x in 0..SEG_DIV {
+                if self.hot_map[(y * SEG_DIV) + x].0 {
+                    bytes[y] |= 1 << x;
+                }
+            }
+        }
+        bytes
+    }
 }
 
 // NOTE: If there was an FFC event in the last second, don't try to call this.
@@ -77,7 +89,7 @@ impl MotionTracking {
 pub fn track_motion(
     current_frame: &[u16],
     prev_frame: &[u16],
-    prev_frame_stats: Option<MotionTracking>,
+    prev_frame_stats: &Option<MotionTracking>,
 ) -> MotionTracking {
     //  The hot map stores whether a segment is currently triggering, and what it's previous
     //  (pre-triggering) max value was.
@@ -137,19 +149,24 @@ pub fn track_motion(
             };
             let seg_val = seg_max.max(0) as u16;
             if let Some(prev_frame_stats) = &prev_frame_stats {
-                let (mut hot, mut val) = prev_frame_stats.hot_map[segment_index];
+                let (mut hot, mut pre_hot_val) = prev_frame_stats.hot_map[segment_index];
                 // TODO: Possibly the segments should overlap each other slightly?
-                let segment_diff = (seg_val as i32 - val as i32).max(0) as u16;
+                let segment_diff = (seg_val as i32 - pre_hot_val as i32).max(0) as u16;
                 if !hot && segment_diff > trigger_threshold() && motion_count >= motion_threshold {
                     hot = true;
                     // val gets used from previous frame: keeping the value pre-hot,
                     // so that we keep triggering
-                } else if hot && seg_val < val + 10 && motion_count < 2 {
+                } else if hot && seg_val < pre_hot_val + 10 && motion_count < 2 {
                     // TODO: Tune values for lepton3
                     // Needs to drop by 10 to un-trigger hot, and have very little motion.
                     hot = false;
                     // Update the max value with the new value.
-                    val = seg_val;
+                    pre_hot_val = seg_val;
+                } else {
+                    // Stays hot, and value stays the same, which should be the previous value before it
+                    // went hot.
+
+                    // Maybe print motion count?
                 }
                 if hot {
                     motion_tracking.hot_count += 1;
@@ -165,9 +182,13 @@ pub fn track_motion(
                         motion_tracking.hot_edge_count += 1;
                     }
                 }
-                motion_tracking.hot_map[segment_index] = (hot, val);
+                // TODO: Maybe store segment motion count too?
+                // TODO: Move this back to draw test app and visualise more there
+                motion_tracking.hot_map[segment_index] = (hot, pre_hot_val);
             } else {
                 // Seed the initial values
+
+                // TODO: Maybe hold onto a longer term reference map that we can refer back to?
                 motion_tracking.hot_map[segment_index] = (false, seg_val);
             }
         }

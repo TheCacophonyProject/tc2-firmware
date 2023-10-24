@@ -1,5 +1,6 @@
 use crate::bsp;
 use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1};
+use crate::motion_detector::MotionTracking;
 use crate::onboard_flash::extend_lifetime;
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
@@ -142,22 +143,22 @@ impl ExtSpiTransfers {
         dma_peripheral: &mut DMA,
     ) -> (Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>, u32) {
         // The transfer header contains the transfer type (2x)
-        // the number of bytes to read for the payload (should this be twice?)
+        // the number of bytes to read for the payload (2x)
         // the 16 bit crc of the payload (twice)
 
         // It is followed by the payload itself
         let length = payload.len() as u32;
-        let recording = if is_recording { 1 } else { 0 };
+        let is_recording = if is_recording { 1 } else { 0 };
 
         let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
         transfer_header[0] = message_type as u8;
         transfer_header[1] = message_type as u8;
         LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
         LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32);
-        LittleEndian::write_u16(&mut transfer_header[10..12], recording);
-        LittleEndian::write_u16(&mut transfer_header[12..14], recording);
-        LittleEndian::write_u16(&mut transfer_header[14..16], recording.reverse_bits());
-        LittleEndian::write_u16(&mut transfer_header[16..=17], recording.reverse_bits());
+        LittleEndian::write_u16(&mut transfer_header[10..12], is_recording);
+        LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
+        LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.reverse_bits());
+        LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.reverse_bits());
         payload[0..transfer_header.len()].copy_from_slice(&transfer_header);
 
         self.ping.set_high().unwrap();
@@ -167,10 +168,9 @@ impl ExtSpiTransfers {
             unsafe { u8_slice_to_u32(extend_lifetime(&payload[..])) },
             self.pio_tx.take().unwrap(),
         );
-        config.bswap(true);
+        config.bswap(true); // DMA peripheral does our swizzling for us.
         let transfer = config.start();
         let start_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
-        //info!("Start read at {}", start_read_address);
         self.ping.set_low().unwrap();
 
         (transfer, start_read_address + length)
@@ -182,6 +182,7 @@ impl ExtSpiTransfers {
         transfer_end_address: u32,
         transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
     ) {
+        // FIXME - Not sure this is really needed with PIO SPI.
         maybe_abort_dma_transfer(dma_peripheral, 0, transfer_end_address);
 
         let end_read_addr = dma_peripheral.ch[0].ch_read_addr.read().bits();

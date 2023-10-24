@@ -139,7 +139,6 @@ pub fn begin_frame_acquisition_loop(
                 if packet_id == 0 {
                     prev_packet_id = -1;
                     started_segment = true;
-                    //wake_interrupt_pin.set_high().unwrap();
                     // If we don't know, always start at segment 1 so that things will be
                     // written out.
                     if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
@@ -317,7 +316,6 @@ pub fn begin_frame_acquisition_loop(
 
                             attempt = 0;
                             prev_frame_needs_transfer = true;
-                            //wake_interrupt_pin.set_low().unwrap();
                         } else {
                             // Increment in good faith if we're on the last packet of a valid segment
                             valid_frame_current_segment_num += 1;
@@ -449,9 +447,7 @@ pub fn begin_frame_acquisition_loop(
             recording_ended = false;
         }
         if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-            //wake_interrupt_pin.set_low().unwrap();
             rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
-            //wake_interrupt_pin.set_high().unwrap();
         } else if current_segment_num == 3 {
             //warn!("Overrunning frame time");
         }
