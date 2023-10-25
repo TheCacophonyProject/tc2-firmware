@@ -19,7 +19,7 @@ pub use crate::core0_task::begin_frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
-use crate::onboard_flash::extend_lifetime_generic;
+use crate::onboard_flash::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use crate::utils::{any_as_u8_slice, any_as_u8_slice_mut};
 use bsp::{
     entry,
@@ -128,13 +128,19 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
 
-    let frame_buffer = Mutex::new(RefCell::new(FrameBuffer::new()));
-    let frame_buffer_2 = Mutex::new(RefCell::new(FrameBuffer::new()));
+    let mut fb0 = FrameBuffer::new();
+    let mut fb1 = FrameBuffer::new();
+    let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb0)
+    })));
+    let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb1)
+    })));
     // Shenanigans to convince the second thread that all these values exist for the lifetime of the
     // program.
-    let frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>> =
+    let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
         unsafe { extend_lifetime_generic(&frame_buffer) };
-    let frame_buffer_local_2: &'static Mutex<RefCell<FrameBuffer>> =
+    let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     {
         let pins = Core1Pins {

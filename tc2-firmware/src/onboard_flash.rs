@@ -237,6 +237,10 @@ pub unsafe fn extend_lifetime_generic<'b, T>(r: &'b T) -> &'static T {
     mem::transmute::<&'b T, &'static T>(r)
 }
 
+pub unsafe fn extend_lifetime_generic_mut<'b, T>(r: &'b mut T) -> &'static mut T {
+    mem::transmute::<&'b mut T, &'static mut T>(r)
+}
+
 // pub unsafe fn extend_lifetime_a<'b>(
 //     r: &'b Mutex<RefCell<[FrameSeg; 4]>>,
 // ) -> &'static Mutex<RefCell<[FrameSeg; 4]>> {

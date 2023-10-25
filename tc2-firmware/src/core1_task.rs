@@ -9,7 +9,7 @@ use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
-use crate::onboard_flash::OnboardFlash;
+use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::utils::u8_slice_to_u16;
 use crate::{bsp, FrameBuffer, FIRMWARE_VERSION};
 use byteorder::{ByteOrder, LittleEndian};
@@ -76,15 +76,19 @@ pub fn wake_raspberry_pi() {
 }
 
 pub fn core_1_task(
-    frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>>,
-    frame_buffer_local_2: &'static Mutex<RefCell<FrameBuffer>>,
+    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     clock_freq: u32,
     pins: Core1Pins,
 ) {
-    let crc_buf = singleton!(: [u8; 32] = [0x42; 32]).unwrap();
-    let payload_buf = singleton!(: [u8; 2066] = [0x42; 2066]).unwrap();
-    let flash_page_buf = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
-    let flash_page_buf_2 = singleton!(: [u8; 4 + 2048 + 128] = [0xff; 4 + 2048 + 128]).unwrap();
+    let mut crc_buf = [0x42u8; 32];
+    let mut payload_buf = [0x42u8; 2066];
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
 
     let mut peripherals = unsafe { Peripherals::steal() };
     let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
@@ -137,7 +141,8 @@ pub fn core_1_task(
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
-    let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
+    //let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
+    let mut thread_local_frame_buffer: Option<&mut FrameBuffer> = None;
 
     // Create the GZIP crc table once on startup, then reuse, since it's expensive to
     // re-create inline.
@@ -146,13 +151,6 @@ pub fn core_1_task(
     // Copy huffman table into ram for faster access.
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
-
-    // Cptv Stream also holds another buffer of 1 frame length.
-    // There is a 2K buffer for pi_spi transfers
-    // There is another 2K+ buffer for flash_storage page
-    // There is a 1K buffer for crc table in cptv stream.
-    // It may be worth copying the huffman/lz77 table into RAM for speed also.
-    // Try to put the FrameSeg buffer in ram on core 0?
 
     let raspberry_pi_is_awake = true;
     let mut peripherals = unsafe { Peripherals::steal() };
@@ -287,36 +285,37 @@ pub fn core_1_task(
             "Got unknown fifo input to core1 task loop {}",
             input
         );
-        let selected_frame_buffer = sio.fifo.read_blocking();
         let start = timer.get_counter();
-
-        // TODO: Could we indeed have a local double-buffer, and just allow the use of this
-        // memory unsafely without copying it?  I think we surely could.
-
-        // Are we stomping all over memory sometimes with this?
-        // Maybe we do indeed need to double-buffer?
+        let selected_frame_buffer = sio.fifo.read_blocking();
         critical_section::with(|cs| {
+            // Now we just swap the buffers?
             let buffer = if selected_frame_buffer == 0 {
                 frame_buffer_local
             } else {
                 frame_buffer_local_2
             };
-            // TODO: Can we get rid of this copying, and just use the buffer itself?
-            thread_local_frame_buffer[18..18 + 39040]
-                .copy_from_slice(&buffer.borrow_ref(cs).as_u8_slice());
+            thread_local_frame_buffer = buffer.borrow_ref_mut(cs).take();
         });
-        let e = timer.get_counter();
-        //info!("Got frame in {}µs", (e - start).to_micros());
-        //sio.fifo.write(Core1Task::GotFrame.into());
-        // // Transfer RAW frame to pi if it is available.
-        let (transfer, transfer_end_address) = pi_spi.begin_message(
-            ExtTransferMessage::CameraRawFrameTransfer,
-            &mut thread_local_frame_buffer,
-            0,
-            cptv_stream.is_some(),
-            &mut peripherals.DMA,
-        );
-        let frame_buffer = &mut thread_local_frame_buffer[18..];
+        // Transfer RAW frame to pi if it is available.
+        let transfer = if raspberry_pi_is_awake {
+            let (transfer, transfer_end_address) = pi_spi.begin_message(
+                ExtTransferMessage::CameraRawFrameTransfer,
+                &mut thread_local_frame_buffer
+                    .as_mut()
+                    .unwrap()
+                    .as_u8_slice_mut(),
+                0,
+                cptv_stream.is_some(),
+                &mut peripherals.DMA,
+            );
+            Some((transfer, transfer_end_address))
+        } else {
+            None
+        };
+        let frame_buffer = &mut thread_local_frame_buffer
+            .as_mut()
+            .unwrap()
+            .as_u8_slice_mut()[18..];
         // Read the telemetry:
         let frame_telemetry = read_telemetry(&frame_buffer);
         let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
@@ -343,7 +342,10 @@ pub fn core_1_task(
             motion_detection = None;
         }
         if !too_close_to_ffc_event && frames_seen > WAIT_N_FRAMES_FOR_STABLE {
-            let frame_buffer = &mut thread_local_frame_buffer[18..];
+            let frame_buffer = &mut thread_local_frame_buffer
+                .as_mut()
+                .unwrap()
+                .as_u8_slice_mut()[18..];
             let current_raw_frame =
                 unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
 
@@ -365,8 +367,6 @@ pub fn core_1_task(
             motion_detection = this_frame_motion_detection;
 
             if should_start_new_recording {
-                sio.fifo.write(Core1Task::StartRecording.into());
-
                 error!("Starting new recording, {:?}", &frame_telemetry);
                 // Begin cptv file
                 // TODO: Record the current time when recording starts
@@ -424,22 +424,35 @@ pub fn core_1_task(
         frames_seen += 1;
         // Check if we need to trigger:  Mostly at the moment we want to see what frame data
         // structures can be shared with encoding.
-        pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
+        if let Some((transfer, transfer_end_address)) = transfer {
+            pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
+        }
+        critical_section::with(|cs| {
+            // Now we just swap the buffers?
+            let buffer = if selected_frame_buffer == 0 {
+                frame_buffer_local
+            } else {
+                frame_buffer_local_2
+            };
+            *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+        });
+
         let end = timer.get_counter();
         let frame_time_us = (end - start).to_micros();
         slowest_frame = slowest_frame.max(frame_time_us);
 
         // TODO: Actually might be more useful as a moving average.
-        // if frames_seen % 100 == 0 {
-        //     info!(
-        //         "Frame processing {}µs, worst case {}µs",
-        //         (end - start).to_micros(),
-        //         slowest_frame
-        //     );
-        // }
+        if frames_seen % 100 == 0 {
+            info!(
+                "Frame processing {}µs, worst case {}µs",
+                (end - start).to_micros(),
+                slowest_frame
+            );
+        }
+
         if should_start_new_recording && cptv_stream.is_some() {
             info!("Send start recording message to core0");
-            //sio.fifo.write(Core1Task::StartRecording.into());
+            sio.fifo.write(Core1Task::StartRecording.into());
         }
         if ended_recording && cptv_stream.is_none() {
             info!("Send end recording message to core0");

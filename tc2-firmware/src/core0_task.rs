@@ -56,8 +56,8 @@ pub fn begin_frame_acquisition_loop(
     clocks: &ClocksManager,
     delay: &mut Delay,
     resets: &mut RESETS,
-    frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>>,
-    frame_buffer_local_2: &'static Mutex<RefCell<FrameBuffer>>,
+    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     timer: &Timer,
 ) -> ! {
     let mut selected_frame_buffer = 0;
@@ -101,9 +101,6 @@ pub fn begin_frame_acquisition_loop(
     let mut end = timer.get_counter();
 
     'frame_loop: loop {
-        if let Some(message) = sio_fifo.read() {
-            error!("1. Intraframe message {:x}", message);
-        }
         if got_sync {
             current_segment_num += 1;
             if current_segment_num > total_segments_including_dummy_frames {
@@ -119,23 +116,11 @@ pub fn begin_frame_acquisition_loop(
 
             // FIXME - Whenever recording starts, we lose a frame here.
 
-            rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
+            //rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
-
-            // Maybe if this copy is fast enough, we don't need to have a double buffer to swap?
-            // If it's just a straight memcpy of RAM?  Can it be a Mutex which just "takes/replaces" it with another in memory buffer?
-            //FRAME_SEGMENT_BUFFER.swap();
-            //info!("Hand off frame to core 1");
-            let s = timer.get_counter();
-            let t = (s - end).to_millis();
-            if t > 100000 {
-                info!("Ft {}", t);
-            }
-            start = s;
-
             sio_fifo.write(Core1Task::ReceiveFrame.into());
             sio_fifo.write(selected_frame_buffer);
             if selected_frame_buffer == 0 {
@@ -143,8 +128,6 @@ pub fn begin_frame_acquisition_loop(
             } else {
                 selected_frame_buffer = 0;
             }
-            // let message = sio_fifo.read_blocking();
-            // crate::assert_eq!(message, Core1Task::GotFrame.into());
             transferring_prev_frame = true;
             prev_frame_needs_transfer = false;
         }
@@ -152,9 +135,6 @@ pub fn begin_frame_acquisition_loop(
             // Read the next frame
             let mut prev_packet_id = -1;
             'scanline: loop {
-                // if let Some(message) = sio_fifo.read() {
-                //     error!("3. Intraframe message {:x}", message);
-                // }
                 // This is one scanline
                 let packet = lepton.transfer(&mut scanline_buffer).unwrap();
                 let packet_header = packet[0];
@@ -284,6 +264,8 @@ pub fn begin_frame_acquisition_loop(
                             &scanline_buffer[2..],
                             buffer
                                 .borrow_ref_mut(cs)
+                                .as_mut()
+                                .unwrap()
                                 .packet(segment_index, packet_id as usize),
                         );
                     });
@@ -414,21 +396,21 @@ pub fn begin_frame_acquisition_loop(
                             prev_frame_needs_transfer = false;
                         }
                     }
-                    if !transferring_prev_frame || recording_started {
-                        end = timer.get_counter();
-                        if recording_started
-                            || (is_recording && frame_counter % 10 == 0)
-                            || (frame_counter % 10 == 0 && current_segment_num == 3)
-                        {
-                            info!(
-                                "#{} Frame time {}µs, current seg {} (r started {})",
-                                frame_counter,
-                                (end - start).to_micros(),
-                                current_segment_num,
-                                recording_started
-                            );
-                        }
-                    }
+                    // if !transferring_prev_frame || recording_started {
+                    //     end = timer.get_counter();
+                    //     if recording_started
+                    //         || (is_recording && frame_counter % 10 == 0)
+                    //         || (frame_counter % 10 == 0 && current_segment_num == 3)
+                    //     {
+                    //         info!(
+                    //             "#{} Frame time {}µs, current seg {} (r started {})",
+                    //             frame_counter,
+                    //             (end - start).to_micros(),
+                    //             current_segment_num,
+                    //             recording_started
+                    //         );
+                    //     }
+                    // }
                 }
             }
         }
