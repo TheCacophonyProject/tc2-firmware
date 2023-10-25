@@ -20,7 +20,7 @@ use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
-use crate::utils::any_as_u8_slice;
+use crate::utils::{any_as_u8_slice, any_as_u8_slice_mut};
 use bsp::{
     entry,
     hal::{
@@ -32,6 +32,7 @@ use bsp::{
     pac::Peripherals,
 };
 use core::cell::RefCell;
+use core::mem;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::*;
@@ -51,24 +52,41 @@ static mut CORE1_STACK: Stack<43500> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
-
-pub struct FrameBuffer([[FramePacketData; 61]; 4]);
+pub type FrameSegments = [[FramePacketData; 61]; 4];
+pub struct FrameBuffer([u8; 18 + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
     pub const fn new() -> FrameBuffer {
-        FrameBuffer([[[0u8; FRAME_WIDTH]; 61]; 4])
+        // NOTE: Put an 18 byte padding at the start, and a 2 byte padding at the end, to make it 32bit aligned
+        FrameBuffer([0u8; 18 + (160 * 61 * 4) + 2])
     }
 
-    pub fn seg_as_u8_slice(&self, segment: usize) -> &[u8] {
-        unsafe { any_as_u8_slice(&self.0[segment]) }
-    }
+    // pub fn seg_as_u8_slice(&self, segment: usize) -> &[FramePacketData; 61] {
+    //     &self.frame_buffer()[segment]
+    // }
+    // fn frame_buffer(&self) -> &FrameSegments {
+    //     // TODO : Just do the maths in these functions
+    //     let fb = &self.0[18..18 + (160 * 61 * 4)];
+    //     unsafe { mem::transmute(fb) }
+    // }
+    // fn frame_buffer_mut(&mut self) -> &mut FrameSegments {
+    //     let fb = self.0[18..18 + (160 * 61 * 4)] as [u8; (160 * 61 * 4)];
+    //     unsafe { mem::transmute(fb) }
+    // }
 
     pub fn as_u8_slice(&self) -> &[u8] {
-        unsafe { any_as_u8_slice(&self.0) }
+        &self.0[18..18 + 39040]
     }
 
-    pub fn packet(&mut self, segment: usize, packet_id: usize) -> &mut FramePacketData {
-        &mut self.0[segment][packet_id]
+    pub fn as_u8_slice_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+
+    pub fn packet(&mut self, segment: usize, packet_id: usize) -> &mut [u8] {
+        let segment_offset = FRAME_WIDTH * 61 * segment;
+        let packet_offset = FRAME_WIDTH * packet_id;
+        &mut self.0[18..]
+            [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
     }
 }
 
@@ -93,6 +111,7 @@ fn main() -> ! {
     // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
     let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
     watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
+    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
@@ -110,10 +129,13 @@ fn main() -> ! {
     );
 
     let frame_buffer = Mutex::new(RefCell::new(FrameBuffer::new()));
+    let frame_buffer_2 = Mutex::new(RefCell::new(FrameBuffer::new()));
     // Shenanigans to convince the second thread that all these values exist for the lifetime of the
     // program.
     let frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>> =
         unsafe { extend_lifetime_generic(&frame_buffer) };
+    let frame_buffer_local_2: &'static Mutex<RefCell<FrameBuffer>> =
+        unsafe { extend_lifetime_generic(&frame_buffer_2) };
     {
         let pins = Core1Pins {
             pi_ping: pins.gpio5.into_push_pull_output(),
@@ -129,7 +151,12 @@ fn main() -> ! {
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
         let _ = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
-            core_1_task(frame_buffer_local, system_clock_freq, pins)
+            core_1_task(
+                frame_buffer_local,
+                frame_buffer_local_2,
+                system_clock_freq,
+                pins,
+            )
         });
     }
 
@@ -228,5 +255,7 @@ fn main() -> ! {
         &mut delay,
         &mut peripherals.RESETS,
         frame_buffer_local,
+        frame_buffer_local_2,
+        &timer,
     );
 }

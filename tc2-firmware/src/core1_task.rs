@@ -17,7 +17,7 @@ use core::cell::RefCell;
 use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
-use defmt::{error, info, warn};
+use defmt::{error, info, warn, Format};
 use fugit::RateExtU32;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
@@ -28,6 +28,7 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::Sio;
 
 #[repr(u32)]
+#[derive(Format)]
 pub enum Core1Task {
     Ready = 0xdb,
     FrameProcessingComplete = 0xee,
@@ -42,6 +43,12 @@ pub enum Core1Task {
 impl Into<u32> for Core1Task {
     fn into(self) -> u32 {
         self as u32
+    }
+}
+
+impl From<u32> for Core1Task {
+    fn from(value: u32) -> Self {
+        value.into()
     }
 }
 
@@ -70,6 +77,7 @@ pub fn wake_raspberry_pi() {
 
 pub fn core_1_task(
     frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<FrameBuffer>>,
     clock_freq: u32,
     pins: Core1Pins,
 ) {
@@ -279,6 +287,7 @@ pub fn core_1_task(
             "Got unknown fifo input to core1 task loop {}",
             input
         );
+        let selected_frame_buffer = sio.fifo.read_blocking();
         let start = timer.get_counter();
 
         // TODO: Could we indeed have a local double-buffer, and just allow the use of this
@@ -286,14 +295,19 @@ pub fn core_1_task(
 
         // Are we stomping all over memory sometimes with this?
         // Maybe we do indeed need to double-buffer?
-
         critical_section::with(|cs| {
+            let buffer = if selected_frame_buffer == 0 {
+                frame_buffer_local
+            } else {
+                frame_buffer_local_2
+            };
+            // TODO: Can we get rid of this copying, and just use the buffer itself?
             thread_local_frame_buffer[18..18 + 39040]
-                .copy_from_slice(&frame_buffer_local.borrow_ref(cs).as_u8_slice());
+                .copy_from_slice(&buffer.borrow_ref(cs).as_u8_slice());
         });
         let e = timer.get_counter();
         //info!("Got frame in {}µs", (e - start).to_micros());
-        sio.fifo.write(Core1Task::GotFrame.into());
+        //sio.fifo.write(Core1Task::GotFrame.into());
         // // Transfer RAW frame to pi if it is available.
         let (transfer, transfer_end_address) = pi_spi.begin_message(
             ExtTransferMessage::CameraRawFrameTransfer,
@@ -311,6 +325,18 @@ pub fn core_1_task(
         let mut ended_recording = false;
         let mut should_start_new_recording = false;
         let mut should_end_current_recording = false;
+        if let Some(prev_telemetry) = &prev_frame_telemetry {
+            if frame_telemetry.frame_num != prev_telemetry.frame_num + 1 {
+                let skipped_frames =
+                    (frame_telemetry.frame_num as i32 - prev_telemetry.frame_num as i32) - 1;
+                if skipped_frames > 0 {
+                    warn!(
+                        "Lost {} frame(s), got {}, prev was {}",
+                        skipped_frames, frame_telemetry.frame_num, prev_telemetry.frame_num
+                    );
+                }
+            }
+        }
         if too_close_to_ffc_event && motion_detection.is_some() {
             warn!("Resetting motion detection");
             frames_seen = 0;
@@ -339,6 +365,8 @@ pub fn core_1_task(
             motion_detection = this_frame_motion_detection;
 
             if should_start_new_recording {
+                sio.fifo.write(Core1Task::StartRecording.into());
+
                 error!("Starting new recording, {:?}", &frame_telemetry);
                 // Begin cptv file
                 // TODO: Record the current time when recording starts
@@ -411,7 +439,7 @@ pub fn core_1_task(
         // }
         if should_start_new_recording && cptv_stream.is_some() {
             info!("Send start recording message to core0");
-            sio.fifo.write(Core1Task::StartRecording.into());
+            //sio.fifo.write(Core1Task::StartRecording.into());
         }
         if ended_recording && cptv_stream.is_none() {
             info!("Send end recording message to core0");

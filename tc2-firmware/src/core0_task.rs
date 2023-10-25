@@ -1,5 +1,6 @@
 use crate::core1_task::Core1Task;
-use crate::lepton::LeptonModule;
+use crate::lepton::{read_telemetry, FFCStatus, LeptonModule};
+use crate::utils::u16_slice_to_u8;
 use crate::{bsp, FrameBuffer, FFC_INTERVAL_MS};
 use bsp::hal::clocks::ClocksManager;
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
@@ -12,8 +13,9 @@ use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
-use defmt::{info, warn};
+use defmt::{error, info, warn};
 use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::Timer;
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
 fn go_dormant_until_next_vsync(
@@ -55,7 +57,10 @@ pub fn begin_frame_acquisition_loop(
     delay: &mut Delay,
     resets: &mut RESETS,
     frame_buffer_local: &'static Mutex<RefCell<FrameBuffer>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<FrameBuffer>>,
+    timer: &Timer,
 ) -> ! {
+    let mut selected_frame_buffer = 0;
     let mut frame_counter = 0;
     let mut unverified_frame_counter = 0;
     let mut prev_frame_counter = 0;
@@ -92,7 +97,13 @@ pub fn begin_frame_acquisition_loop(
     let mut needs_ffc = false;
     let mut ffc_requested = false;
 
+    let mut start = timer.get_counter();
+    let mut end = timer.get_counter();
+
     'frame_loop: loop {
+        if let Some(message) = sio_fifo.read() {
+            error!("1. Intraframe message {:x}", message);
+        }
         if got_sync {
             current_segment_num += 1;
             if current_segment_num > total_segments_including_dummy_frames {
@@ -105,6 +116,9 @@ pub fn begin_frame_acquisition_loop(
             && !transferring_prev_frame
         {
             // Go to sleep, skip dummy segment
+
+            // FIXME - Whenever recording starts, we lose a frame here.
+
             rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
             continue 'frame_loop;
         }
@@ -115,9 +129,22 @@ pub fn begin_frame_acquisition_loop(
             // If it's just a straight memcpy of RAM?  Can it be a Mutex which just "takes/replaces" it with another in memory buffer?
             //FRAME_SEGMENT_BUFFER.swap();
             //info!("Hand off frame to core 1");
+            let s = timer.get_counter();
+            let t = (s - end).to_millis();
+            if t > 100000 {
+                info!("Ft {}", t);
+            }
+            start = s;
+
             sio_fifo.write(Core1Task::ReceiveFrame.into());
-            let message = sio_fifo.read_blocking();
-            crate::assert_eq!(message, Core1Task::GotFrame.into());
+            sio_fifo.write(selected_frame_buffer);
+            if selected_frame_buffer == 0 {
+                selected_frame_buffer = 1;
+            } else {
+                selected_frame_buffer = 0;
+            }
+            // let message = sio_fifo.read_blocking();
+            // crate::assert_eq!(message, Core1Task::GotFrame.into());
             transferring_prev_frame = true;
             prev_frame_needs_transfer = false;
         }
@@ -125,6 +152,9 @@ pub fn begin_frame_acquisition_loop(
             // Read the next frame
             let mut prev_packet_id = -1;
             'scanline: loop {
+                // if let Some(message) = sio_fifo.read() {
+                //     error!("3. Intraframe message {:x}", message);
+                // }
                 // This is one scanline
                 let packet = lepton.transfer(&mut scanline_buffer).unwrap();
                 let packet_header = packet[0];
@@ -144,48 +174,27 @@ pub fn begin_frame_acquisition_loop(
                     if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
                         valid_frame_current_segment_num = 1;
                     }
-                    let mut buf = [0u8; 4];
-                    let telemetry = &scanline_buffer[2..];
-                    LittleEndian::write_u16_into(&telemetry[20..=21], &mut buf);
-                    unverified_frame_counter = LittleEndian::read_u32(&buf);
+                    let telemetry =
+                        read_telemetry(unsafe { u16_slice_to_u8(&scanline_buffer[2..]) });
+                    unverified_frame_counter = telemetry.frame_num;
 
                     if got_sync && valid_frame_current_segment_num == 1 {
                         // Check if we need an FFC
-                        let telemetry = &scanline_buffer[2..];
-
-                        // // Let's check the telemetry version...
-                        // if !printed_telemetry_version {
-                        //     printed_telemetry_version = true;
-                        //     let telemetry_version =
-                        //         LittleEndian::write_u16_into(&telemetry[0..1], &mut buf[0..2]);
-                        //     info!("Lepton telemetry revision {}.{}", buf[1], buf[0]);
-                        // }
-
-                        LittleEndian::write_u16_into(&telemetry[1..=2], &mut buf);
-                        let time_on_ms = LittleEndian::read_u32(&buf);
-
-                        LittleEndian::write_u16_into(&telemetry[30..=31], &mut buf);
-                        let last_ffc_ms = LittleEndian::read_u32(&buf);
                         if unverified_frame_counter == prev_frame_counter + 2 {
                             if !is_recording
-                                && time_on_ms != 0
-                                && (last_ffc_ms != 0 || !has_done_initial_ffc)
+                                && telemetry.msec_on != 0
+                                && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
                             {
                                 // If time on ms is zero, that indicates a corrupt/invalid frame.
-                                LittleEndian::write_u16_into(&telemetry[3..=4], &mut buf);
-                                let status_bits = LittleEndian::read_u32(&buf);
-                                let ffc_state = (status_bits >> 4) & 0x0000_000f;
-                                let ffc_in_progress = ffc_state == 0b10;
-                                let ffc_imminent = ffc_state == 0b01;
-
-                                if time_on_ms < last_ffc_ms {
+                                if telemetry.msec_on < telemetry.time_at_last_ffc {
                                     warn!(
                                         "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
-                                        time_on_ms, last_ffc_ms
+                                        telemetry.msec_on, telemetry.time_at_last_ffc
                                     );
-                                } else if time_on_ms - last_ffc_ms > FFC_INTERVAL_MS
-                                    && !ffc_imminent
-                                    && !ffc_in_progress
+                                } else if telemetry.msec_on - telemetry.time_at_last_ffc
+                                    > FFC_INTERVAL_MS
+                                    && telemetry.ffc_status != FFCStatus::Imminent
+                                    && telemetry.ffc_status != FFCStatus::InProgress
                                 {
                                     needs_ffc = true;
                                     ffc_requested = false;
@@ -266,9 +275,14 @@ pub fn begin_frame_acquisition_loop(
                             ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
                         //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
+                        let buffer = if selected_frame_buffer == 0 {
+                            frame_buffer_local
+                        } else {
+                            frame_buffer_local_2
+                        };
                         LittleEndian::write_u16_into(
                             &scanline_buffer[2..],
-                            frame_buffer_local
+                            buffer
                                 .borrow_ref_mut(cs)
                                 .packet(segment_index, packet_id as usize),
                         );
@@ -375,10 +389,12 @@ pub fn begin_frame_acquisition_loop(
                 prev_packet_id = packet_id;
 
                 if transferring_prev_frame {
-                    // Should we always read blocking here?
+                    // Could read blocking, but need to increment current_segment_num appropriately?
+                    let mut recording_started = false;
                     if let Some(message) = sio_fifo.read() {
                         if message == Core1Task::StartRecording.into() {
                             is_recording = true;
+                            recording_started = true;
                             if let Some(message) = sio_fifo.read() {
                                 if message == Core1Task::FrameProcessingComplete.into() {
                                     transferring_prev_frame = false;
@@ -396,6 +412,21 @@ pub fn begin_frame_acquisition_loop(
                         } else if message == Core1Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
+                        }
+                    }
+                    if !transferring_prev_frame || recording_started {
+                        end = timer.get_counter();
+                        if recording_started
+                            || (is_recording && frame_counter % 10 == 0)
+                            || (frame_counter % 10 == 0 && current_segment_num == 3)
+                        {
+                            info!(
+                                "#{} Frame time {}µs, current seg {} (r started {})",
+                                frame_counter,
+                                (end - start).to_micros(),
+                                current_segment_num,
+                                recording_started
+                            );
                         }
                     }
                 }
@@ -440,18 +471,20 @@ pub fn begin_frame_acquisition_loop(
         // }
         // i2c_poll_counter += 1;
 
-        // NOTE: If we're not transferring the previous frame, and the current segment is the second
-        //  to last for a real frame, we can go dormant until the next vsync interrupt.
-        if recording_ended && !transferring_prev_frame && current_segment_num == 3 {
-            is_recording = false;
-            recording_ended = false;
-        }
-        if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-            rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
-        } else if current_segment_num == 3 {
-            //warn!("Overrunning frame time");
-        }
+        {
+            // This block prevents a frame sync issue when we *end* recording
 
-        // Maybe set the is_recording here?
+            // NOTE: If we're not transferring the previous frame, and the current segment is the second
+            //  to last for a real frame, we can go dormant until the next vsync interrupt.
+            if recording_ended && !transferring_prev_frame && current_segment_num == 3 {
+                is_recording = false;
+                recording_ended = false;
+            }
+            if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
+                rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
+            } else if current_segment_num == 3 {
+                //warn!("Overrunning frame time");
+            }
+        }
     }
 }
