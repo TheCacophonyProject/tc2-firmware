@@ -129,11 +129,12 @@ pub fn core_1_task(
         }
     }
 
-    //let should_record_new = true;
+    // Don't actually record to flash if in recording mode, while debugging.
     let should_record_to_flash = false;
-    // let num_seconds = 10;
-    // let num_frames_to_record = num_seconds * 9;
-    // FIXME: Allocate all the buffers we need in this thread up front.
+    // For P2, we just say rPi is always awake.
+    let raspberry_pi_is_awake = true;
+    // Don't record, for updated P2 firmware mode.
+    let is_in_non_recording_mode = true;
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
@@ -147,14 +148,6 @@ pub fn core_1_task(
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
-    // Cptv Stream also holds another buffer of 1 frame length.
-    // There is a 2K buffer for pi_spi transfers
-    // There is another 2K+ buffer for flash_storage page
-    // There is a 1K buffer for crc table in cptv stream.
-    // It may be worth copying the huffman/lz77 table into RAM for speed also.
-    // Try to put the FrameSeg buffer in ram on core 0?
-
-    let raspberry_pi_is_awake = true;
     let mut peripherals = unsafe { Peripherals::steal() };
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -274,9 +267,7 @@ pub fn core_1_task(
 
     let mut frames_written = 0;
     let mut frames_seen = 0usize;
-    let mut slowest_frame = 0;
     let mut prev_frame_telemetry: Option<Telemetry> = None;
-
     let mut motion_detection: Option<MotionTracking> = None;
 
     loop {
@@ -305,7 +296,6 @@ pub fn core_1_task(
             thread_local_frame_buffer[18..18 + 39040]
                 .copy_from_slice(&buffer.borrow_ref(cs).as_u8_slice());
         });
-        let e = timer.get_counter();
         //info!("Got frame in {}µs", (e - start).to_micros());
         //sio.fifo.write(Core1Task::GotFrame.into());
         // // Transfer RAW frame to pi if it is available.
@@ -321,7 +311,8 @@ pub fn core_1_task(
         let frame_telemetry = read_telemetry(&frame_buffer);
         let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
-            || frame_telemetry.ffc_status == FFCStatus::InProgress;
+            || frame_telemetry.ffc_status == FFCStatus::InProgress
+            || is_in_non_recording_mode;
         let mut ended_recording = false;
         let mut should_start_new_recording = false;
         let mut should_end_current_recording = false;
@@ -347,13 +338,11 @@ pub fn core_1_task(
             let current_raw_frame =
                 unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
 
-            let start = timer.get_counter();
             let this_frame_motion_detection = Some(track_motion(
                 &current_raw_frame,
                 &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
                 &motion_detection,
             ));
-            let end = timer.get_counter();
 
             if let Some(this_frame_motion_detection) = &this_frame_motion_detection {
                 should_start_new_recording =
@@ -365,8 +354,6 @@ pub fn core_1_task(
             motion_detection = this_frame_motion_detection;
 
             if should_start_new_recording {
-                sio.fifo.write(Core1Task::StartRecording.into());
-
                 error!("Starting new recording, {:?}", &frame_telemetry);
                 // Begin cptv file
                 // TODO: Record the current time when recording starts
@@ -425,21 +412,9 @@ pub fn core_1_task(
         // Check if we need to trigger:  Mostly at the moment we want to see what frame data
         // structures can be shared with encoding.
         pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
-        let end = timer.get_counter();
-        let frame_time_us = (end - start).to_micros();
-        slowest_frame = slowest_frame.max(frame_time_us);
-
-        // TODO: Actually might be more useful as a moving average.
-        // if frames_seen % 100 == 0 {
-        //     info!(
-        //         "Frame processing {}µs, worst case {}µs",
-        //         (end - start).to_micros(),
-        //         slowest_frame
-        //     );
-        // }
         if should_start_new_recording && cptv_stream.is_some() {
             info!("Send start recording message to core0");
-            //sio.fifo.write(Core1Task::StartRecording.into());
+            sio.fifo.write(Core1Task::StartRecording.into());
         }
         if ended_recording && cptv_stream.is_none() {
             info!("Send end recording message to core0");
