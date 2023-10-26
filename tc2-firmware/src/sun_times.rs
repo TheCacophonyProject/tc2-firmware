@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 #[allow(unused_imports)]
 use num_traits::real::Real; // Allows sin/cosine for suntimes
 const UNIX_EPOCH: JulianDate = JulianDate(2440587.5);

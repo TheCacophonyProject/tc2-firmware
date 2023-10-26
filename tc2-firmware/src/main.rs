@@ -37,12 +37,10 @@ use critical_section::Mutex;
 use defmt::*;
 
 use defmt_rtt as _;
-use embedded_hal::prelude::{
-    _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_WriteRead,
-};
+use embedded_hal::prelude::_embedded_hal_blocking_i2c_Read;
 use fugit::RateExtU32;
 use panic_probe as _;
-use pcf8563::{DateTime, PCF8563};
+use pcf8563::PCF8563;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::FunctionI2C;
 use rp2040_hal::I2C;

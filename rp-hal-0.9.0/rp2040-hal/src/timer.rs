@@ -13,7 +13,6 @@ use fugit::{MicrosDurationU32, MicrosDurationU64, TimerInstantU64};
 
 use crate::{
     atomic_register_access::{write_bitmask_clear, write_bitmask_set},
-    clocks::ClocksManager,
     pac::{self, RESETS, TIMER},
     resets::SubsystemReset,
     typelevel::Sealed,

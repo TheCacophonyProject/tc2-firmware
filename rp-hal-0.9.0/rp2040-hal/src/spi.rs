@@ -327,10 +327,6 @@ impl<D: SpiDevice, P: ValidSpiPinout<D>, const DS: u8> Spi<Enabled, D, P, DS> {
         self.device.sspsr.read().bsy().bit_is_set()
     }
 
-    pub fn is_empty(&self) -> bool {
-        !self.is_readable()
-    }
-
     /// Disable the spi to reset its configuration
     pub fn disable(self) -> Spi<Disabled, D, P, DS> {
         self.device.sspcr1.modify(|_, w| w.sse().clear_bit());

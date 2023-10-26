@@ -1,5 +1,5 @@
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use defmt::{info, warn};
+use defmt::info;
 
 const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;

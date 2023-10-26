@@ -1,6 +1,5 @@
 use crate::bsp;
 use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1};
-use crate::motion_detector::MotionTracking;
 use crate::onboard_flash::extend_lifetime;
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
@@ -395,9 +394,6 @@ impl ExtSpiTransfers {
 
     pub fn is_busy(&self) -> bool {
         self.spi.as_ref().unwrap().is_busy()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.spi.as_ref().unwrap().is_empty()
     }
 }
 

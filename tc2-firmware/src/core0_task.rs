@@ -13,7 +13,7 @@ use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
-use defmt::{error, info, warn};
+use defmt::{info, warn};
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::Timer;
 
@@ -372,11 +372,9 @@ pub fn begin_frame_acquisition_loop(
 
                 if transferring_prev_frame {
                     // Could read blocking, but need to increment current_segment_num appropriately?
-                    let mut recording_started = false;
                     if let Some(message) = sio_fifo.read() {
                         if message == Core1Task::StartRecording.into() {
                             is_recording = true;
-                            recording_started = true;
                             if let Some(message) = sio_fifo.read() {
                                 if message == Core1Task::FrameProcessingComplete.into() {
                                     transferring_prev_frame = false;
