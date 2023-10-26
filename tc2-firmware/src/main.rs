@@ -14,13 +14,13 @@ mod cptv_encoder;
 mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
+mod sun_times;
 
 pub use crate::core0_task::begin_frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::{extend_lifetime_generic, extend_lifetime_generic_mut};
-use crate::utils::{any_as_u8_slice, any_as_u8_slice_mut};
 use bsp::{
     entry,
     hal::{
@@ -32,15 +32,17 @@ use bsp::{
     pac::Peripherals,
 };
 use core::cell::RefCell;
-use core::mem;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::*;
 
 use defmt_rtt as _;
-use embedded_hal::prelude::_embedded_hal_blocking_i2c_Read;
+use embedded_hal::prelude::{
+    _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_WriteRead,
+};
 use fugit::RateExtU32;
 use panic_probe as _;
+use pcf8563::{DateTime, PCF8563};
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::FunctionI2C;
 use rp2040_hal::I2C;
@@ -128,6 +130,51 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
 
+    // Attiny + RTC comms
+    let sda_pin = pins.gpio6.into_function::<FunctionI2C>();
+    let scl_pin = pins.gpio7.into_function::<FunctionI2C>();
+    let mut i2c = I2C::i2c1(
+        peripherals.I2C1,
+        sda_pin,
+        scl_pin,
+        400.kHz(),
+        &mut peripherals.RESETS,
+        &clocks.system_clock,
+    );
+    // Write three bytes to the I²C device with 7-bit address 0x2C
+    // for i in 0u8..127u8 {
+    //     if i2c.write(i, &[1, 2, 3]).is_ok() {
+    //         info!("Found i2c device at {:#x}", i);
+    //     }
+    // }
+    let mut attiny_regs = [0u8; 24];
+    if i2c.read(0x25, &mut attiny_regs).is_ok() {
+        if attiny_regs[1] == 2 {
+            info!("Should power off");
+        }
+        info!("Attiny camera state {:?}", attiny_regs);
+    } else {
+        info!("Failed to read i2c state from attiny");
+    }
+
+    let mut rtc = PCF8563::new(i2c);
+
+    // Set the time on the RTC.
+    // let now = DateTime {
+    //     year: 23,   // 2023
+    //     month: 10,  // Oct
+    //     weekday: 4, // Thursday
+    //     day: 4,
+    //     hours: 3,
+    //     minutes: 0,
+    //     seconds: 0,
+    // };
+    // // set date and time in one go
+    // rtc.set_datetime(&now).unwrap();
+    // let now = rtc.get_datetime().unwrap();
+    // info!("Set DateTime {}", now.day);
+    //let i2c_poll_counter = 0;
+
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
@@ -142,6 +189,7 @@ fn main() -> ! {
         unsafe { extend_lifetime_generic(&frame_buffer) };
     let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
+
     {
         let pins = Core1Pins {
             pi_ping: pins.gpio5.into_push_pull_output(),
@@ -162,6 +210,7 @@ fn main() -> ! {
                 frame_buffer_local_2,
                 system_clock_freq,
                 pins,
+                &mut rtc,
             )
         });
     }
@@ -205,53 +254,6 @@ fn main() -> ! {
 
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
-
-    // Attiny + RTC comms
-    let sda_pin = pins.gpio6.into_function::<FunctionI2C>();
-    let scl_pin = pins.gpio7.into_function::<FunctionI2C>();
-    let mut i2c = I2C::i2c1(
-        peripherals.I2C1,
-        sda_pin,
-        scl_pin,
-        400.kHz(),
-        &mut peripherals.RESETS,
-        &clocks.system_clock,
-    );
-    // Write three bytes to the I²C device with 7-bit address 0x2C
-    // for i in 0u8..127u8 {
-    //     if i2c.write(i, &[1, 2, 3]).is_ok() {
-    //         info!("Found i2c device at {:#x}", i);
-    //     }
-    // }
-    let mut attiny_regs = [0u8; 24];
-    if i2c.read(0x25, &mut attiny_regs).is_ok() {
-        if attiny_regs[1] == 2 {
-            info!("Should power off");
-        }
-        info!("Attiny camera state {:?}", attiny_regs);
-    } else {
-        info!("Failed to read i2c state from attiny");
-    }
-    // let mut cmd = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    // i2c.write_read(0x51, &[
-    //     PCF8563_SEC_REG,
-    //     PCF8563_MIN_REG,
-    //     PCF8563_HR_REG,
-    //     PCF8563_DAY_REG,
-    //     PCF8563_MONTH_REG,
-    //     PCF8563_YEAR_REG
-    // ], &mut cmd).unwrap();
-    // for (i, (unit, mask)) in [
-    //     ("Second", 0x7f),
-    //     ("Minute", 0x7f),
-    //     ("Hour", 0x3f),
-    //     ("Day", 0x07),
-    //     ("Month", 0x1F),
-    //     ("Year", 0xff)
-    // ].iter().enumerate() {
-    //     info!("#{}: {}: {}, {}", i, unit, bcd2dec(cmd[i] & mask), bcd2dec(cmd[i]));
-    // }
-    let i2c_poll_counter = 0;
 
     begin_frame_acquisition_loop(
         rosc,

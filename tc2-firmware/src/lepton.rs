@@ -372,7 +372,7 @@ impl LeptonModule {
         if !success.is_ok() {
             warn!("{}", success);
         }
-        //self.disable_t_linear();
+        //let _ = self.disable_t_linear();
 
         let success = self.radiometric_mode_enabled();
         info!("Radiometry enabled? {}", success);

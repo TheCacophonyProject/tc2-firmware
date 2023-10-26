@@ -97,8 +97,8 @@ pub fn begin_frame_acquisition_loop(
     let mut needs_ffc = false;
     let mut ffc_requested = false;
 
-    let mut start = timer.get_counter();
-    let mut end = timer.get_counter();
+    let start = timer.get_counter();
+    let end = timer.get_counter();
 
     'frame_loop: loop {
         if got_sync {

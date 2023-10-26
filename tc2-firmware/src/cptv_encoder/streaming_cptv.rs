@@ -230,8 +230,26 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
         let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
         let val = *curr_px as i32 - *prev_raw as i32;
         let delta = val - prev_val;
-        assert!(delta >= min);
-        assert!(delta <= max);
+        assert!(
+            delta >= min,
+            "delta {}, min {}, val {}, prev_val {}, curr_px {}, prev_px {}",
+            delta,
+            min,
+            val,
+            prev_val,
+            curr_px,
+            prev_raw
+        );
+        assert!(
+            delta <= max,
+            "delta {}, max {}, val {}, prev_val {}, curr_px {}, prev_px {}",
+            delta,
+            max,
+            val,
+            prev_val,
+            curr_px,
+            prev_raw
+        );
         *unsafe { output.get_unchecked_mut(i) } = delta;
         i += 1;
         prev_val = val;
@@ -386,6 +404,7 @@ impl<'a> CptvStream<'a> {
     pub fn new(
         current_time: u64,
         lepton_version: u8,
+        lat_lng: (f32, f32),
         flash_storage: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
         crc_table: &'a [u32; 256],
@@ -398,7 +417,7 @@ impl<'a> CptvStream<'a> {
             crc_val: 0,
             total_uncompressed: 0,
             starting_block_index: starting_block_index as u16,
-            cptv_header: Cptv2Header::new(current_time, lepton_version),
+            cptv_header: Cptv2Header::new(current_time, lepton_version, lat_lng),
         }
     }
 
@@ -769,7 +788,7 @@ pub struct Cptv2Header {
 }
 
 impl Cptv2Header {
-    pub fn new(timestamp: u64, lepton_version: u8) -> Cptv2Header {
+    pub fn new(timestamp: u64, lepton_version: u8, lat_lng: (f32, f32)) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
@@ -780,8 +799,8 @@ impl Cptv2Header {
             device_id: None,
             serial_number: None,
             firmware_version: None,
-            latitude: None,
-            longitude: None,
+            latitude: Some(lat_lng.0),
+            longitude: Some(lat_lng.1),
             loc_timestamp: None,
             altitude: None,
             accuracy: None,

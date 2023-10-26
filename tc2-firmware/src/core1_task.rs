@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 
 use crate::bsp::pac;
-use crate::bsp::pac::Peripherals;
+use crate::bsp::pac::{Peripherals, I2C1};
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -10,22 +10,26 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
+use crate::sun_times::sun_times;
 use crate::utils::u8_slice_to_u16;
 use crate::{bsp, FrameBuffer, FIRMWARE_VERSION};
 use byteorder::{ByteOrder, LittleEndian};
+use chrono::{NaiveDate, NaiveDateTime};
 use core::cell::RefCell;
-use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
 use fugit::RateExtU32;
+use pcf8563::{DateTime, PCF8563};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
-    Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio8, Gpio9,
+    Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio6, Gpio7, Gpio8, Gpio9,
 };
-use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioOutput};
+use rp2040_hal::gpio::{
+    FunctionI2C, FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioOutput,
+};
 use rp2040_hal::pio::PIOExt;
-use rp2040_hal::Sio;
+use rp2040_hal::{Sio, I2C};
 
 #[repr(u32)]
 #[derive(Format)]
@@ -75,11 +79,37 @@ pub fn wake_raspberry_pi() {
     info!("Sent wake signal to raspberry pi");
 }
 
+fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
+    let naive_date = chrono::NaiveDate::from_ymd_opt(
+        2000 + datetime.year as i32,
+        datetime.month as u32,
+        datetime.day as u32,
+    )
+    .unwrap();
+    let naive_time = chrono::NaiveTime::from_hms_opt(
+        datetime.hours as u32,
+        datetime.minutes as u32,
+        datetime.seconds as u32,
+    )
+    .unwrap();
+    let naive_datetime = chrono::NaiveDateTime::new(naive_date, naive_time);
+    naive_datetime
+}
+
 pub fn core_1_task(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     clock_freq: u32,
     pins: Core1Pins,
+    rtc: &mut PCF8563<
+        I2C<
+            I2C1,
+            (
+                Pin<Gpio6, FunctionI2C, PullDown>,
+                Pin<Gpio7, FunctionI2C, PullDown>,
+            ),
+        >,
+    >,
 ) {
     let mut crc_buf = [0x42u8; 32];
     let mut payload_buf = [0x42u8; 2066];
@@ -369,23 +399,44 @@ pub fn core_1_task(
             if should_start_new_recording {
                 error!("Starting new recording, {:?}", &frame_telemetry);
                 // Begin cptv file
-                // TODO: Record the current time when recording starts
-                // TODO: Pass in various cptv header info bits.
-                let mut cptv_streamer = CptvStream::new(
-                    0,
-                    lepton_version,
-                    &mut flash_storage,
-                    &huffman_table,
-                    &crc_table,
+                let now = rtc.get_datetime().unwrap();
+                let date_time_utc = get_naive_datetime(now);
+                let lat = -46.601010;
+                let lng = 172.713032;
+                let date = NaiveDate::from_ymd_opt(
+                    2000 + now.year as i32,
+                    now.month as u32,
+                    now.day as u32,
                 );
-                cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-                cptv_stream = Some(cptv_streamer);
+                let (sunrise, sunset) = sun_times(date_time_utc.date(), lat, lng, 0.0).unwrap();
+                let is_outside_recording_window =
+                    date_time_utc > sunrise.naive_utc() && date_time_utc < sunset.naive_utc();
+                let is_outside_recording_window = false; // For debug purposes.
+                info!("in recording window? {}", !is_outside_recording_window);
+                if !is_outside_recording_window {
+                    // TODO: Pass in various cptv header info bits.
+                    let mut cptv_streamer = CptvStream::new(
+                        date_time_utc.timestamp_subsec_millis() as u64, // TODO: Check if this needs nanoseconds
+                        lepton_version,
+                        (lat as f32, lng as f32),
+                        &mut flash_storage,
+                        &huffman_table,
+                        &crc_table,
+                    );
+                    cptv_streamer.init_gzip_stream(&mut flash_storage, false);
 
-                // TODO: Write the prev frame before the trigger.
+                    // NOTE: Write the initial frame before the trigger.
+                    cptv_streamer.push_frame(
+                        current_raw_frame,
+                        &mut prev_frame, // This should be zeroed out before starting a new clip.
+                        &frame_telemetry,
+                        &mut flash_storage,
+                    );
+                    prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
+                    frames_written += 1;
 
-                // info!("Created CPTV stream");
-                // Write out the cptv header, with placeholders, then write out the previous
-                // frame and the current frame.  Going dormant on the main thread gets turned off?  Maybe, we'll see
+                    cptv_stream = Some(cptv_streamer);
+                }
             }
             if !should_end_current_recording {
                 if let Some(cptv_stream) = &mut cptv_stream {
@@ -414,6 +465,8 @@ pub fn core_1_task(
                 if let Some(cptv_stream) = &mut cptv_stream {
                     error!("Ending current recording");
                     cptv_stream.finalise(&mut flash_storage);
+                    // Make sure previous frame is zeroed out for the next recording.
+                    prev_frame.fill(0);
                     ended_recording = true;
                 }
                 cptv_stream = None;
