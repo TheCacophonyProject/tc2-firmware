@@ -57,7 +57,8 @@ pub struct ExtSpiTransfers {
     dma_channel_0: Option<Channel<CH0>>,
     //dma_channel_1: Option<Channel<CH1>>,
     payload_buffer: Option<&'static mut [u8; 2066]>,
-    crc_buffer: Option<&'static mut [u8; 32]>,
+    return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
+    return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,
     state_machine_0_uninit: Option<UninitStateMachine<(PIO0, SM0)>>,
     state_machine_0_running: Option<(StateMachine<(PIO0, SM0), Running>, Rx<(PIO0, SM0)>)>,
@@ -73,7 +74,7 @@ impl ExtSpiTransfers {
         ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
         dma_channel_0: Channel<CH0>,
         payload_buffer: &'static mut [u8; 2066],
-        crc_buffer: &'static mut [u8; 32],
+        return_payload_buffer: &'static mut [u8; 32 + 104],
         pio: PIO<PIO0>,
         state_machine_0_uninit: UninitStateMachine<(PIO0, SM0)>,
     ) -> ExtSpiTransfers {
@@ -92,11 +93,20 @@ impl ExtSpiTransfers {
             ping,
             dma_channel_0: Some(dma_channel_0),
             payload_buffer: Some(payload_buffer),
-            crc_buffer: Some(crc_buffer),
+            return_payload_buffer: Some(return_payload_buffer),
+            return_payload_offset: None,
             pio,
             state_machine_0_uninit: Some(state_machine_0_uninit),
             state_machine_0_running: None,
             pio_tx: None,
+        }
+    }
+
+    pub fn return_payload(&self) -> Option<&'static [u8]> {
+        if let Some(start) = self.return_payload_offset {
+            Some(self.return_payload_buffer[start..])
+        } else {
+            None
         }
     }
 
@@ -281,9 +291,6 @@ impl ExtSpiTransfers {
         LittleEndian::write_u16(&mut transfer_header[12..14], crc);
         LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
         LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
-
-        // TODO: We can uses chained double buffer here to avoid these copies + static buffer?
-
         // info!("Writing header {}", &transfer_header);
         self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
             .copy_from_slice(&transfer_header);
@@ -313,17 +320,24 @@ impl ExtSpiTransfers {
                 self.spi = Some(spi);
             }
 
-            // Now read the crc from the pi
+            // Now read the crc + return payload from the pi
             {
                 self.ping.set_high().unwrap();
-                // TODO: Is all the DMA state reset now?
-
-                let transfer = single_buffer::Config::new(
-                    self.dma_channel_0.take().unwrap(),
-                    self.spi.take().unwrap(),
-                    self.crc_buffer.take().unwrap(),
-                )
-                .start();
+                let transfer = if message_type == ExtTransferMessage::CameraConnectInfo {
+                    single_buffer::Config::new(
+                        self.dma_channel_0.take().unwrap(),
+                        self.spi.take().unwrap(),
+                        self.return_payload_buffer.take().unwrap(),
+                    )
+                    .start()
+                } else {
+                    single_buffer::Config::new(
+                        self.dma_channel_0.take().unwrap(),
+                        self.spi.take().unwrap(),
+                        self.return_payload_buffer.take().unwrap()[0..32],
+                    )
+                    .start()
+                };
 
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 self.ping.set_low().unwrap();
@@ -346,11 +360,15 @@ impl ExtSpiTransfers {
                             if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc {
                                 //info!("Success!");
                                 transmit_success = true;
+                                if message_type == ExtTransferMessage::CameraConnectInfo {
+                                    // We also expect to get a bunch of device config handshake info:
+                                    self.return_payload_offset = Some(start + 4);
+                                }
                             }
                         }
                     }
                 }
-                self.crc_buffer = Some(r_buf);
+                self.return_payload_buffer = Some(r_buf);
                 self.spi = Some(spi);
             }
         }

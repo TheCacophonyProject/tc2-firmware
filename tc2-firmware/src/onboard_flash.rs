@@ -447,10 +447,10 @@ impl OnboardFlash {
 
     pub fn has_files_to_offload(&self) -> bool {
         // When we did our initial scan, did we encounter any used blocks?
-        // info!(
-        //     "First used block {:?}, last used {:?}",
-        //     self.first_used_block_index, self.last_used_block_index
-        // );
+        info!(
+            "First used block {:?}, last used {:?}",
+            self.first_used_block_index, self.last_used_block_index
+        );
         self.first_used_block_index.is_some()
     }
 

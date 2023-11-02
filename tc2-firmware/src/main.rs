@@ -14,9 +14,10 @@ mod cptv_encoder;
 mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
+mod rp2040_flash;
 mod sun_times;
 
-pub use crate::core0_task::begin_frame_acquisition_loop;
+pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
@@ -48,7 +49,7 @@ use rp2040_hal::I2C;
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
 pub static FIRMWARE_VERSION: u32 = 3;
-static mut CORE1_STACK: Stack<43500> = Stack::new(); // 174,000 bytes
+static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
@@ -253,7 +254,7 @@ fn main() -> ! {
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
 
-    begin_frame_acquisition_loop(
+    frame_acquisition_loop(
         rosc,
         &mut lepton,
         &mut sio.fifo,

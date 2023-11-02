@@ -49,7 +49,7 @@ fn go_dormant_until_woken<T: PinId>(
     initialized_rosc
 }
 
-pub fn begin_frame_acquisition_loop(
+pub fn frame_acquisition_loop(
     mut rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,

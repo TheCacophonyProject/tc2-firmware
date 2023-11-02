@@ -96,6 +96,63 @@ fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
     naive_datetime
 }
 
+struct DeviceConfig {
+    device_id: u32,
+    device_name: [u8; 64], // length, ...payload
+    location: (f32, f32),
+    location_altitude: Option<f32>,
+    location_timestamp: Option<u64>,
+    location_accuracy: Option<f32>,
+    start_recording_time: (bool, i32),
+    end_recording_time: (bool, i32),
+}
+
+impl DeviceConfig {
+    pub fn from_bytes(bytes: &[u8]) -> DeviceConfig {
+        let device_id = LittleEndian::read_u32(&bytes[0..4]);
+        let latitude = LittleEndian::read_f32(&bytes[4..8]);
+        let longitude = LittleEndian::read_f32(&bytes[8..12]);
+        let location_timestamp = if bytes[12] == 1 {
+            Some(LittleEndian::read_u64(&bytes[13..21]))
+        } else {
+            None
+        };
+        let location_altitude = if bytes[21] == 1 {
+            Some(LittleEndian::read_f32(&bytes[22..26]))
+        } else {
+            None
+        };
+        let location_accuracy = if bytes[26] == 1 {
+            Some(LittleEndian::read_f32(&bytes[27..31]))
+        } else {
+            None
+        };
+        let start_recording_time = if bytes[31] == 1 {
+            (true, LittleEndian::read_i32(&bytes[32..36]))
+        } else {
+            (false, LittleEndian::read_i32(&bytes[32..36]))
+        };
+        let end_recording_time = if bytes[36] == 1 {
+            (true, LittleEndian::read_i32(&bytes[37..41]))
+        } else {
+            (false, LittleEndian::read_i32(&bytes[37..41]))
+        };
+        let device_name_length = bytes[41];
+        let mut device_name = [0u8; 64];
+        device_name.copy_from_slice(&bytes[41..41 + device_name_length + 1]);
+        DeviceConfig {
+            device_id,
+            device_name,
+            location: (latitude, longitude),
+            location_altitude,
+            location_timestamp,
+            location_accuracy,
+            start_recording_time,
+            end_recording_time,
+        }
+    }
+}
+
 pub fn core_1_task(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
@@ -111,7 +168,7 @@ pub fn core_1_task(
         >,
     >,
 ) {
-    let mut crc_buf = [0x42u8; 32];
+    let mut crc_buf = [0x42u8; 32 + 104];
     let mut payload_buf = [0x42u8; 2066];
     let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
     let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
@@ -125,6 +182,8 @@ pub fn core_1_task(
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+    let should_record_to_flash = false;
+    let raspberry_pi_is_awake = true;
 
     let mut pi_spi = ExtSpiTransfers::new(
         pins.pi_mosi,
@@ -149,7 +208,7 @@ pub fn core_1_task(
         flash_page_buf_2,
         dma_channels.ch1,
         dma_channels.ch2,
-        false,
+        should_record_to_flash,
     );
     {
         flash_storage.take_spi(
@@ -162,12 +221,6 @@ pub fn core_1_task(
             info!("Finished scan, has files to offload");
         }
     }
-
-    //let should_record_new = true;
-    let should_record_to_flash = false;
-    // let num_seconds = 10;
-    // let num_frames_to_record = num_seconds * 9;
-    // FIXME: Allocate all the buffers we need in this thread up front.
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
@@ -182,7 +235,6 @@ pub fn core_1_task(
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
-    let raspberry_pi_is_awake = true;
     let mut peripherals = unsafe { Peripherals::steal() };
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -207,6 +259,11 @@ pub fn core_1_task(
             crc,
             &mut peripherals.DMA,
         );
+        if let Some(device_config) = pi_spi.return_payload() {
+            // Do stuff with the device config.
+            // Both decode it into a useful struct, and save it out to the 2MB flash chip, assuming
+            // it's actually different to what we already have (if we already have something)
+        }
 
         let spi_free = pi_spi.disable();
         flash_storage.take_spi(spi_free, &mut peripherals.RESETS, clock_freq.Hz());
@@ -288,7 +345,6 @@ pub fn core_1_task(
             flash_storage.erase_all_good_used_blocks();
         }
     }
-
     pi_spi.enable_pio_spi();
     // NOTE: Let Core0 know that it can start the frame loop
     // TODO: This could potentially start earlier to get lepton up and synced,
@@ -306,6 +362,8 @@ pub fn core_1_task(
     let mut prev_frame_telemetry: Option<Telemetry> = None;
 
     let mut motion_detection: Option<MotionTracking> = None;
+
+    // TODO: If flash storage is full, don't record.
 
     loop {
         let input = sio.fifo.read_blocking();
@@ -397,7 +455,6 @@ pub fn core_1_task(
             motion_detection = this_frame_motion_detection;
 
             if should_start_new_recording {
-                error!("Starting new recording, {:?}", &frame_telemetry);
                 // Begin cptv file
                 let now = rtc.get_datetime().unwrap();
                 let date_time_utc = get_naive_datetime(now);
@@ -411,9 +468,9 @@ pub fn core_1_task(
                 let (sunrise, sunset) = sun_times(date_time_utc.date(), lat, lng, 0.0).unwrap();
                 let is_outside_recording_window =
                     date_time_utc > sunrise.naive_utc() && date_time_utc < sunset.naive_utc();
-                let is_outside_recording_window = false; // For debug purposes.
-                info!("in recording window? {}", !is_outside_recording_window);
+                //let is_outside_recording_window = false; // For debug purposes.
                 if !is_outside_recording_window {
+                    error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
                     let mut cptv_streamer = CptvStream::new(
                         date_time_utc.timestamp_subsec_millis() as u64, // TODO: Check if this needs nanoseconds
@@ -436,6 +493,8 @@ pub fn core_1_task(
                     frames_written += 1;
 
                     cptv_stream = Some(cptv_streamer);
+                } else {
+                    info!("Would start recording, but outside recording window");
                 }
             }
             if !should_end_current_recording {
