@@ -1,6 +1,7 @@
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
+use crate::device_config::DeviceConfig;
 use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
@@ -404,12 +405,15 @@ impl<'a> CptvStream<'a> {
     pub fn new(
         current_time: u64,
         lepton_version: u8,
-        lat_lng: (f32, f32),
+        device_config: &DeviceConfig,
         flash_storage: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
         crc_table: &'a [u32; 256],
     ) -> CptvStream<'a> {
         let starting_block_index = flash_storage.start_file();
+
+        // Camera serial, camera firmware, location_altitude, location_timestamp, location_accuracy
+        let cptv_header = Cptv2Header::new(current_time, lepton_version, device_config);
         CptvStream {
             cursor: BitCursor::new(),
             crc_table,
@@ -417,7 +421,7 @@ impl<'a> CptvStream<'a> {
             crc_val: 0,
             total_uncompressed: 0,
             starting_block_index: starting_block_index as u16,
-            cptv_header: Cptv2Header::new(current_time, lepton_version, lat_lng),
+            cptv_header,
         }
     }
 
@@ -693,9 +697,8 @@ impl Iterator for HeaderIterator {
     }
 }
 pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
-    let num_header_fields = 11u8;
+    let num_header_fields = 12u8;
     let num_optional_header_fields = [
-        header.device_id.is_some(),
         header.serial_number.is_some(),
         header.firmware_version.is_some(),
         header.latitude.is_some(),
@@ -731,10 +734,7 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
             FieldType::Brand,
         ))
         .chain(push_field_iterator(&header.model, FieldType::Model))
-        .chain(push_optional_field_iterator(
-            &header.device_id,
-            FieldType::DeviceID,
-        ))
+        .chain(push_field_iterator(&header.device_id, FieldType::DeviceID))
         .chain(push_optional_field_iterator(
             &header.serial_number,
             FieldType::CameraSerial,
@@ -771,9 +771,9 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
 // "<unknown>"
 pub struct Cptv2Header {
     pub timestamp: u64,
-    pub device_name: [u8; 20],
+    pub device_name: [u8; 63],
     pub model: [u8; 20],
-    pub device_id: Option<u32>,
+    pub device_id: u32,
     pub serial_number: Option<u32>,
     pub firmware_version: Option<[u8; 20]>,
     pub latitude: Option<f32>,
@@ -788,28 +788,29 @@ pub struct Cptv2Header {
 }
 
 impl Cptv2Header {
-    pub fn new(timestamp: u64, lepton_version: u8, lat_lng: (f32, f32)) -> Cptv2Header {
+    pub fn new(timestamp: u64, lepton_version: u8, device_config: &DeviceConfig) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
+        let (lat, lng) = device_config.location;
         let mut header = Cptv2Header {
             timestamp,
-            device_name: [0; 20],
+            device_name: [0; 63],
             model: [0; 20],
-            device_id: None,
+            device_id: device_config.device_id,
             serial_number: None,
             firmware_version: None,
-            latitude: Some(lat_lng.0),
-            longitude: Some(lat_lng.1),
-            loc_timestamp: None,
-            altitude: None,
-            accuracy: None,
+            latitude: Some(lat),
+            longitude: Some(lng),
+            loc_timestamp: device_config.location_timestamp,
+            altitude: device_config.location_altitude,
+            accuracy: device_config.location_accuracy,
             total_frame_count: 0,
             min_value: u16::MAX,
             max_value: u16::MIN,
         };
-        let device_name = b"<unknown>";
-        header.device_name[0..device_name.len()].copy_from_slice(device_name);
+        header.device_name[0..device_config.device_name_bytes().len()]
+            .copy_from_slice(device_config.device_name_bytes());
         let model = if lepton_version == 35 {
             &b"lepton3.5"[..]
         } else {

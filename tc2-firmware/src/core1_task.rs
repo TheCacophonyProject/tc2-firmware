@@ -2,19 +2,20 @@
 #![allow(unused_variables)]
 
 use crate::bsp::pac;
-use crate::bsp::pac::{Peripherals, I2C1};
+use crate::bsp::pac::{Peripherals, DMA, I2C1, RESETS};
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
+use crate::device_config::DeviceConfig;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
-use crate::sun_times::sun_times;
+use crate::rp2040_flash::{read_rp2040_flash, write_rp2040_flash};
 use crate::utils::u8_slice_to_u16;
 use crate::{bsp, FrameBuffer, FIRMWARE_VERSION};
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDateTime;
 use core::cell::RefCell;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
@@ -71,12 +72,13 @@ pub struct Core1Pins {
 }
 const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
 const WAIT_N_FRAMES_FOR_STABLE: usize = 20;
-pub fn wake_raspberry_pi() {
+pub fn wake_raspberry_pi(is_awake: &mut bool) {
     // TODO: Send a wake signal to the attiny, and poll its registers
     //  until we see that the raspberry pi is awake (and ideally that tc2-agent is running).
     //  Actually, tc2-agent will restart this firmware, so maybe we don't need to poll, we just
     //  block indefinitely?
     info!("Sent wake signal to raspberry pi");
+    // Wait here, then set is_awake to true
 }
 
 fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
@@ -96,59 +98,81 @@ fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
     naive_datetime
 }
 
-struct DeviceConfig {
-    device_id: u32,
-    device_name: [u8; 64], // length, ...payload
-    location: (f32, f32),
-    location_altitude: Option<f32>,
-    location_timestamp: Option<u64>,
-    location_accuracy: Option<f32>,
-    start_recording_time: (bool, i32),
-    end_recording_time: (bool, i32),
+fn load_existing_config_from_flash() -> DeviceConfig {
+    let slice = read_rp2040_flash();
+    let (device_config, _) = DeviceConfig::from_bytes(slice);
+    device_config
 }
 
-impl DeviceConfig {
-    pub fn from_bytes(bytes: &[u8]) -> DeviceConfig {
-        let device_id = LittleEndian::read_u32(&bytes[0..4]);
-        let latitude = LittleEndian::read_f32(&bytes[4..8]);
-        let longitude = LittleEndian::read_f32(&bytes[8..12]);
-        let location_timestamp = if bytes[12] == 1 {
-            Some(LittleEndian::read_u64(&bytes[13..21]))
-        } else {
-            None
-        };
-        let location_altitude = if bytes[21] == 1 {
-            Some(LittleEndian::read_f32(&bytes[22..26]))
-        } else {
-            None
-        };
-        let location_accuracy = if bytes[26] == 1 {
-            Some(LittleEndian::read_f32(&bytes[27..31]))
-        } else {
-            None
-        };
-        let start_recording_time = if bytes[31] == 1 {
-            (true, LittleEndian::read_i32(&bytes[32..36]))
-        } else {
-            (false, LittleEndian::read_i32(&bytes[32..36]))
-        };
-        let end_recording_time = if bytes[36] == 1 {
-            (true, LittleEndian::read_i32(&bytes[37..41]))
-        } else {
-            (false, LittleEndian::read_i32(&bytes[37..41]))
-        };
-        let device_name_length = bytes[41];
-        let mut device_name = [0u8; 64];
-        device_name.copy_from_slice(&bytes[41..41 + device_name_length + 1]);
-        DeviceConfig {
-            device_id,
-            device_name,
-            location: (latitude, longitude),
-            location_altitude,
-            location_timestamp,
-            location_accuracy,
-            start_recording_time,
-            end_recording_time,
+fn maybe_offload_to_flash_storage(
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    resets: &mut RESETS,
+    dma: &mut DMA,
+    mut raspberry_pi_is_awake: bool,
+    clock_freq: u32,
+) {
+    if flash_storage.has_files_to_offload() {
+        warn!("There are files to offload!");
+        if !raspberry_pi_is_awake {
+            wake_raspberry_pi(&mut raspberry_pi_is_awake);
+        }
+        if raspberry_pi_is_awake {
+            // do some offloading.
+            let mut file_count = 0;
+            flash_storage.begin_offload();
+            let mut file_start = true;
+            let mut part_count = 0;
+
+            // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
+            while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+                flash_storage.get_file_part()
+            {
+                pi_spi.enable(spi, resets);
+                let transfer_type = if file_start && !is_last {
+                    ExtTransferMessage::BeginFileTransfer
+                } else if !file_start && !is_last {
+                    ExtTransferMessage::ResumeFileTransfer
+                } else if is_last {
+                    ExtTransferMessage::EndFileTransfer
+                } else if file_start && is_last {
+                    ExtTransferMessage::BeginAndEndFileTransfer
+                } else {
+                    crate::unreachable!("Invalid file transfer state");
+                };
+
+                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                let current_crc = crc_check.checksum(&part);
+                if current_crc != crc {
+                    warn!(
+                        "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                        part_count, block_index, page_index
+                    );
+                }
+                pi_spi.send_message(transfer_type, &part, current_crc, dma);
+
+                part_count += 1;
+                if is_last {
+                    file_count += 1;
+                    info!("Offloaded {} file(s)", file_count);
+                    file_start = true;
+                } else {
+                    file_start = false;
+                }
+
+                // Give spi peripheral back to flash storage.
+                let spi = pi_spi.disable();
+                flash_storage.take_spi(spi, resets, clock_freq.Hz());
+            }
+            info!("Completed file offload, transferred {} files", file_count);
+            // TODO: Some validation from the raspberry pi that the transfer completed
+            //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
+
+            // Once we've successfully offloaded all files, we can erase the flash and we're
+            // ready to start recording new CPTV files there.
+
+            info!("Erasing after successful offload");
+            flash_storage.erase_all_good_used_blocks();
         }
     }
 }
@@ -243,7 +267,7 @@ pub fn core_1_task(
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 1);
     let lepton_version = if radiometry_enabled == 1 { 35 } else { 3 };
 
-    if raspberry_pi_is_awake {
+    let device_config = if raspberry_pi_is_awake {
         let mut payload = [0u8; 8];
         let free_spi = flash_storage.free_spi();
         pi_spi.enable(free_spi, &mut peripherals.RESETS);
@@ -259,92 +283,102 @@ pub fn core_1_task(
             crc,
             &mut peripherals.DMA,
         );
-        if let Some(device_config) = pi_spi.return_payload() {
-            // Do stuff with the device config.
-            // Both decode it into a useful struct, and save it out to the 2MB flash chip, assuming
-            // it's actually different to what we already have (if we already have something)
+        let device_config = pi_spi.return_payload().unwrap();
+        // Skip 4 bytes of CRC checking
+        let (new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
+        let existing_config = load_existing_config_from_flash();
+        if new_config != existing_config {
+            warn!("Config has changed {}", existing_config != new_config);
+            write_rp2040_flash(&device_config[4..4 + length_used]);
         }
-
         let spi_free = pi_spi.disable();
         flash_storage.take_spi(spi_free, &mut peripherals.RESETS, clock_freq.Hz());
-    }
+        new_config
+    } else {
+        let existing_config = load_existing_config_from_flash();
+        info!(
+            "Got device config {:?}, {}",
+            existing_config,
+            existing_config.device_name()
+        );
+        existing_config
+    };
     // TODO: Switch modes here.
     //  If there are files to upload, do that.
     //  If the pi requests raw frames, do that (as well as being able to write to flash)
     //  Possibly we can get away with doing this via the PIO transfers?  Let's try!
     //  And then we switch to spi at the end to do the read-back?
-
-    if flash_storage.has_files_to_offload() {
-        warn!("There are files to offload!");
-        if !raspberry_pi_is_awake {
-            wake_raspberry_pi();
-        }
-        if raspberry_pi_is_awake {
-            // do some offloading.
-            let mut file_count = 0;
-            flash_storage.begin_offload();
-            let mut file_start = true;
-            let mut part_count = 0;
-
-            // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-            while let Some(((part, crc, block_index, page_index), is_last, spi)) =
-                flash_storage.get_file_part()
-            {
-                pi_spi.enable(spi, &mut peripherals.RESETS);
-                let transfer_type = if file_start && !is_last {
-                    ExtTransferMessage::BeginFileTransfer
-                } else if !file_start && !is_last {
-                    ExtTransferMessage::ResumeFileTransfer
-                } else if is_last {
-                    ExtTransferMessage::EndFileTransfer
-                } else if file_start && is_last {
-                    ExtTransferMessage::BeginAndEndFileTransfer
-                } else {
-                    crate::unreachable!("Invalid file transfer state");
-                };
-                let tt = match transfer_type {
-                    ExtTransferMessage::BeginFileTransfer => "BEGIN FILE TRANSFER",
-                    ExtTransferMessage::ResumeFileTransfer => "CONTINUE FILE TRANSFER",
-                    ExtTransferMessage::EndFileTransfer => "END FILE TRANSFER",
-                    ExtTransferMessage::BeginAndEndFileTransfer => "BEGIN & END FILE TRANSFER",
-                    _ => crate::unreachable!("Invalid"),
-                };
-                //info!("tt {}, part len {}", tt, part.len());
-
-                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-                let current_crc = crc_check.checksum(&part);
-                if current_crc != crc {
-                    warn!(
-                        "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
-                        part_count, block_index, page_index
-                    );
-                }
-                pi_spi.send_message(transfer_type, &part, current_crc, &mut peripherals.DMA);
-
-                part_count += 1;
-                if is_last {
-                    file_count += 1;
-                    info!("Offloaded {} file(s)", file_count);
-                    file_start = true;
-                } else {
-                    file_start = false;
-                }
-
-                // Give spi peripheral back to flash storage.
-                let spi = pi_spi.disable();
-                flash_storage.take_spi(spi, &mut peripherals.RESETS, clock_freq.Hz());
-            }
-            info!("Completed file offload, transferred {} files", file_count);
-            // TODO: Some validation from the raspberry pi that the transfer completed
-            //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
-
-            // Once we've successfully offloaded all files, we can erase the flash and we're
-            // ready to start recording new CPTV files there.
-
-            info!("Erasing after successful offload");
-            flash_storage.erase_all_good_used_blocks();
-        }
-    }
+    maybe_offload_to_flash_storage(
+        &mut flash_storage,
+        &mut pi_spi,
+        &mut peripherals.RESETS,
+        &mut peripherals.DMA,
+        raspberry_pi_is_awake,
+        clock_freq,
+    );
+    // if flash_storage.has_files_to_offload() {
+    //     warn!("There are files to offload!");
+    //     if !raspberry_pi_is_awake {
+    //         wake_raspberry_pi();
+    //     }
+    //     if raspberry_pi_is_awake {
+    //         // do some offloading.
+    //         let mut file_count = 0;
+    //         flash_storage.begin_offload();
+    //         let mut file_start = true;
+    //         let mut part_count = 0;
+    //
+    //         // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
+    //         while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+    //             flash_storage.get_file_part()
+    //         {
+    //             pi_spi.enable(spi, &mut peripherals.RESETS);
+    //             let transfer_type = if file_start && !is_last {
+    //                 ExtTransferMessage::BeginFileTransfer
+    //             } else if !file_start && !is_last {
+    //                 ExtTransferMessage::ResumeFileTransfer
+    //             } else if is_last {
+    //                 ExtTransferMessage::EndFileTransfer
+    //             } else if file_start && is_last {
+    //                 ExtTransferMessage::BeginAndEndFileTransfer
+    //             } else {
+    //                 crate::unreachable!("Invalid file transfer state");
+    //             };
+    //
+    //             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+    //             let current_crc = crc_check.checksum(&part);
+    //             if current_crc != crc {
+    //                 warn!(
+    //                     "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+    //                     part_count, block_index, page_index
+    //                 );
+    //             }
+    //             pi_spi.send_message(transfer_type, &part, current_crc, &mut peripherals.DMA);
+    //
+    //             part_count += 1;
+    //             if is_last {
+    //                 file_count += 1;
+    //                 info!("Offloaded {} file(s)", file_count);
+    //                 file_start = true;
+    //             } else {
+    //                 file_start = false;
+    //             }
+    //
+    //             // Give spi peripheral back to flash storage.
+    //             let spi = pi_spi.disable();
+    //             flash_storage.take_spi(spi, &mut peripherals.RESETS, clock_freq.Hz());
+    //         }
+    //         info!("Completed file offload, transferred {} files", file_count);
+    //         // TODO: Some validation from the raspberry pi that the transfer completed
+    //         //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
+    //
+    //         // Once we've successfully offloaded all files, we can erase the flash and we're
+    //         // ready to start recording new CPTV files there.
+    //
+    //         info!("Erasing after successful offload");
+    //         flash_storage.erase_all_good_used_blocks();
+    //     }
+    // }
     pi_spi.enable_pio_spi();
     // NOTE: Let Core0 know that it can start the frame loop
     // TODO: This could potentially start earlier to get lepton up and synced,
@@ -458,24 +492,15 @@ pub fn core_1_task(
                 // Begin cptv file
                 let now = rtc.get_datetime().unwrap();
                 let date_time_utc = get_naive_datetime(now);
-                let lat = -46.601010;
-                let lng = 172.713032;
-                let date = NaiveDate::from_ymd_opt(
-                    2000 + now.year as i32,
-                    now.month as u32,
-                    now.day as u32,
-                );
-                let (sunrise, sunset) = sun_times(date_time_utc.date(), lat, lng, 0.0).unwrap();
-                let is_outside_recording_window =
-                    date_time_utc > sunrise.naive_utc() && date_time_utc < sunset.naive_utc();
-                //let is_outside_recording_window = false; // For debug purposes.
-                if !is_outside_recording_window {
+                let is_inside_recording_window =
+                    device_config.time_is_in_recording_window(&date_time_utc);
+                if is_inside_recording_window {
                     error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
                     let mut cptv_streamer = CptvStream::new(
                         date_time_utc.timestamp_subsec_millis() as u64, // TODO: Check if this needs nanoseconds
                         lepton_version,
-                        (lat as f32, lng as f32),
+                        &device_config,
                         &mut flash_storage,
                         &huffman_table,
                         &crc_table,
@@ -570,8 +595,38 @@ pub fn core_1_task(
             info!("Send end recording message to core0");
             sio.fifo.write(Core1Task::EndRecording.into());
         }
+        if flash_storage.is_too_full() {
+            maybe_offload_to_flash_storage(
+                &mut flash_storage,
+                &mut pi_spi,
+                &mut peripherals.RESETS,
+                &mut peripherals.DMA,
+                raspberry_pi_is_awake,
+                clock_freq,
+            );
+            // TODO: If we woke to pi, when do we put it back to sleep?
+        }
+        if frames_seen % (60 * 9) == 0 && cptv_stream.is_none() {
+            // Check this every minute.
+            let now = rtc.get_datetime().unwrap();
+            let date_time_utc = get_naive_datetime(now);
+            let is_inside_recording_window =
+                device_config.time_is_in_recording_window(&date_time_utc);
+            if !is_inside_recording_window {
+                // Tell core0 we're exiting the recording loop
+                maybe_offload_to_flash_storage(
+                    &mut flash_storage,
+                    &mut pi_spi,
+                    &mut peripherals.RESETS,
+                    &mut peripherals.DMA,
+                    raspberry_pi_is_awake,
+                    clock_freq,
+                );
+                // TODO: If we woke to pi, when do we put it back to sleep?
+                // TODO: Now set the wakeup alarm to the next window start time, and ask the attiny
+                // to put us to sleep.
+            }
+        }
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
-
-    // TODO: Need a way to exit this loop, and then offload files, and then re-enter the loop.
 }

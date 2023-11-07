@@ -115,8 +115,7 @@ pub fn frame_acquisition_loop(
             // Go to sleep, skip dummy segment
 
             // FIXME - Whenever recording starts, we lose a frame here.
-
-            //rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
+            // rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {

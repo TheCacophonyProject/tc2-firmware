@@ -11,6 +11,8 @@ mod clock_utils;
 mod core0_task;
 mod core1_task;
 mod cptv_encoder;
+mod device_config;
+mod event_logger;
 mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;

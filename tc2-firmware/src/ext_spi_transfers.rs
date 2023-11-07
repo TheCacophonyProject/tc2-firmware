@@ -20,7 +20,7 @@ use rp2040_hal::pio::{
 use rp2040_hal::Spi;
 
 #[repr(u8)]
-#[derive(Copy, Clone, Format)]
+#[derive(Copy, Clone, Format, PartialEq)]
 pub enum ExtTransferMessage {
     CameraConnectInfo = 0x1,
     CameraRawFrameTransfer = 0x2,
@@ -104,7 +104,7 @@ impl ExtSpiTransfers {
 
     pub fn return_payload(&self) -> Option<&'static [u8]> {
         if let Some(start) = self.return_payload_offset {
-            Some(self.return_payload_buffer[start..])
+            Some(unsafe { extend_lifetime(&self.return_payload_buffer.as_ref().unwrap()[start..]) })
         } else {
             None
         }
@@ -323,21 +323,13 @@ impl ExtSpiTransfers {
             // Now read the crc + return payload from the pi
             {
                 self.ping.set_high().unwrap();
-                let transfer = if message_type == ExtTransferMessage::CameraConnectInfo {
-                    single_buffer::Config::new(
-                        self.dma_channel_0.take().unwrap(),
-                        self.spi.take().unwrap(),
-                        self.return_payload_buffer.take().unwrap(),
-                    )
-                    .start()
-                } else {
-                    single_buffer::Config::new(
-                        self.dma_channel_0.take().unwrap(),
-                        self.spi.take().unwrap(),
-                        self.return_payload_buffer.take().unwrap()[0..32],
-                    )
-                    .start()
-                };
+
+                let transfer = single_buffer::Config::new(
+                    self.dma_channel_0.take().unwrap(),
+                    self.spi.take().unwrap(),
+                    self.return_payload_buffer.take().unwrap(),
+                )
+                .start();
 
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 self.ping.set_low().unwrap();

@@ -206,7 +206,7 @@ pub fn track_motion(
                 motion_tracking.timeout_in_n_frames = Some(9 * 5); // 5 second timeout
             } else if prev_frame_stats.is_triggering() {
                 // Hot disappeared, but not via the edge of the frame, so we wait longer.
-                info!("Subject disappeared in  frame: set 10 second recording timeout");
+                info!("Subject disappeared in frame: set 10 second recording timeout");
                 motion_tracking.timeout_in_n_frames = Some(9 * 10); // 10 second timeout
             }
             if let Some(timeout_in_n_frames) = motion_tracking.timeout_in_n_frames.as_mut() {

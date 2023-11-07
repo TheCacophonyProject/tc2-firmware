@@ -371,10 +371,8 @@ impl OnboardFlash {
             }
         }
 
-        // TODO: DMA transfers too
         for block_index in 0..2048isize {
             // TODO: Interleave with random cache read
-
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
             self.read_page(block_index, 0).unwrap();
@@ -473,23 +471,9 @@ impl OnboardFlash {
         // );
     }
 
-    // fn advance_to_next_file(&mut self) -> usize {
-    //     println!("Advance from {:?}", self.current_block_index);
-    //     let next_block_index = self.current_block_index.get_or_insert(-1);
-    //     println!("Start block index {}", next_block_index);
-    //     println!("Bad blocks: {:?}", self.bad_blocks);
-    //     while self.bad_blocks.contains(&(*next_block_index as i16)) {
-    //         println!("Increment next_block inside bad block check");
-    //         *next_block_index += 1;
-    //     }
-    //     *next_block_index += 1;
-    //
-    //     println!(
-    //         "At file block {}, page {}",
-    //         next_block_index, self.current_page_index
-    //     );
-    //     *next_block_index as usize
-    // }
+    pub fn is_too_full(&self) -> bool {
+        self.current_block_index > (2048 - 256)
+    }
 
     pub fn erase_all_good_used_blocks(&mut self) {
         for block_index in 0..2048isize {
