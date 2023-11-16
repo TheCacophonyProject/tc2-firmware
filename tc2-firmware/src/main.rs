@@ -6,7 +6,9 @@
 mod lepton;
 mod utils;
 
+mod attiny_rtc_i2c;
 mod bsp;
+mod byte_slice_cursor;
 mod clock_utils;
 mod core0_task;
 mod core1_task;
@@ -16,12 +18,14 @@ mod event_logger;
 mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
+//mod pdm_microphone;
 mod rp2040_flash;
 mod sun_times;
 
 pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
+use crate::device_config::DeviceConfig;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use bsp::{
@@ -38,15 +42,13 @@ use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::*;
-
 use defmt_rtt as _;
-use embedded_hal::prelude::_embedded_hal_blocking_i2c_Read;
 use fugit::RateExtU32;
 use panic_probe as _;
-use pcf8563::PCF8563;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::FunctionI2C;
 use rp2040_hal::I2C;
+
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
@@ -56,29 +58,16 @@ const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
-pub struct FrameBuffer([u8; 18 + (160 * 61 * 4) + 2]);
+pub struct FrameBuffer([u8; 18 + 8 + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
     pub const fn new() -> FrameBuffer {
         // NOTE: Put an 18 byte padding at the start, and a 2 byte padding at the end, to make it 32bit aligned
-        FrameBuffer([0u8; 18 + (160 * 61 * 4) + 2])
+        FrameBuffer([0u8; 18 + 8 + (160 * 61 * 4) + 2])
     }
 
-    // pub fn seg_as_u8_slice(&self, segment: usize) -> &[FramePacketData; 61] {
-    //     &self.frame_buffer()[segment]
-    // }
-    // fn frame_buffer(&self) -> &FrameSegments {
-    //     // TODO : Just do the maths in these functions
-    //     let fb = &self.0[18..18 + (160 * 61 * 4)];
-    //     unsafe { mem::transmute(fb) }
-    // }
-    // fn frame_buffer_mut(&mut self) -> &mut FrameSegments {
-    //     let fb = self.0[18..18 + (160 * 61 * 4)] as [u8; (160 * 61 * 4)];
-    //     unsafe { mem::transmute(fb) }
-    // }
-
     pub fn as_u8_slice(&self) -> &[u8] {
-        &self.0[18..18 + 39040]
+        &self.0[18 + 8..18 + 8 + 39040]
     }
 
     pub fn as_u8_slice_mut(&mut self) -> &mut [u8] {
@@ -88,7 +77,7 @@ impl FrameBuffer {
     pub fn packet(&mut self, segment: usize, packet_id: usize) -> &mut [u8] {
         let segment_offset = FRAME_WIDTH * 61 * segment;
         let packet_offset = FRAME_WIDTH * packet_id;
-        &mut self.0[18..]
+        &mut self.0[18 + 8..]
             [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
     }
 }
@@ -134,7 +123,7 @@ fn main() -> ! {
     // Attiny + RTC comms
     let sda_pin = pins.gpio6.into_function::<FunctionI2C>();
     let scl_pin = pins.gpio7.into_function::<FunctionI2C>();
-    let mut i2c = I2C::i2c1(
+    let i2c1 = I2C::i2c1(
         peripherals.I2C1,
         sda_pin,
         scl_pin,
@@ -142,39 +131,95 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
-    // Write three bytes to the I²C device with 7-bit address 0x2C
-    // for i in 0u8..127u8 {
-    //     if i2c.write(i, &[1, 2, 3]).is_ok() {
-    //         info!("Found i2c device at {:#x}", i);
-    //     }
-    // }
-    let mut attiny_regs = [0u8; 24];
-    if i2c.read(0x25, &mut attiny_regs).is_ok() {
-        if attiny_regs[1] == 2 {
-            info!("Should power off");
+    let mut delay = Delay::new(core.SYST, system_clock_freq);
+
+    // If we're waking up to make an audio recording, do that.
+    let existing_config = DeviceConfig::load_existing_config_from_flash();
+    /*
+    let i2c1 = if let Some(existing_config) = existing_config {
+        info!(
+            "Got device config {:?}, {}",
+            existing_config,
+            existing_config.device_name()
+        );
+        // Try to work out our wakeup reason.  If we're within a recording window, assume that we want
+        // to record thermal video, otherwise make an audio recording and go to sleep.
+
+        // We need a double buffering system of 3 flash pages.
+        // One is the page that is currently being written to by data,
+        // Another is ready to take over when that first buffer is full,
+
+        let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+        match shared_i2c.get_datetime(&mut delay) {
+            Ok(now) => {
+                let date_time_utc = get_naive_datetime(now);
+                let is_inside_recording_window =
+                    existing_config.time_is_in_recording_window(&date_time_utc);
+                if !is_inside_recording_window {
+                    info!("Woke outside recording window, lets make an audio recording and go back to sleep?");
+                    let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
+                    let mut microphone = PdmMicrophone::new(
+                        pins.gpio0.into_function().into_pull_type(),
+                        pins.gpio1.into_function().into_pull_type(),
+                        system_clock_freq.Hz(),
+                        pio1,
+                        sm1,
+                    );
+                    let mut front = [0u8; 2066];
+                    let mut back = [0u8; 2066];
+                    let mut front_ptr = &mut &mut front;
+                    let mut back_ptr = &mut &mut back;
+                    while let Some(data) = microphone.record_for_n_seconds(60) {
+                        // TODO: Process and stream the data out to flash before we get the next block.
+                    }
+                }
+            }
+            Err(_) => error!("Unable to get DateTime from RTC"),
         }
-        info!("Attiny camera state {:?}", attiny_regs);
+        shared_i2c.free()
     } else {
-        info!("Failed to read i2c state from attiny");
+        i2c1
+    };
+     */
+
+    let lepton_pins = LeptonPins {
+        tx: pins.gpio23.into_function(),
+        rx: pins.gpio20.into_function(),
+        clk: pins.gpio22.into_function(),
+        cs: pins.gpio21.into_function(),
+
+        vsync: pins.gpio19.into_function(),
+
+        sda: pins.gpio24.into_function(),
+        scl: pins.gpio25.into_function(),
+
+        power_down: pins.gpio28.into_push_pull_output(),
+        power_enable: pins.gpio18.into_push_pull_output(),
+        reset: pins.gpio29.into_push_pull_output(),
+        clk_disable: pins.gpio27.into_push_pull_output(),
+        master_clk: pins.gpio26.into_floating_input(),
+    };
+    let mut lepton = init_lepton_module(
+        peripherals.SPI0,
+        peripherals.I2C0,
+        system_clock_freq,
+        &mut peripherals.RESETS,
+        &mut delay,
+        lepton_pins,
+    );
+
+    let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
+    let lepton_serial = lepton.get_camera_serial().map_or(None, |x| Some(x));
+    let lepton_firmware_version = lepton.get_firmware_version().map_or(None, |x| Some(x));
+    if let Some(((m_major, m_minor, m_build), (d_major, d_minor, d_build))) =
+        lepton_firmware_version
+    {
+        info!(
+            "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}",
+            m_major, m_minor, m_build, d_major, d_minor, d_build
+        );
     }
-
-    let mut rtc = PCF8563::new(i2c);
-
-    // Set the time on the RTC.
-    // let now = DateTime {
-    //     year: 23,   // 2023
-    //     month: 10,  // Oct
-    //     weekday: 4, // Thursday
-    //     day: 4,
-    //     hours: 3,
-    //     minutes: 0,
-    //     seconds: 0,
-    // };
-    // // set date and time in one go
-    // rtc.set_datetime(&now).unwrap();
-    // let now = rtc.get_datetime().unwrap();
-    // info!("Set DateTime {}", now.day);
-    //let i2c_poll_counter = 0;
+    info!("Radiometry enabled? {}", radiometric_mode);
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
@@ -211,43 +256,12 @@ fn main() -> ! {
                 frame_buffer_local_2,
                 system_clock_freq,
                 pins,
-                &mut rtc,
+                i2c1,
+                lepton_serial,
             )
         });
     }
 
-    let mut delay = Delay::new(core.SYST, system_clock_freq);
-
-    let lepton_pins = LeptonPins {
-        tx: pins.gpio23.into_function(),
-        rx: pins.gpio20.into_function(),
-        clk: pins.gpio22.into_function(),
-        cs: pins.gpio21.into_function(),
-
-        vsync: pins.gpio19.into_function(),
-
-        sda: pins.gpio24.into_function(),
-        scl: pins.gpio25.into_function(),
-
-        power_down: pins.gpio28.into_push_pull_output(),
-        power_enable: pins.gpio18.into_push_pull_output(),
-        reset: pins.gpio29.into_push_pull_output(),
-        clk_disable: pins.gpio27.into_push_pull_output(),
-        master_clk: pins.gpio26.into_floating_input(),
-    };
-    let mut lepton = init_lepton_module(
-        peripherals.SPI0,
-        peripherals.I2C0,
-        system_clock_freq,
-        &mut peripherals.RESETS,
-        &mut delay,
-        lepton_pins,
-    );
-
-    //let mut wake_interrupt_pin = pins.gpio4.into_floating_input();
-
-    let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
-    info!("Radiometry enabled? {}", radiometric_mode);
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
     sio.fifo

@@ -1,3 +1,4 @@
+use crate::byte_slice_cursor::{Cursor, CursorMut};
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -6,6 +7,7 @@ use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use byteorder::{ByteOrder, LittleEndian};
+use core::fmt::Write;
 use core::mem;
 use core::ops::{Index, IndexMut};
 use defmt::info;
@@ -405,6 +407,7 @@ impl<'a> CptvStream<'a> {
     pub fn new(
         current_time: u64,
         lepton_version: u8,
+        lepton_serial: Option<u64>,
         device_config: &DeviceConfig,
         flash_storage: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
@@ -413,7 +416,8 @@ impl<'a> CptvStream<'a> {
         let starting_block_index = flash_storage.start_file();
 
         // Camera serial, camera firmware, location_altitude, location_timestamp, location_accuracy
-        let cptv_header = Cptv2Header::new(current_time, lepton_version, device_config);
+        let cptv_header =
+            Cptv2Header::new(current_time, lepton_version, lepton_serial, device_config);
         CptvStream {
             cursor: BitCursor::new(),
             crc_table,
@@ -774,7 +778,7 @@ pub struct Cptv2Header {
     pub device_name: [u8; 63],
     pub model: [u8; 20],
     pub device_id: u32,
-    pub serial_number: Option<u32>,
+    pub serial_number: Option<[u8; 20]>,
     pub firmware_version: Option<[u8; 20]>,
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
@@ -788,17 +792,33 @@ pub struct Cptv2Header {
 }
 
 impl Cptv2Header {
-    pub fn new(timestamp: u64, lepton_version: u8, device_config: &DeviceConfig) -> Cptv2Header {
+    pub fn new(
+        timestamp: u64,
+        lepton_version: u8,
+        lepton_serial: Option<u64>,
+        device_config: &DeviceConfig,
+    ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
+        let mut buf = [0u8; 20];
+        let length = if let Some(serial) = lepton_serial {
+            info!("Writing serial {}", serial);
+            let mut cursor = CursorMut::new(&mut buf[1..]);
+            write!(&mut cursor, "{}", serial).expect("Should write serial");
+            cursor.position()
+        } else {
+            0
+        };
+        info!("Serial {:?}", buf);
+
         let (lat, lng) = device_config.location;
         let mut header = Cptv2Header {
             timestamp,
             device_name: [0; 63],
             model: [0; 20],
             device_id: device_config.device_id,
-            serial_number: None,
+            serial_number: Some(buf),
             firmware_version: None,
             latitude: Some(lat),
             longitude: Some(lng),

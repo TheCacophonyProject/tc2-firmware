@@ -194,6 +194,7 @@ pub fn track_motion(
         }
     }
 
+    // TODO: Figure out what to do here if we're not actually in the recording window.
     if let Some(prev_frame_stats) = &prev_frame_stats {
         // If we're no longer triggering, maybe start decrementing a timeout to stop recording.
         if !motion_tracking.is_triggering() {

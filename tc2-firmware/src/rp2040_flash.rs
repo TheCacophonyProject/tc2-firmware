@@ -38,8 +38,8 @@ pub fn write_rp2040_flash(data: &[u8]) {
     defmt::println!("write_flash() Complete"); // TEMP
 }
 
-pub fn read_rp2040_flash() -> &'static [u8] {
-    let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
-    let my_slice = unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) };
+pub fn read_rp2040_flash() -> &'static mut [u8] {
+    let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *mut u8;
+    let my_slice = unsafe { slice::from_raw_parts_mut(addr, FLASH_USER_SIZE as usize) };
     my_slice
 }

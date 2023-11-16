@@ -1,9 +1,11 @@
+use crate::byte_slice_cursor::Cursor;
+use crate::rp2040_flash::read_rp2040_flash;
 use crate::sun_times::sun_times;
-use byteorder::{ByteOrder, LittleEndian};
-use chrono::{Days, NaiveDateTime, NaiveTime};
-use core::ops::{Add, Sub};
+use chrono::{NaiveDateTime, NaiveTime};
+use core::ops::Add;
 use defmt::{info, Format};
-use fugit::Duration;
+use embedded_io::Read;
+use pcf8563::DateTime;
 
 #[derive(Format, PartialEq)]
 pub struct DeviceConfig {
@@ -16,52 +18,51 @@ pub struct DeviceConfig {
     start_recording_time: (bool, i32),
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
+    pub use_low_power_mode: bool,
 }
 
 impl DeviceConfig {
-    pub fn from_bytes(bytes: &[u8]) -> (DeviceConfig, usize) {
-        let device_id = LittleEndian::read_u32(&bytes[0..4]);
-        let latitude = LittleEndian::read_f32(&bytes[4..8]);
-        let longitude = LittleEndian::read_f32(&bytes[8..12]);
-        let location_timestamp = if bytes[12] == 1 {
-            Some(LittleEndian::read_u64(&bytes[13..21]))
-        } else {
-            None
-        };
-        let location_altitude = if bytes[21] == 1 {
-            Some(LittleEndian::read_f32(&bytes[22..26]))
-        } else {
-            None
-        };
-        let location_accuracy = if bytes[26] == 1 {
-            Some(LittleEndian::read_f32(&bytes[27..31]))
-        } else {
-            None
-        };
-        let start_recording_time = if bytes[31] == 1 {
-            (true, LittleEndian::read_i32(&bytes[32..36]))
-        } else {
-            (false, LittleEndian::read_i32(&bytes[32..36]))
-        };
-        let end_recording_time = if bytes[36] == 1 {
-            (true, LittleEndian::read_i32(&bytes[37..41]))
-        } else {
-            (false, LittleEndian::read_i32(&bytes[37..41]))
-        };
-        let is_continuous_recorder = bytes[41] == 1;
-        let device_name_length = bytes[42] as usize;
+    pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
+        let slice = read_rp2040_flash();
+        let (device_config, _) = DeviceConfig::from_bytes(slice);
+        device_config
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> (Option<DeviceConfig>, usize) {
+        let mut cursor = Cursor::new(bytes);
+        let device_id = cursor.read_u32();
+        if device_id == u32::MAX {
+            // Device config is uninitialised in flash
+            return (None, 0);
+        }
+        let latitude = cursor.read_f32();
+        let longitude = cursor.read_f32();
+        let has_location_timestamp = cursor.read_bool();
+        let location_timestamp = cursor.read_u64();
+        let location_timestamp = has_location_timestamp.then_some(location_timestamp);
+        let has_location_altitude = cursor.read_bool();
+        let location_altitude = cursor.read_f32();
+        let location_altitude = has_location_altitude.then_some(location_altitude);
+        let has_location_accuracy = cursor.read_bool();
+        let location_accuracy = cursor.read_f32();
+        let location_accuracy = has_location_accuracy.then_some(location_accuracy);
+        let start_recording_time = (cursor.read_bool(), cursor.read_i32());
+        let end_recording_time = (cursor.read_bool(), cursor.read_i32());
+        let is_continuous_recorder = cursor.read_bool();
+        let use_low_power_mode = cursor.read_bool();
+        let device_name_length = cursor.read_u8() as usize;
         let mut device_name = [0u8; 64];
-        let device_name = if device_name_length == 255 {
-            // Flash hasn't been written yet;
-            device_name
-        } else {
-            device_name[0..device_name_length + 1]
-                .copy_from_slice(&bytes[42..(42 + device_name_length + 1).min(bytes.len())]);
+        device_name[0] = device_name_length as u8;
+        let len = device_name.len();
+        let device_name = {
+            cursor
+                .read(&mut device_name[1..(device_name_length + 1).min(len)])
+                .unwrap();
             device_name
         };
 
         (
-            DeviceConfig {
+            Some(DeviceConfig {
                 device_id,
                 device_name,
                 location: (latitude, longitude),
@@ -71,14 +72,16 @@ impl DeviceConfig {
                 start_recording_time,
                 end_recording_time,
                 is_continuous_recorder,
-            },
-            (41 + device_name_length + 1).min(bytes.len()),
+                use_low_power_mode,
+            }),
+            cursor.position(),
         )
     }
 
     pub fn device_name(&self) -> &str {
         let len = self.device_name[0] as usize;
-        core::str::from_utf8(&self.device_name[1..1 + len]).unwrap()
+        let slice_len = self.device_name.len();
+        core::str::from_utf8(&self.device_name[1..(1 + len).min(slice_len)]).unwrap()
     }
 
     pub fn device_name_bytes(&self) -> &[u8] {
@@ -92,10 +95,10 @@ impl DeviceConfig {
         }
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
-        if end_offset < 0 {
+        if is_absolute_end && end_offset < 0 {
             end_offset = 86_400 + end_offset;
         }
-        if start_offset < 0 {
+        if is_absolute_start && start_offset < 0 {
             start_offset = 86_400 + start_offset;
         }
         let (sunrise, sunset) = if !is_absolute_start || !is_absolute_end {
@@ -116,7 +119,7 @@ impl DeviceConfig {
             (None, None)
         };
 
-        let mut start_time = if !is_absolute_start {
+        let start_time = if !is_absolute_start {
             sunset
                 .unwrap()
                 .naive_utc()
@@ -144,30 +147,48 @@ impl DeviceConfig {
         if end_time < start_time {
             end_time = end_time.add(chrono::Duration::days(1));
         }
-        info!(
-            "Start time {}, end time {}",
-            start_time.timestamp(),
-            end_time.timestamp()
-        );
-        if start_time > *date_time_utc {
+        let starts_in = start_time - *date_time_utc;
+        let starts_in_hours = starts_in.num_hours();
+        let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
+        let ends_in = end_time - *date_time_utc;
+        let ends_in_hours = ends_in.num_hours();
+        let ends_in_mins = ends_in.num_minutes() - (ends_in_hours * 60);
+        let window = end_time - start_time;
+        let window_hours = window.num_hours();
+        let window_mins = window.num_minutes() - (window_hours * 60);
+        if start_time > *date_time_utc && end_time > *date_time_utc {
             info!(
-                "Recording will start in {}h{}m",
-                (start_time - *date_time_utc).num_hours(),
-                (start_time - *date_time_utc).num_minutes()
+                "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
+                starts_in_hours,
+                starts_in_mins,
+                ends_in_hours,
+                ends_in_mins,
+                window_hours,
+                window_mins
+            );
+        } else if end_time > *date_time_utc {
+            info!(
+                "Recording will end in {}h{}m, window duration {}h{}m",
+                ends_in_hours, ends_in_mins, window_hours, window_mins
             );
         }
-        if end_time > *date_time_utc {
-            info!(
-                "Recording will end in {}h{}m",
-                (end_time - *date_time_utc).num_hours(),
-                (end_time - *date_time_utc).num_minutes()
-            );
-        }
-        info!(
-            "Recording window duration {}h{}m",
-            (end_time - start_time).num_hours(),
-            (end_time - start_time).num_minutes()
-        );
         *date_time_utc > start_time && *date_time_utc < end_time
     }
+}
+
+pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
+    let naive_date = chrono::NaiveDate::from_ymd_opt(
+        2000 + datetime.year as i32,
+        datetime.month as u32,
+        datetime.day as u32,
+    )
+    .unwrap();
+    let naive_time = chrono::NaiveTime::from_hms_opt(
+        datetime.hours as u32,
+        datetime.minutes as u32,
+        datetime.seconds as u32,
+    )
+    .unwrap();
+    let naive_datetime = chrono::NaiveDateTime::new(naive_date, naive_time);
+    naive_datetime
 }

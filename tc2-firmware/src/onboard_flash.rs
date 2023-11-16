@@ -445,11 +445,14 @@ impl OnboardFlash {
 
     pub fn has_files_to_offload(&self) -> bool {
         // When we did our initial scan, did we encounter any used blocks?
-        info!(
-            "First used block {:?}, last used {:?}",
-            self.first_used_block_index, self.last_used_block_index
-        );
-        self.first_used_block_index.is_some()
+        let has_files = self.first_used_block_index.is_some();
+        if has_files {
+            info!(
+                "First used block {:?}, last used {:?}",
+                self.first_used_block_index, self.last_used_block_index
+            );
+        }
+        has_files
     }
 
     fn advance_file_cursor(&mut self, is_last: bool) {
@@ -514,15 +517,19 @@ impl OnboardFlash {
         }
     }
 
-    pub fn free_spi(&mut self) -> SPI1 {
-        let spi_enabled = self.spi.take().unwrap();
-        let spi_disabled = spi_enabled.disable();
-        let (spi, (mosi, miso, clk)) = spi_disabled.free();
-        self.mosi_disabled = Some(mosi.into_pull_down_disabled().into_pull_type());
-        self.clk_disabled = Some(clk.into_pull_down_disabled().into_pull_type());
-        self.miso_disabled = Some(miso.into_pull_down_disabled().into_pull_type());
+    pub fn free_spi(&mut self) -> Option<SPI1> {
+        if self.spi.is_some() {
+            let spi_enabled = self.spi.take().unwrap();
+            let spi_disabled = spi_enabled.disable();
+            let (spi, (mosi, miso, clk)) = spi_disabled.free();
+            self.mosi_disabled = Some(mosi.into_pull_down_disabled().into_pull_type());
+            self.clk_disabled = Some(clk.into_pull_down_disabled().into_pull_type());
+            self.miso_disabled = Some(miso.into_pull_down_disabled().into_pull_type());
 
-        spi
+            Some(spi)
+        } else {
+            None
+        }
     }
     pub fn get_file_part(&mut self) -> Option<((&[u8], u16, isize, isize), bool, SPI1)> {
         // TODO: Could interleave using cache_random_read
@@ -546,7 +553,7 @@ impl OnboardFlash {
                 //     is_last_page_for_file
                 // );
                 self.advance_file_cursor(is_last_page_for_file);
-                let spi = self.free_spi();
+                let spi = self.free_spi().unwrap();
                 Some((
                     (
                         &self.current_page.user_data()[0..length],

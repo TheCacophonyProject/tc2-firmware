@@ -85,6 +85,7 @@ const LEPTON_RAD_ENABLE_STATE: LeptonCommand = (0x0010, 2);
 const LEPTON_RAD_TLINEAR_ENABLE_STATE: LeptonCommand = (0x00C0, 2);
 const LEPTON_OEM_REBOOT: LeptonCommand = (0x0040, 0);
 const LEPTON_OEM_BAD_PIXEL_REPLACEMENT: LeptonCommand = (0x006C, 2);
+const LEPTON_OEM_CAMERA_SOFTWARE_REVISION: LeptonCommand = (0x0020, 4);
 const LEPTON_OEM_TEMPORAL_FILTER: LeptonCommand = (0x0070, 2);
 const LEPTON_OEM_COLUMN_NOISE_FILTER: LeptonCommand = (0x0074, 2);
 const LEPTON_OEM_PIXEL_NOISE_FILTER: LeptonCommand = (0x0078, 2);
@@ -550,10 +551,50 @@ impl LeptonModule {
         }
     }
 
+    pub fn get_camera_serial(&mut self) -> Result<u64, LeptonError> {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SYS_GET_SERIAL,
+            LeptonCommandType::Get,
+            false,
+        )) {
+            Ok((serial, length)) => {
+                let serial = LittleEndian::read_u64(&serial[..((length * 2) as usize)]);
+                Ok(serial)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn get_firmware_version(&mut self) -> Result<((u8, u8, u8), (u8, u8, u8)), LeptonError> {
+        match self.get_attribute(lepton_command(
+            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_OEM_CAMERA_SOFTWARE_REVISION,
+            LeptonCommandType::Get,
+            true,
+        )) {
+            Ok((firmware_version, length)) => {
+                let firmware_version = &firmware_version[..((length * 2) as usize)];
+                let gpp_major = firmware_version[0];
+                let gpp_minor = firmware_version[1];
+                let gpp_build = firmware_version[2];
+
+                let dsp_major = firmware_version[0];
+                let dsp_minor = firmware_version[1];
+                let dsp_build = firmware_version[2];
+                Ok((
+                    (gpp_major, gpp_minor, gpp_build),
+                    (dsp_major, dsp_minor, dsp_build),
+                ))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn telemetry_location(&mut self) -> Result<TelemetryLocation, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
-            LEPTON_SYS_STATS,
+            LEPTON_SYS_TELEMETRY_LOCATION,
             LeptonCommandType::Get,
             false,
         )) {
@@ -664,7 +705,7 @@ impl LeptonModule {
     pub fn telemetry_enabled(&mut self) -> Result<bool, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
-            LEPTON_SYS_TELEMETRY_LOCATION,
+            LEPTON_SYS_TELEMETRY_ENABLE_STATE,
             LeptonCommandType::Get,
             false,
         )) {
