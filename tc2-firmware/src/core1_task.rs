@@ -442,16 +442,17 @@ pub fn core_1_task(
             pi_spi.enable_pio_spi();
         }
         // Transfer RAW frame to pi if it is available.
-        let transfer = pi_spi.begin_message(
-            ExtTransferMessage::CameraRawFrameTransfer,
-            &mut thread_local_frame_buffer
-                .as_mut()
-                .unwrap()
-                .as_u8_slice_mut(),
-            0,
-            cptv_stream.is_some(),
-            &mut peripherals.DMA,
-        );
+        // let transfer = pi_spi.begin_message(
+        //     ExtTransferMessage::CameraRawFrameTransfer,
+        //     &mut thread_local_frame_buffer
+        //         .as_mut()
+        //         .unwrap()
+        //         .as_u8_slice_mut(),
+        //     0,
+        //     cptv_stream.is_some(),
+        //     &mut peripherals.DMA,
+        // );
+        let transfer = None;
         let frame_buffer = &mut thread_local_frame_buffer
             .as_mut()
             .unwrap()
