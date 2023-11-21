@@ -1,4 +1,4 @@
-use crate::byte_slice_cursor::{Cursor, CursorMut};
+use crate::byte_slice_cursor::CursorMut;
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};

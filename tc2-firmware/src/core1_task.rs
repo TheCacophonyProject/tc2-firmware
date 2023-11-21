@@ -219,7 +219,7 @@ fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let crc = crc_check.checksum(&payload);
-            //info!("Sending camera connect info {:?}", payload);
+            // info!("Sending camera connect info {:?}", payload);
             pi_spi.send_message(ExtTransferMessage::CameraConnectInfo, &payload, crc, dma);
             let device_config = pi_spi.return_payload().unwrap();
             // Skip 4 bytes of CRC checking
@@ -397,7 +397,6 @@ pub fn core_1_task(
     let mut motion_detection: Option<MotionTracking> = None;
 
     // TODO: If flash storage is full, don't record.
-
     loop {
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
@@ -597,9 +596,13 @@ pub fn core_1_task(
         frames_seen += 1;
         // Check if we need to trigger:  Mostly at the moment we want to see what frame data
         // structures can be shared with encoding.
-        if let Some((transfer, transfer_end_address)) = transfer {
-            let did_abort_transfer =
-                pi_spi.end_message(&mut peripherals.DMA, transfer_end_address, transfer);
+        if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
+            let did_abort_transfer = pi_spi.end_message(
+                &mut peripherals.DMA,
+                transfer_end_address,
+                transfer_start_address,
+                transfer,
+            );
             if did_abort_transfer {
                 raspberry_pi_is_awake = shared_i2c
                     .pi_is_awake_and_tc2_agent_is_ready(&mut delay, false)
@@ -607,6 +610,10 @@ pub fn core_1_task(
                 if !raspberry_pi_is_awake {
                     info!("Transfer aborted, pi must be asleep");
                     pi_spi.disable_pio_spi();
+                } else {
+                    // If we aborted, let's try to reset the PIO program.
+                    pi_spi.disable_pio_spi();
+                    pi_spi.enable_pio_spi();
                 }
             }
         }

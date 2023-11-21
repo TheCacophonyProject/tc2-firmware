@@ -3,6 +3,8 @@
 ; gpio 13: cs
 ; gpio 14: clk
 ; wait for enable (Cs goes low)
+flush:
+    jmp x-- flush
 wait_falling:
     wait 0 gpio 13
 .wrap_target

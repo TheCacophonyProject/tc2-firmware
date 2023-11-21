@@ -1,6 +1,5 @@
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt;
-use core::fmt::Arguments;
 use embedded_io::{ErrorType, Read, ReadExactError};
 
 pub struct Cursor<'a> {
