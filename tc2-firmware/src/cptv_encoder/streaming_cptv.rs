@@ -1,4 +1,3 @@
-use crate::byte_slice_cursor::CursorMut;
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -7,13 +6,12 @@ use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use byteorder::{ByteOrder, LittleEndian};
-use core::fmt::Write;
 use core::mem;
 use core::ops::{Index, IndexMut};
-use defmt::info;
+use defmt::{info, Format};
 
 #[repr(u8)]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Format)]
 pub enum FieldType {
     // K remaining
     Header = b'H',
@@ -349,6 +347,7 @@ fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
     } else {
         size as u8
     };
+    // TODO: Maybe allow longer deviceName strings than 20 chars?
     assert!(size <= 20);
     let mut iter_state = FieldIterator {
         state: [0u8; 20],
@@ -407,7 +406,7 @@ impl<'a> CptvStream<'a> {
     pub fn new(
         current_time: u64,
         lepton_version: u8,
-        lepton_serial: Option<u64>,
+        lepton_serial: Option<u32>,
         device_config: &DeviceConfig,
         flash_storage: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
@@ -659,24 +658,7 @@ pub fn frame_header_iter<'a>(frame_header: &'a CptvFrameHeader) -> impl Iterator
 
 fn push_optional_field_iterator<T: Sized>(value: &Option<T>, code: FieldType) -> FieldIterator {
     if let Some(value) = value {
-        let size = mem::size_of_val(value);
-        let size = if size == 257 {
-            // This is a string
-            unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size)[size - 1] }
-        } else {
-            size as u8
-        };
-        assert!(size <= 20);
-        let mut iter_state = FieldIterator {
-            state: [0u8; 20],
-            size,
-            code: code as u8,
-            cursor: 0,
-        };
-        iter_state.state[0..size as usize].copy_from_slice(unsafe {
-            core::slice::from_raw_parts(value as *const T as *const u8, size as usize)
-        });
-        iter_state
+        push_field_iterator(value, code)
     } else {
         FieldIterator {
             state: [0u8; 20],
@@ -778,7 +760,7 @@ pub struct Cptv2Header {
     pub device_name: [u8; 63],
     pub model: [u8; 20],
     pub device_id: u32,
-    pub serial_number: Option<[u8; 20]>,
+    pub serial_number: Option<u32>,
     pub firmware_version: Option<[u8; 20]>,
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
@@ -795,22 +777,12 @@ impl Cptv2Header {
     pub fn new(
         timestamp: u64,
         lepton_version: u8,
-        lepton_serial: Option<u64>,
+        lepton_serial: Option<u32>,
         device_config: &DeviceConfig,
     ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
-        let mut buf = [0u8; 20];
-        let length = if let Some(serial) = lepton_serial {
-            info!("Writing serial {}", serial);
-            let mut cursor = CursorMut::new(&mut buf[1..]);
-            write!(&mut cursor, "{}", serial).expect("Should write serial");
-            cursor.position()
-        } else {
-            0
-        };
-        info!("Serial {:?}", buf);
 
         let (lat, lng) = device_config.location;
         let mut header = Cptv2Header {
@@ -818,7 +790,7 @@ impl Cptv2Header {
             device_name: [0; 63],
             model: [0; 20],
             device_id: device_config.device_id,
-            serial_number: Some(buf),
+            serial_number: lepton_serial,
             firmware_version: None,
             latitude: Some(lat),
             longitude: Some(lng),

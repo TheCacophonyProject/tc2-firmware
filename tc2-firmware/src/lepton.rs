@@ -551,7 +551,7 @@ impl LeptonModule {
         }
     }
 
-    pub fn get_camera_serial(&mut self) -> Result<u64, LeptonError> {
+    pub fn get_camera_serial(&mut self) -> Result<u32, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
             LEPTON_SYS_GET_SERIAL,
@@ -560,7 +560,8 @@ impl LeptonModule {
         )) {
             Ok((serial, length)) => {
                 let serial = LittleEndian::read_u64(&serial[..((length * 2) as usize)]);
-                Ok(serial)
+                // In practice, we hope serial numbers are less than 32bits.
+                Ok(serial as u32)
             }
             Err(err) => Err(err),
         }

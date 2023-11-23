@@ -1,4 +1,5 @@
 use crate::bsp::pac::I2C1;
+use chrono::{Datelike, NaiveDateTime, Timelike};
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn, Format};
 use embedded_hal::prelude::{
@@ -85,7 +86,7 @@ impl SharedI2C {
                 version => {
                     error!(
                         "Mismatched Attiny firmware version – expected {}, got {}",
-                        5, version
+                        6, version
                     );
                 }
             },
@@ -216,7 +217,7 @@ impl SharedI2C {
     }
 
     pub fn tell_pi_to_shutdown(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        self.try_attiny_write_command(REG_TRIGGER_SLEEP, 0x02, delay)
+        self.try_attiny_write_command(REG_TRIGGER_SLEEP, 0x01, delay)
     }
 
     pub fn tell_pi_to_wakeup(&mut self, delay: &mut Delay) -> Result<(), Error> {
@@ -228,6 +229,8 @@ impl SharedI2C {
         delay: &mut Delay,
         print: bool,
     ) -> Result<bool, Error> {
+        return Ok(true);
+
         let mut recorded_camera_state = None;
         let pi_is_awake = match self.try_attiny_read_command(REG_CAMERA_STATE, delay) {
             Ok(state) => {
@@ -303,5 +306,77 @@ impl SharedI2C {
                 }
             }
         }
+    }
+
+    pub fn set_current_time(&mut self) {
+        let date_time = DateTime {
+            year: 23,
+            month: 11,
+            weekday: 3,
+            day: 22,
+            hours: 21,
+            minutes: 10,
+            seconds: 0,
+        };
+        self.rtc().set_datetime(&date_time).unwrap();
+    }
+
+    pub fn set_wakeup_alarm(
+        &mut self,
+        datetime_utc: &NaiveDateTime,
+        delay: &mut Delay,
+    ) -> Result<(), Error> {
+        let wake_hour = datetime_utc.time().hour();
+        let wake_min = datetime_utc.time().minute();
+        info!("Setting wake alarm for {}h:{}m", wake_hour, wake_min);
+        let mut num_attempts = 0;
+        loop {
+            match self.rtc().set_alarm_hours(wake_hour as u8) {
+                Ok(_) => {
+                    num_attempts = 0;
+                    loop {
+                        match self.rtc().set_alarm_minutes(wake_min as u8) {
+                            Ok(_) => return Ok(()),
+                            Err(pcf8563::Error::I2C(e)) => {
+                                if num_attempts == 100 {
+                                    return Err(e);
+                                }
+                                num_attempts += 1;
+                                delay.delay_us(500);
+                            }
+                            Err(pcf8563::Error::InvalidInputData) => {
+                                unreachable!("Should never get here")
+                            }
+                        }
+                    }
+                }
+                Err(pcf8563::Error::I2C(e)) => {
+                    if num_attempts == 100 {
+                        return Err(e);
+                    }
+                    num_attempts += 1;
+                    delay.delay_us(500);
+                }
+                Err(pcf8563::Error::InvalidInputData) => {
+                    unreachable!("Should never get here")
+                }
+            }
+        }
+    }
+
+    pub fn alarm_triggered(&mut self) -> bool {
+        self.rtc().get_alarm_flag().unwrap_or(false)
+    }
+
+    pub fn clear_alarm(&mut self) -> () {
+        self.rtc().clear_alarm_flag().unwrap_or(())
+    }
+
+    pub fn alarm_interrupt_enabled(&mut self) -> bool {
+        self.rtc().is_alarm_interrupt_enabled().unwrap_or(false)
+    }
+
+    pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.try_attiny_write_command(REG_TRIGGER_SLEEP, 0x02, delay)
     }
 }

@@ -116,7 +116,7 @@ pub fn frame_acquisition_loop(
 
             // FIXME - Whenever recording starts, we lose a frame here.  Let's just use a bit more power
             //  for now until we figure out how to fix this.
-            rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
+            //rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {

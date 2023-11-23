@@ -58,26 +58,31 @@ const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
-pub struct FrameBuffer([u8; 18 + 8 + (160 * 61 * 4) + 2]);
+const TRANSFER_HEADER_LENGTH: usize = 18;
+pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
     pub const fn new() -> FrameBuffer {
         // NOTE: Put an 18 byte padding at the start, and a 2 byte padding at the end, to make it 32bit aligned
-        FrameBuffer([0u8; 18 + 8 + (160 * 61 * 4) + 2])
+        FrameBuffer([0u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2])
     }
 
     pub fn as_u8_slice(&self) -> &[u8] {
-        &self.0[18 + 8..18 + 8 + 39040]
+        &self.0[TRANSFER_HEADER_LENGTH..TRANSFER_HEADER_LENGTH + 39040]
     }
 
     pub fn as_u8_slice_mut(&mut self) -> &mut [u8] {
         &mut self.0
     }
 
+    pub fn frame_data_as_u8_slice_mut(&mut self) -> &mut [u8] {
+        &mut self.0[TRANSFER_HEADER_LENGTH..TRANSFER_HEADER_LENGTH + 39040]
+    }
+
     pub fn packet(&mut self, segment: usize, packet_id: usize) -> &mut [u8] {
         let segment_offset = FRAME_WIDTH * 61 * segment;
         let packet_offset = FRAME_WIDTH * packet_id;
-        &mut self.0[18 + 8..]
+        &mut self.0[TRANSFER_HEADER_LENGTH..]
             [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
     }
 }

@@ -89,10 +89,11 @@ impl DeviceConfig {
         &self.device_name[1..1 + len]
     }
 
-    pub fn time_is_in_recording_window(&self, date_time_utc: &NaiveDateTime) -> bool {
-        if self.is_continuous_recorder {
-            return true;
-        }
+    pub fn next_recording_window_start(&self, now_utc: &NaiveDateTime) -> NaiveDateTime {
+        self.next_recording_window(now_utc).0
+    }
+
+    pub fn next_recording_window(&self, now_utc: &NaiveDateTime) -> (NaiveDateTime, NaiveDateTime) {
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
         if is_absolute_end && end_offset < 0 {
@@ -105,7 +106,7 @@ impl DeviceConfig {
             let (lat, lng) = self.location;
             let altitude = self.location_altitude;
             let (mut sunrise, sunset) = sun_times(
-                date_time_utc.date(),
+                now_utc.date(),
                 lat as f64,
                 lng as f64,
                 altitude.unwrap_or(0.0) as f64,
@@ -127,7 +128,7 @@ impl DeviceConfig {
                 .unwrap()
         } else {
             NaiveDateTime::new(
-                date_time_utc.date(),
+                now_utc.date(),
                 NaiveTime::from_num_seconds_from_midnight_opt(start_offset as u32, 0).unwrap(),
             )
         };
@@ -139,14 +140,24 @@ impl DeviceConfig {
                 .unwrap()
         } else {
             NaiveDateTime::new(
-                date_time_utc.date(),
+                now_utc.date(),
                 NaiveTime::from_num_seconds_from_midnight_opt(end_offset as u32, 0).unwrap(),
             )
         };
 
+        // FIXME: Sometimes wrong for absolute windows?
+
         if end_time < start_time {
             end_time = end_time.add(chrono::Duration::days(1));
         }
+        (start_time, end_time)
+    }
+
+    pub fn time_is_in_recording_window(&self, date_time_utc: &NaiveDateTime) -> bool {
+        if self.is_continuous_recorder {
+            return true;
+        }
+        let (start_time, end_time) = self.next_recording_window(date_time_utc);
         let starts_in = start_time - *date_time_utc;
         let starts_in_hours = starts_in.num_hours();
         let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);

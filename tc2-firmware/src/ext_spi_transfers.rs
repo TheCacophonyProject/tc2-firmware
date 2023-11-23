@@ -55,7 +55,7 @@ pub struct ExtSpiTransfers {
 
     ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
     dma_channel_0: Option<Channel<CH0>>,
-    payload_buffer: Option<&'static mut [u8; 2074]>,
+    payload_buffer: Option<&'static mut [u8; 2066]>,
     return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
     return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,
@@ -72,7 +72,7 @@ impl ExtSpiTransfers {
         miso: Pin<Gpio15, FunctionNull, PullNone>,
         ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
         dma_channel_0: Channel<CH0>,
-        payload_buffer: &'static mut [u8; 2074],
+        payload_buffer: &'static mut [u8; 2066],
         return_payload_buffer: &'static mut [u8; 32 + 104],
         pio: PIO<PIO0>,
         state_machine_0_uninit: UninitStateMachine<(PIO0, SM0)>,
@@ -242,7 +242,6 @@ impl ExtSpiTransfers {
 
     pub fn enable_pio_spi(&mut self) {
         if self.pio_tx.is_none() {
-            //info!("Enable pio spi");
             self.miso_pio = Some(
                 self.miso_disabled
                     .take()
@@ -286,7 +285,6 @@ impl ExtSpiTransfers {
 
     pub fn disable_pio_spi(&mut self) {
         if self.pio_tx.is_some() {
-            //info!("Disable pio spi");
             let (sm, rx) = self.state_machine_0_running.take().unwrap();
             let tx = self.pio_tx.take().unwrap();
             let (sm, program) = sm.uninit(rx, tx);
@@ -339,14 +337,14 @@ impl ExtSpiTransfers {
         LittleEndian::write_u16(&mut transfer_header[12..14], crc);
         LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
         LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
-        // info!("Writing header {}", &transfer_header);
+        //info!("Writing header {}", &transfer_header);
         let start_offset = 0;
         //self.payload_buffer.as_mut().unwrap()[0..8].copy_from_slice(&[0, 0, 0, 0, 1, 2, 3, 4]);
 
         self.payload_buffer.as_mut().unwrap()[start_offset..start_offset + transfer_header.len()]
             .copy_from_slice(&transfer_header);
-        self.payload_buffer.as_mut().unwrap()[start_offset + transfer_header.len() + 8
-            ..start_offset + transfer_header.len() + payload.len() + 8]
+        self.payload_buffer.as_mut().unwrap()[start_offset + transfer_header.len()
+            ..start_offset + transfer_header.len() + payload.len()]
             .copy_from_slice(&payload);
 
         let mut transmit_success = false;
@@ -366,11 +364,10 @@ impl ExtSpiTransfers {
                 //     transfer_read_address,
                 //     transfer_read_address + length + header_len
                 // );
-                maybe_abort_dma_transfer(
+                maybe_abort_dma_transfer_old(
                     dma_peripheral,
-                    DMA_CHANNEL_NUM,
+                    DMA_CHANNEL_NUM as u32,
                     transfer_read_address + length + header_len,
-                    transfer_read_address,
                 );
                 //info!("Await transfer to {}", transfer_read_address + length);
                 let (r_ch0, r_buf, spi) = transfer.wait();
@@ -417,7 +414,6 @@ impl ExtSpiTransfers {
                             let crc_from_remote_dup =
                                 LittleEndian::read_u16(&r_buf[start + 6..start + 8]);
                             if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc {
-                                info!("CONNECT Success!, {}, {}", crc_from_remote, crc);
                                 transmit_success = true;
                                 if message_type == ExtTransferMessage::CameraConnectInfo {
                                     // We also expect to get a bunch of device config handshake info:
@@ -457,17 +453,6 @@ impl ExtSpiTransfers {
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.spi.as_mut().unwrap().write(bytes).unwrap()
-    }
-
-    pub fn flush(&mut self) {
-        // while !self.is_empty() {
-        //     let b = self.read_byte();
-        // }
-        //self.spi.as_mut().unwrap().flush().unwrap();
-
-        //&mut hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>
-
-        //Option<hal::Spi<hal::spi::Enabled, SPI1, (hal::gpio::Pin<Gpio15, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio12, FunctionSpi, PullNone>, hal::gpio::Pin<Gpio14, FunctionSpi, PullNone>), 8>>::flush()
     }
 
     pub fn transfer<'a>(&mut self, bytes: &'a mut [u8]) -> &'a [u8] {
@@ -569,11 +554,11 @@ fn maybe_abort_dma_transfer(
         }
     }
     if needs_abort && dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {
-        info!(
-            "Aborting dma transfer at {}/{}",
-            prev_read_address - transfer_start_address,
-            transfer_end_address - transfer_start_address
-        );
+        // info!(
+        //     "Aborting dma transfer at {}/{}",
+        //     prev_read_address - transfer_start_address,
+        //     transfer_end_address - transfer_start_address
+        // );
         //info!("Aborting dma transfer");
         // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
         let inte0 = dma.inte0.read().bits();

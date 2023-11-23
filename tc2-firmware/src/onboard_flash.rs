@@ -478,6 +478,19 @@ impl OnboardFlash {
         self.current_block_index > (2048 - 256)
     }
 
+    pub fn erase_all_blocks(&mut self) {
+        for block_index in 0..2048 {
+            while self.bad_blocks.contains(&(block_index as i16)) {
+                info!("Skipping erase of bad block {}", block_index);
+                continue;
+            }
+            if !self.erase_block(block_index).is_ok() {
+                error!("Block erase failed for block {}", block_index);
+            }
+        }
+        self.scan();
+    }
+
     pub fn erase_all_good_used_blocks(&mut self) {
         for block_index in 0..2048isize {
             while self.bad_blocks.contains(&(block_index as i16)) {
