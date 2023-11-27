@@ -1,8 +1,8 @@
 use crate::bsp;
-use crate::bsp::pac::PIO1;
+use crate::bsp::pac::{DMA, PIO1};
 use fugit::HertzU32;
-use rp2040_hal::dma::Channel;
 use rp2040_hal::dma::{double_buffer, CH3, CH4};
+use rp2040_hal::dma::{single_buffer, Channel, Channels};
 use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMachine, PIO, SM1};
@@ -59,6 +59,8 @@ impl PdmMicrophone {
             pio,
             state_machine_1_uninit: Some(state_machine_1_uninit),
             current_recording: None,
+            dma_channel_0: None,
+            dma_channel_1: None,
         }
     }
 
@@ -124,12 +126,66 @@ impl PdmMicrophone {
     pub fn record_for_n_seconds(
         &mut self,
         num_seconds: u32,
-        buffers: (&mut &mut [u8], &mut &mut [u8]),
+        buffers: (
+            &mut &mut [u8],
+            &mut &mut [u8],
+            &mut &mut [u8],
+            &mut &mut [u8],
+        ),
+        dma: Channels,
     ) {
-        self.current_recording = Some(RecordingStatus {
+        let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
-        })
+        };
+        self.enable();
+        // Swap our buffers?
+
+        // Pull out more samples via dma double_buffering.
+        if let Some(pio_rx) = self.pio_rx.take() {
+            // Chain some buffers together for continuous transfers
+            let mut b_0 = buffers.0;
+            let mut b_1 = buffers.1;
+            let mut b_2 = buffers.2;
+            let rx_transfer = double_buffer::Config::new((dma.ch0, dma.ch1), pio_rx, b_0).start();
+            let mut rx_transfer = rx_transfer.write_next(b_1);
+
+            let mut cycle = 0;
+            loop {
+                // When a transfer is done we immediately enqueue the buffers again.
+                if rx_transfer.is_done() {
+                    let (rx_buf, next_rx_transfer) = rx_transfer.wait();
+                    // Take rx_buf that just finished transferring here, and write it to flash.  Provide another buffer
+                    // for the next initially b0
+                    let back = *rx_buf;
+                    *rx_buf = match cycle % 3 {
+                        0 => *b_2,
+                        1 => *b_1,
+                        2 => *b_0,
+                        _ => {
+                            unreachable!("mod 3")
+                        }
+                    };
+                    cycle += 1;
+                    current_recording.samples_taken += back.len();
+                    rx_transfer = next_rx_transfer.write_next(rx_buf);
+
+                    let tx_transfer = single_buffer::Config::new(&dma.ch2, back, spi).start();
+                    tx_transfer.wait();
+                    // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
+
+                    // Transfer back to flash.
+                    // Do we need to double buffer things to flash?
+                    // That would mean we'd want a quadruple buffer?
+                    if current_recording.is_complete() {
+                        break;
+                    }
+                }
+            }
+            // TODO: Uninstall pio_rx program etc.
+        }
+        // Put the pio_rx back?  I guess we can do work while the DMA transfer is happening, assuming we have enough time,
+        // Otherwise we may need to transfer the buffer/pointer to another thread for fs work to happen.
     }
 
     pub fn read_next_page(&mut self) -> (Option<PageBufferRef>, Option<DoublePageBuffer>) {

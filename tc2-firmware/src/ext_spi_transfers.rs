@@ -3,6 +3,7 @@ use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1};
 use crate::onboard_flash::extend_lifetime;
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
+use cortex_m::asm::nop;
 use defmt::{info, warn, Format};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
@@ -55,7 +56,7 @@ pub struct ExtSpiTransfers {
 
     ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
     dma_channel_0: Option<Channel<CH0>>,
-    payload_buffer: Option<&'static mut [u8; 2066]>,
+    payload_buffer: Option<&'static mut [u8; 2080]>,
     return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
     return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,
@@ -72,7 +73,7 @@ impl ExtSpiTransfers {
         miso: Pin<Gpio15, FunctionNull, PullNone>,
         ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
         dma_channel_0: Channel<CH0>,
-        payload_buffer: &'static mut [u8; 2066],
+        payload_buffer: &'static mut [u8; 2080],
         return_payload_buffer: &'static mut [u8; 32 + 104],
         pio: PIO<PIO0>,
         state_machine_0_uninit: UninitStateMachine<(PIO0, SM0)>,
@@ -175,11 +176,7 @@ impl ExtSpiTransfers {
             LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
             LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.reverse_bits());
             LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.reverse_bits());
-            //payload[0..8].copy_from_slice(&[0, 0, 0, 0, 1, 2, 3, 4]);
-            //info!("Transfer header {:?}", transfer_header);
-            let start_offset = 0;
-            payload[start_offset..start_offset + transfer_header.len()]
-                .copy_from_slice(&transfer_header);
+            payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
                 if !dma_peripheral.ch[DMA_CHANNEL_NUM]
@@ -337,14 +334,11 @@ impl ExtSpiTransfers {
         LittleEndian::write_u16(&mut transfer_header[12..14], crc);
         LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
         LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
-        //info!("Writing header {}", &transfer_header);
-        let start_offset = 0;
-        //self.payload_buffer.as_mut().unwrap()[0..8].copy_from_slice(&[0, 0, 0, 0, 1, 2, 3, 4]);
-
-        self.payload_buffer.as_mut().unwrap()[start_offset..start_offset + transfer_header.len()]
+        info!("Writing header {}", &transfer_header);
+        self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
             .copy_from_slice(&transfer_header);
-        self.payload_buffer.as_mut().unwrap()[start_offset + transfer_header.len()
-            ..start_offset + transfer_header.len() + payload.len()]
+        self.payload_buffer.as_mut().unwrap()
+            [transfer_header.len()..transfer_header.len() + payload.len()]
             .copy_from_slice(&payload);
 
         let mut transmit_success = false;
@@ -357,6 +351,8 @@ impl ExtSpiTransfers {
                     self.spi.take().unwrap(),
                 )
                 .start();
+
+                // FIXME: This could be a double buffer, with header then payload, rather than copying bytes.
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 self.ping.set_low().unwrap();
                 // info!(
@@ -497,12 +493,12 @@ fn maybe_abort_dma_transfer_old(dma: &mut DMA, channel: u32, add: u32) {
         prev_crc = crc;
     }
     if needs_abort && dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {
-        // info!(
-        //     "Aborting dma transfer at count {} of {}, dreq {}",
-        //     prev_count,
-        //     dma.ch0_dbg_tcr.read().bits(),
-        //     dma.ch0_dbg_ctdreq.read().bits()
-        // );
+        info!(
+            "Aborting dma transfer at count {} of {}, dreq {}",
+            prev_count,
+            dma.ch0_dbg_tcr.read().bits(),
+            dma.ch0_dbg_ctdreq.read().bits()
+        );
         // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
         let inte0 = dma.inte0.read().bits();
         let inte1 = dma.inte1.read().bits();

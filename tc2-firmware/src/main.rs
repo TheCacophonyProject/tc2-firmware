@@ -25,7 +25,7 @@ mod sun_times;
 pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
-use crate::device_config::DeviceConfig;
+use crate::device_config::{get_naive_datetime, DeviceConfig};
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use bsp::{
@@ -47,6 +47,7 @@ use fugit::RateExtU32;
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::FunctionI2C;
+use rp2040_hal::pio::PIOExt;
 use rp2040_hal::I2C;
 
 // NOTE: The version number here isn't important.  What's important is that we increment it
@@ -58,7 +59,7 @@ const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
-const TRANSFER_HEADER_LENGTH: usize = 18;
+const TRANSFER_HEADER_LENGTH: usize = 18 + 8;
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
@@ -140,6 +141,7 @@ fn main() -> ! {
 
     // If we're waking up to make an audio recording, do that.
     let existing_config = DeviceConfig::load_existing_config_from_flash();
+
     /*
     let i2c1 = if let Some(existing_config) = existing_config {
         info!(
@@ -170,8 +172,8 @@ fn main() -> ! {
                         pio1,
                         sm1,
                     );
-                    let mut front = [0u8; 2066];
-                    let mut back = [0u8; 2066];
+                    let mut front = [0u8; 2180];
+                    let mut back = [0u8; 2180];
                     let mut front_ptr = &mut &mut front;
                     let mut back_ptr = &mut &mut back;
                     while let Some(data) = microphone.record_for_n_seconds(60) {

@@ -412,45 +412,6 @@ pub fn frame_acquisition_loop(
                 }
             }
         }
-
-        // TODO Check when can't get frames from lepton also.
-        // Run `i2cset -y 1 0x25 0x02 0x03` on the pi to make it look like the RPi is powered off.
-        // Run `i2cset -y 1 0x25 0x02 0x01` on the pi to make it look like the RPi is powered on.
-        // Note that those you will want to have the RPi powered separately.
-        // if i2c_poll_counter >= 20 {
-        //     i2c_poll_counter = 0;
-        //     let address = 0x25;
-        //     let write_buffer: [u8; 1] = [0x02];
-        //     if let Err(e) = i2c.write(address, &write_buffer) {
-        //         error!("I2C write error: {:?}", e);
-        //     } else {
-        //         let mut read_buffer: [u8; 1] = [0; 1];
-        //         if let Err(e) = i2c.read(address, &mut read_buffer) {
-        //             error!("I2C read error: {:?}", e);
-        //         }
-        //
-        //         if read_buffer[0] == 0x03 {
-        //             info!("Powering off");
-        //
-        //             info!("Lets skip that for now, so we can get some logs...");
-        //             /*
-        //             // TODO: Wait for an interrupt on the wake pin, so we can be woken by a button press?
-        //             // TODO: Are there any other pins we need to set low?
-        //             lepton.power_down_sequence(&mut delay);
-        //             rosc = go_dormant_until_woken(rosc, &mut wake_interrupt_pin, &mut lepton, measured_rosc_frequency);
-        //             lepton.power_on_sequence(&mut delay);
-        //             lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-        //             lepton
-        //                 .vsync
-        //                 .set_interrupt_enabled_dormant_wake(Interrupt::EdgeHigh, true);
-        //             got_sync = false;
-        //             continue 'frame_loop;
-        //             */
-        //         }
-        //     }
-        // }
-        // i2c_poll_counter += 1;
-
         {
             // This block prevents a frame sync issue when we *end* recording
 

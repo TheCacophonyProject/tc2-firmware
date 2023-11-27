@@ -218,6 +218,7 @@ fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
         info!("RASPBERRY PI IS AWAKE");
         let mut payload = [0u8; 8];
         if let Some(free_spi) = flash_storage.free_spi() {
+            info!("Enable SPI");
             pi_spi.enable(free_spi, resets);
 
             LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
@@ -273,7 +274,7 @@ pub fn core_1_task(
     let mut crc_buf = [0x42u8; 32 + 104];
 
     // TODO: Triple buffer structure here?
-    let mut payload_buf = [0x42u8; 2066];
+    let mut payload_buf = [0x42u8; 2080];
     let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
     let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
     let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
@@ -753,6 +754,7 @@ pub fn core_1_task(
                                 error!("Failed sending sleep request to attiny");
                             }
                             // Now we can put ourselves to sleep.
+                            // TODO: We need to make sure we put the lepton to sleep too!
                         } else {
                             error!("Failed setting wake alarm, can't go to sleep");
                         }
