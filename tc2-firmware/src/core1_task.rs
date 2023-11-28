@@ -472,7 +472,7 @@ pub fn core_1_task(
             .frame_data_as_u8_slice_mut();
         // Read the telemetry:
         let frame_telemetry = read_telemetry(&frame_buffer);
-        let too_close_ttesting o_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
+        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
             || frame_telemetry.ffc_status == FFCStatus::InProgress;
         let mut ended_recording = false;
