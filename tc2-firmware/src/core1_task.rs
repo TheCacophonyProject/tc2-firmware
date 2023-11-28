@@ -78,7 +78,6 @@ pub fn wake_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, delay:
     //  until we see that the raspberry pi is awake (and ideally that tc2-agent is running).
     //  Actually, tc2-agent will restart this firmware, so maybe we don't need to poll, we just
     //  block indefinitely?
-    /*
     match shared_i2c.pi_is_powered_down(delay) {
         Ok(true) => {
             if shared_i2c.tell_pi_to_wakeup(delay).is_ok() {
@@ -107,7 +106,6 @@ pub fn wake_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, delay:
             }
         },
     }
-     */
 }
 
 pub fn power_down_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, delay: &mut Delay) {
@@ -378,7 +376,7 @@ pub fn core_1_task(
     if !device_config.use_low_power_mode && !raspberry_pi_is_awake {
         wake_raspberry_pi(&mut raspberry_pi_is_awake, &mut shared_i2c, &mut delay);
     }
-    raspberry_pi_is_awake = true;
+    //raspberry_pi_is_awake = true;
     maybe_offload_flash_storage(
         &mut flash_storage,
         &mut pi_spi,
