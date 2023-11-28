@@ -1,3 +1,4 @@
+use crate::byte_slice_cursor::CursorMut;
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -5,7 +6,9 @@ use crate::device_config::DeviceConfig;
 use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
+use crate::FIRMWARE_VERSION;
 use byteorder::{ByteOrder, LittleEndian};
+use core::fmt::Write;
 use core::mem;
 use core::ops::{Index, IndexMut};
 use defmt::{info, Format};
@@ -407,6 +410,7 @@ impl<'a> CptvStream<'a> {
         current_time: u64,
         lepton_version: u8,
         lepton_serial: Option<u32>,
+        lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
         device_config: &DeviceConfig,
         flash_storage: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
@@ -415,8 +419,13 @@ impl<'a> CptvStream<'a> {
         let starting_block_index = flash_storage.start_file();
 
         // Camera serial, camera firmware, location_altitude, location_timestamp, location_accuracy
-        let cptv_header =
-            Cptv2Header::new(current_time, lepton_version, lepton_serial, device_config);
+        let cptv_header = Cptv2Header::new(
+            current_time,
+            lepton_version,
+            lepton_serial,
+            lepton_firmware_version,
+            device_config,
+        );
         CptvStream {
             cursor: BitCursor::new(),
             crc_table,
@@ -778,11 +787,25 @@ impl Cptv2Header {
         timestamp: u64,
         lepton_version: u8,
         lepton_serial: Option<u32>,
+        lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
         device_config: &DeviceConfig,
     ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
+        let mut firmware = [0u8; 20];
+        let mut cursor = CursorMut::new(&mut firmware);
+        if let Some(((m_major, m_minor, m_build), (d_major, d_minor, d_build))) =
+            lepton_firmware_version
+        {
+            let _ = write!(
+                &mut cursor,
+                "{}.{}.{}/{}.{}.{}/{}",
+                m_major, m_minor, m_build, d_major, d_minor, d_build, FIRMWARE_VERSION
+            );
+        } else {
+            let _ = write!(&mut cursor, "{}", FIRMWARE_VERSION);
+        }
 
         let (lat, lng) = device_config.location;
         let mut header = Cptv2Header {
@@ -791,7 +814,7 @@ impl Cptv2Header {
             model: [0; 20],
             device_id: device_config.device_id,
             serial_number: lepton_serial,
-            firmware_version: None,
+            firmware_version: Some(firmware),
             latitude: Some(lat),
             longitude: Some(lng),
             loc_timestamp: device_config.location_timestamp,

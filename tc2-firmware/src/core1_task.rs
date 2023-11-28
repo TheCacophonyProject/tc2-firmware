@@ -215,10 +215,8 @@ fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 ) -> Option<DeviceConfig> {
     let existing_config = DeviceConfig::load_existing_config_from_flash();
     if raspberry_pi_is_awake {
-        info!("RASPBERRY PI IS AWAKE");
         let mut payload = [0u8; 8];
         if let Some(free_spi) = flash_storage.free_spi() {
-            info!("Enable SPI");
             pi_spi.enable(free_spi, resets);
 
             LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
@@ -270,6 +268,7 @@ pub fn core_1_task(
     pins: Core1Pins,
     i2c_config: I2CConfig,
     lepton_serial: Option<u32>,
+    lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
 ) {
     let mut crc_buf = [0x42u8; 32 + 104];
 
@@ -473,7 +472,7 @@ pub fn core_1_task(
             .frame_data_as_u8_slice_mut();
         // Read the telemetry:
         let frame_telemetry = read_telemetry(&frame_buffer);
-        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
+        let too_close_ttesting o_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
             || frame_telemetry.ffc_status == FFCStatus::InProgress;
         let mut ended_recording = false;
@@ -520,8 +519,9 @@ pub fn core_1_task(
                     && this_frame_motion_detection.got_new_trigger()
                     && cptv_stream.is_none(); // wait until lepton stabilises before recording
 
+                // Time out after 10 mins?
                 should_end_current_recording = (this_frame_motion_detection.triggering_ended()
-                    || frames_written > 100)
+                    || frames_written > 60 * 10 * 9)
                     && cptv_stream.is_some();
             }
             motion_detection = this_frame_motion_detection;
@@ -530,10 +530,10 @@ pub fn core_1_task(
                 // Begin cptv file
                 match shared_i2c.get_datetime(&mut delay) {
                     Ok(now) => {
-                        info!(
-                            "NOW {}:{}:{} {}:{}:{}",
-                            now.year, now.month, now.day, now.hours, now.minutes, now.seconds
-                        );
+                        // info!(
+                        //     "NOW {}:{}:{} {}:{}:{}",
+                        //     now.year, now.month, now.day, now.hours, now.minutes, now.seconds
+                        // );
                         queried_rtc_this_frame = true;
                         let date_time_utc = get_naive_datetime(now);
                         let is_inside_recording_window =
@@ -547,6 +547,7 @@ pub fn core_1_task(
                                 date_time_utc.timestamp() as u64 * 1000 * 1000, // Microseconds
                                 lepton_version,
                                 lepton_serial.clone(),
+                                lepton_firmware_version.clone(),
                                 &device_config,
                                 &mut flash_storage,
                                 &huffman_table,

@@ -4,7 +4,7 @@ use core::convert::Infallible;
 use core::mem;
 use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
 use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
-use defmt::{info, warn};
+use defmt::{error, info, warn};
 use defmt::{trace, Format};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::spi::MODE_3;
@@ -198,7 +198,10 @@ impl LeptonError {
 
             -126 => OperationCanceled,  // Camera operation canceled
             -127 => UndefinedErrorCode, // Undefined error
-            _ => panic!("Unknown value: {}", value),
+            _ => {
+                error!("Unknown lepton error code: {}", value);
+                UndefinedErrorCode
+            }
         }
     }
 }
@@ -569,7 +572,7 @@ impl LeptonModule {
 
     pub fn get_firmware_version(&mut self) -> Result<((u8, u8, u8), (u8, u8, u8)), LeptonError> {
         match self.get_attribute(lepton_command(
-            LEPTON_SUB_SYSTEM_SYS,
+            LEPTON_SUB_SYSTEM_OEM,
             LEPTON_OEM_CAMERA_SOFTWARE_REVISION,
             LeptonCommandType::Get,
             true,
@@ -588,7 +591,10 @@ impl LeptonModule {
                     (dsp_major, dsp_minor, dsp_build),
                 ))
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                error!("Err {}", err);
+                Err(err)
+            }
         }
     }
 
