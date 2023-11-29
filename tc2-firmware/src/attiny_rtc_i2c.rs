@@ -229,8 +229,6 @@ impl SharedI2C {
         delay: &mut Delay,
         print: bool,
     ) -> Result<bool, Error> {
-        return Ok(true);
-
         let mut recorded_camera_state = None;
         let pi_is_awake = match self.try_attiny_read_command(REG_CAMERA_STATE, delay) {
             Ok(state) => {

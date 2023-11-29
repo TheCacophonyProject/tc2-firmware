@@ -81,7 +81,8 @@ impl DeviceConfig {
     pub fn device_name(&self) -> &str {
         let len = self.device_name[0] as usize;
         let slice_len = self.device_name.len();
-        core::str::from_utf8(&self.device_name[1..(1 + len).min(slice_len)]).unwrap()
+        core::str::from_utf8(&self.device_name[1..(1 + len).min(slice_len)])
+            .unwrap_or("Invalid device name")
     }
 
     pub fn device_name_bytes(&self) -> &[u8] {

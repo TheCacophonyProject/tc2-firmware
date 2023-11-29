@@ -31,7 +31,7 @@ use rp2040_hal::gpio::bank0::{
 };
 use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioOutput};
 use rp2040_hal::pio::PIOExt;
-use rp2040_hal::Sio;
+use rp2040_hal::{Sio, Timer};
 
 #[repr(u32)]
 #[derive(Format)]
@@ -134,6 +134,7 @@ fn maybe_offload_flash_storage(
     clock_freq: u32,
     shared_i2c: &mut SharedI2C,
     delay: &mut Delay,
+    timer: &Timer,
 ) {
     if flash_storage.has_files_to_offload() {
         warn!("There are files to offload!");
@@ -172,7 +173,9 @@ fn maybe_offload_flash_storage(
                         part_count, block_index, page_index
                     );
                 }
+                let start = timer.get_counter();
                 pi_spi.send_message(transfer_type, &part, current_crc, dma);
+                info!("Took {}µs", (timer.get_counter() - start).to_micros());
 
                 part_count += 1;
                 if is_last {
@@ -210,15 +213,17 @@ fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     dma: &mut DMA,
     clock_freq: HertzU32,
     radiometry_enabled: u32,
+    camera_serial_number: u32,
 ) -> Option<DeviceConfig> {
     let existing_config = DeviceConfig::load_existing_config_from_flash();
     if raspberry_pi_is_awake {
-        let mut payload = [0u8; 8];
+        let mut payload = [0u8; 12];
         if let Some(free_spi) = flash_storage.free_spi() {
             pi_spi.enable(free_spi, resets);
 
             LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
             LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
+            LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
 
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let crc = crc_check.checksum(&payload);
@@ -271,7 +276,7 @@ pub fn core_1_task(
     let mut crc_buf = [0x42u8; 32 + 104];
 
     // TODO: Triple buffer structure here?
-    let mut payload_buf = [0x42u8; 2080];
+    let mut payload_buf = [0x42u8; 2088];
     let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
     let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
     let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
@@ -367,6 +372,7 @@ pub fn core_1_task(
         &mut peripherals.DMA,
         clock_freq.Hz(),
         radiometry_enabled,
+        lepton_serial.unwrap_or(0),
     );
 
     if device_config.is_none() {
@@ -376,7 +382,6 @@ pub fn core_1_task(
     if !device_config.use_low_power_mode && !raspberry_pi_is_awake {
         wake_raspberry_pi(&mut raspberry_pi_is_awake, &mut shared_i2c, &mut delay);
     }
-    //raspberry_pi_is_awake = true;
     maybe_offload_flash_storage(
         &mut flash_storage,
         &mut pi_spi,
@@ -386,8 +391,11 @@ pub fn core_1_task(
         clock_freq,
         &mut shared_i2c,
         &mut delay,
+        &timer,
     );
-    pi_spi.enable_pio_spi();
+    if raspberry_pi_is_awake {
+        pi_spi.enable_pio_spi();
+    }
     // NOTE: Let Core0 know that it can start the frame loop
     // TODO: This could potentially start earlier to get lepton up and synced,
     //  we just need core 0 to not block on core 1 until this message is sent.
@@ -444,6 +452,7 @@ pub fn core_1_task(
                     &mut peripherals.DMA,
                     clock_freq.Hz(),
                     radiometry_enabled,
+                    lepton_serial.unwrap_or(0),
                 )
                 .unwrap();
                 // Enable raw frame transfers to pi – if not already enabled.
@@ -676,6 +685,7 @@ pub fn core_1_task(
                 clock_freq,
                 &mut shared_i2c,
                 &mut delay,
+                &timer,
             );
             // TODO: If we woke to pi, when do we put it back to sleep?
         }
@@ -707,6 +717,7 @@ pub fn core_1_task(
                             clock_freq,
                             &mut shared_i2c,
                             &mut delay,
+                            &timer,
                         );
                         pi_spi.disable_pio_spi();
 

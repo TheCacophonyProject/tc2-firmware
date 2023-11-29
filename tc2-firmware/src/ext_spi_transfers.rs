@@ -56,7 +56,7 @@ pub struct ExtSpiTransfers {
 
     ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
     dma_channel_0: Option<Channel<CH0>>,
-    payload_buffer: Option<&'static mut [u8; 2080]>,
+    payload_buffer: Option<&'static mut [u8; 2088]>,
     return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
     return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,
@@ -73,7 +73,7 @@ impl ExtSpiTransfers {
         miso: Pin<Gpio15, FunctionNull, PullNone>,
         ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
         dma_channel_0: Channel<CH0>,
-        payload_buffer: &'static mut [u8; 2080],
+        payload_buffer: &'static mut [u8; 2088],
         return_payload_buffer: &'static mut [u8; 32 + 104],
         pio: PIO<PIO0>,
         state_machine_0_uninit: UninitStateMachine<(PIO0, SM0)>,
@@ -167,7 +167,7 @@ impl ExtSpiTransfers {
             let length = payload.len() as u32;
             let is_recording = if is_recording { 1 } else { 0 };
 
-            let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
+            let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2 + 4 + 4];
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
             LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
@@ -176,6 +176,8 @@ impl ExtSpiTransfers {
             LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
             LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.reverse_bits());
             LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.reverse_bits());
+            LittleEndian::write_u32(&mut transfer_header[18..=21], payload.len() as u32);
+            LittleEndian::write_u32(&mut transfer_header[22..=25], payload.len() as u32);
             payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
@@ -322,25 +324,35 @@ impl ExtSpiTransfers {
         // Looks like maybe we can't trust the first 8 bytes or so of the transfer to be aligned correctly?
 
         // It is followed by the payload itself
-        let length = payload.len() as u32;
+        let payload_length = payload.len() as u32;
+        let actual_length = self.payload_buffer.as_ref().unwrap().len() as u32;
         //info!("Send message {:?} of length {}", message_type, length);
-        let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
+        let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2 + 4 + 4];
         let header_len = transfer_header.len() as u32;
         transfer_header[0] = message_type as u8;
         transfer_header[1] = message_type as u8;
-        LittleEndian::write_u32(&mut transfer_header[2..6], length);
-        LittleEndian::write_u32(&mut transfer_header[6..10], length);
+        LittleEndian::write_u32(&mut transfer_header[2..6], payload_length);
+        LittleEndian::write_u32(&mut transfer_header[6..10], payload_length);
         LittleEndian::write_u16(&mut transfer_header[10..12], crc);
         LittleEndian::write_u16(&mut transfer_header[12..14], crc);
         LittleEndian::write_u16(&mut transfer_header[14..16], crc.reverse_bits());
         LittleEndian::write_u16(&mut transfer_header[16..=17], crc.reverse_bits());
-        info!("Writing header {}", &transfer_header);
+        LittleEndian::write_u32(&mut transfer_header[18..=21], actual_length - header_len);
+        LittleEndian::write_u32(&mut transfer_header[22..=25], actual_length - header_len);
+        // info!(
+        //     "Writing header {}, transfer length {}",
+        //     &transfer_header, payload_length
+        // );
+        info!(
+            "Sending {} bytes",
+            self.payload_buffer.as_ref().unwrap().len()
+        );
         self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
             .copy_from_slice(&transfer_header);
         self.payload_buffer.as_mut().unwrap()
             [transfer_header.len()..transfer_header.len() + payload.len()]
             .copy_from_slice(&payload);
-
+        let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         while !transmit_success {
             {
@@ -360,10 +372,16 @@ impl ExtSpiTransfers {
                 //     transfer_read_address,
                 //     transfer_read_address + length + header_len
                 // );
-                maybe_abort_dma_transfer_old(
+                // maybe_abort_dma_transfer_old(
+                //     dma_peripheral,
+                //     DMA_CHANNEL_NUM as u32,
+                //     transfer_read_address + payload_length + header_len,
+                // );
+                maybe_abort_dma_transfer(
                     dma_peripheral,
-                    DMA_CHANNEL_NUM as u32,
-                    transfer_read_address + length + header_len,
+                    DMA_CHANNEL_NUM,
+                    transfer_read_address + actual_length,
+                    transfer_read_address,
                 );
                 //info!("Await transfer to {}", transfer_read_address + length);
                 let (r_ch0, r_buf, spi) = transfer.wait();
@@ -493,12 +511,12 @@ fn maybe_abort_dma_transfer_old(dma: &mut DMA, channel: u32, add: u32) {
         prev_crc = crc;
     }
     if needs_abort && dma.ch[0].ch_ctrl_trig.read().busy().bit_is_set() {
-        info!(
-            "Aborting dma transfer at count {} of {}, dreq {}",
-            prev_count,
-            dma.ch0_dbg_tcr.read().bits(),
-            dma.ch0_dbg_ctdreq.read().bits()
-        );
+        // info!(
+        //     "Aborting dma transfer at count {} of {}, dreq {}",
+        //     prev_count,
+        //     dma.ch0_dbg_tcr.read().bits(),
+        //     dma.ch0_dbg_ctdreq.read().bits()
+        // );
         // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
         let inte0 = dma.inte0.read().bits();
         let inte1 = dma.inte1.read().bits();
@@ -540,6 +558,7 @@ fn maybe_abort_dma_transfer(
                 same_address += 1;
             }
             if same_address == 1_000_000 {
+                info!("Set needs abort with same address for 1million cycles");
                 // We went 10,000 iterations without the crc changing, surely that means the transfer has stalled?
                 needs_abort = true;
                 break;
@@ -550,11 +569,11 @@ fn maybe_abort_dma_transfer(
         }
     }
     if needs_abort && dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {
-        // info!(
-        //     "Aborting dma transfer at {}/{}",
-        //     prev_read_address - transfer_start_address,
-        //     transfer_end_address - transfer_start_address
-        // );
+        info!(
+            "Aborting dma transfer at {}/{}",
+            prev_read_address - transfer_start_address,
+            transfer_end_address - transfer_start_address
+        );
         //info!("Aborting dma transfer");
         // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
         let inte0 = dma.inte0.read().bits();
