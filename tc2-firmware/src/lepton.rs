@@ -1273,7 +1273,11 @@ pub fn read_telemetry(buf: &[u8]) -> Telemetry {
     let frame_num = LittleEndian::read_u32(&buf[40..44]);
     let msec_on = LittleEndian::read_u32(&buf[2..6]);
     let time_at_last_ffc = LittleEndian::read_u32(&buf[60..64]);
-    let msec_since_last_ffc = msec_on - time_at_last_ffc;
+    let msec_since_last_ffc = if msec_on > time_at_last_ffc {
+        msec_on - time_at_last_ffc
+    } else {
+        0
+    };
     let status_bits = LittleEndian::read_u32(&buf[6..10]);
     let ffc_state = (((status_bits >> 4) & 0b11) as u8).into();
     let fpa_temp_kelvin_x_100 = LittleEndian::read_u16(&buf[48..=49]);

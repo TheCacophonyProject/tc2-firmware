@@ -29,7 +29,7 @@ use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
     Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio8, Gpio9,
 };
-use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioOutput};
+use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, PullUp, SioOutput};
 use rp2040_hal::pio::PIOExt;
 use rp2040_hal::{Sio, Timer};
 
@@ -174,7 +174,7 @@ fn maybe_offload_flash_storage(
                     );
                 }
                 let start = timer.get_counter();
-                pi_spi.send_message(transfer_type, &part, current_crc, dma);
+                pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
                 info!("Took {}µs", (timer.get_counter() - start).to_micros());
 
                 part_count += 1;
@@ -214,6 +214,7 @@ fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     clock_freq: HertzU32,
     radiometry_enabled: u32,
     camera_serial_number: u32,
+    timer: &Timer,
 ) -> Option<DeviceConfig> {
     let existing_config = DeviceConfig::load_existing_config_from_flash();
     if raspberry_pi_is_awake {
@@ -228,7 +229,14 @@ fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let crc = crc_check.checksum(&payload);
             // info!("Sending camera connect info {:?}", payload);
-            pi_spi.send_message(ExtTransferMessage::CameraConnectInfo, &payload, crc, dma);
+            pi_spi.send_message(
+                ExtTransferMessage::CameraConnectInfo,
+                &payload,
+                crc,
+                dma,
+                &timer,
+                resets,
+            );
             let device_config = pi_spi.return_payload().unwrap();
             // Skip 4 bytes of CRC checking
 
@@ -373,6 +381,7 @@ pub fn core_1_task(
         clock_freq.Hz(),
         radiometry_enabled,
         lepton_serial.unwrap_or(0),
+        &timer,
     );
 
     if device_config.is_none() {
@@ -453,6 +462,7 @@ pub fn core_1_task(
                     clock_freq.Hz(),
                     radiometry_enabled,
                     lepton_serial.unwrap_or(0),
+                    &timer,
                 )
                 .unwrap();
                 // Enable raw frame transfers to pi – if not already enabled.
@@ -479,6 +489,7 @@ pub fn core_1_task(
             .frame_data_as_u8_slice_mut();
         // Read the telemetry:
         let frame_telemetry = read_telemetry(&frame_buffer);
+        //info!("Got frame {}", frame_telemetry.frame_num);
         let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 5000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
             || frame_telemetry.ffc_status == FFCStatus::InProgress;
