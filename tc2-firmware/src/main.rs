@@ -53,13 +53,13 @@ use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub static FIRMWARE_VERSION: u32 = 5;
+pub static FIRMWARE_VERSION: u32 = 6;
 static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
-const TRANSFER_HEADER_LENGTH: usize = 18 + 8 + 8;
+const TRANSFER_HEADER_LENGTH: usize = 18;
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
@@ -274,7 +274,7 @@ fn main() -> ! {
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
     sio.fifo
-        .write_blocking(if radiometric_mode { 1 } else { 0 });
+        .write_blocking(if radiometric_mode { 2 } else { 1 });
 
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());

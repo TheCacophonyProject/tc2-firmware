@@ -1,5 +1,6 @@
 use crate::bsp::pac::I2C1;
 use chrono::{Datelike, NaiveDateTime, Timelike};
+use core::ops::BitAnd;
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn, Format};
 use embedded_hal::prelude::{
@@ -82,11 +83,11 @@ impl SharedI2C {
 
         let _ = match shared_i2c.get_attiny_firmware_version(delay) {
             Ok(version) => match version {
-                6 => {}
+                8 => {}
                 version => {
                     error!(
                         "Mismatched Attiny firmware version – expected {}, got {}",
-                        6, version
+                        8, version
                     );
                 }
             },
@@ -224,6 +225,29 @@ impl SharedI2C {
         self.try_attiny_write_command(REG_PI_WAKEUP, 0x01, delay)
     }
 
+    pub fn set_recording_flag(
+        &mut self,
+        delay: &mut Delay,
+        is_recording: bool,
+    ) -> Result<(), Error> {
+        let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay) {
+            Ok(state) => Ok(state & 1 << 1 == 2),
+            Err(e) => Err(e),
+        };
+        match state {
+            Ok(state) => {
+                let mut val = if state { 2 } else { 0 };
+                let flag = if is_recording { 4 } else { 0 };
+                val |= flag;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(x) => Err(x),
+        }
+    }
+
     pub fn pi_is_awake_and_tc2_agent_is_ready(
         &mut self,
         delay: &mut Delay,
@@ -249,10 +273,10 @@ impl SharedI2C {
                             info!(
                                 "Camera state {:?}, tc2-agent ready: {}",
                                 recorded_camera_state.as_ref().unwrap(),
-                                state == 2
+                                state & 1 << 1 == 2
                             );
                         }
-                        Ok(state == 2)
+                        Ok(state & 1 << 1 == 2)
                     }
                     Err(e) => Err(e),
                 }
@@ -282,7 +306,7 @@ impl SharedI2C {
         }
     }
 
-    pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, Error> {
+    pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, &str> {
         let mut num_attempts = 0;
         loop {
             match self.rtc().get_datetime() {
@@ -290,11 +314,18 @@ impl SharedI2C {
                     if num_attempts != 0 {
                         info!("Getting datetime took {} attempts", num_attempts);
                     }
+                    if datetime.day == 0
+                        || datetime.day > 31
+                        || datetime.month == 0
+                        || datetime.month > 12
+                    {
+                        return Err("Invalid datetime input from RTC");
+                    }
                     return Ok(datetime);
                 }
                 Err(pcf8563::Error::I2C(e)) => {
                     if num_attempts == 100 {
-                        return Err(e);
+                        return Err("I2C error to RTC");
                     }
                     num_attempts += 1;
                     delay.delay_us(500);

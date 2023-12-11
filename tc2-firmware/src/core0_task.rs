@@ -22,13 +22,18 @@ fn go_dormant_until_next_vsync(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
     rosc_freq: HertzU32,
+    got_sync: bool,
 ) -> RingOscillator<bsp::hal::rosc::Enabled> {
-    lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-    let dormant_rosc = unsafe { rosc.dormant() };
-    let disabled_rosc = RingOscillator::new(dormant_rosc.free());
-    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
-    lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-    initialized_rosc
+    if got_sync && lepton.is_awake() {
+        lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+        let dormant_rosc = unsafe { rosc.dormant() };
+        let disabled_rosc = RingOscillator::new(dormant_rosc.free());
+        let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
+        lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+        initialized_rosc
+    } else {
+        rosc
+    }
 }
 
 fn go_dormant_until_woken<T: PinId>(
@@ -389,6 +394,16 @@ pub fn frame_acquisition_loop(
                                     prev_frame_needs_transfer = false;
                                 }
                             }
+                        } else if message == Core1Task::ReadyToSleep.into() {
+                            info!("Powering down lepton module");
+                            lepton.power_down_sequence(delay);
+                            if let Some(message) = sio_fifo.read() {
+                                if message == Core1Task::FrameProcessingComplete.into() {
+                                    transferring_prev_frame = false;
+                                    prev_frame_needs_transfer = false;
+                                }
+                            }
+                            sio_fifo.write(255);
                         } else if message == Core1Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
@@ -422,7 +437,8 @@ pub fn frame_acquisition_loop(
                 recording_ended = false;
             }
             if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-                rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
+                rosc =
+                    go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
             } else if current_segment_num == 3 {
                 //warn!("Overrunning frame time");
             }

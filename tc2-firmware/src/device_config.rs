@@ -193,14 +193,26 @@ pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
         2000 + datetime.year as i32,
         datetime.month as u32,
         datetime.day as u32,
-    )
-    .unwrap();
+    );
+    if naive_date.is_none() {
+        panic!(
+            "Couldn't get date for {}, {}, {}",
+            2000 + datetime.year as i32,
+            datetime.month as u32,
+            datetime.day as u32
+        );
+    }
     let naive_time = chrono::NaiveTime::from_hms_opt(
         datetime.hours as u32,
         datetime.minutes as u32,
         datetime.seconds as u32,
-    )
-    .unwrap();
-    let naive_datetime = chrono::NaiveDateTime::new(naive_date, naive_time);
+    );
+    if naive_time.is_none() {
+        panic!(
+            "Couldn't get time for {}, {}, {}",
+            datetime.hours as u32, datetime.minutes as u32, datetime.seconds as u32,
+        );
+    }
+    let naive_datetime = chrono::NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());
     naive_datetime
 }

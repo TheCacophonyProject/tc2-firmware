@@ -229,6 +229,7 @@ pub struct LeptonModule {
     reset: Reset,
     clk_disable: ClkDisable,
     master_clk: MasterClk,
+    is_powered_on: bool,
 }
 
 #[repr(C)]
@@ -339,6 +340,7 @@ impl LeptonModule {
             clk_disable,
             master_clk,
             cci: i2c,
+            is_powered_on: false,
         }
     }
 
@@ -833,6 +835,10 @@ impl LeptonModule {
         success.is_ok()
     }
 
+    pub fn is_awake(&self) -> bool {
+        self.is_powered_on
+    }
+
     pub fn power_down_sequence(&mut self, delay: &mut Delay) {
         // Putting lepton into standby mode, uses about 5mW in standby mode.
         trace!("power down asserted");
@@ -846,6 +852,7 @@ impl LeptonModule {
         // power off disables the 3.0V, 2.8V and 1.2V
         trace!("power off");
         self.power_enable.set_low().unwrap();
+        self.is_powered_on = false;
         delay.delay_ms(200);
     }
 
@@ -880,6 +887,7 @@ impl LeptonModule {
         self.power_on(delay);
         self.start_up_sequence(delay);
         self.cci_init(delay);
+        self.is_powered_on = true;
     }
 
     pub fn radiometric_mode_enabled(&mut self) -> Result<bool, LeptonError> {
