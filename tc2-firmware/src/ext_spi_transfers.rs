@@ -1,26 +1,32 @@
 use crate::bsp;
-use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1};
+use crate::bsp::pac;
+use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
 use crate::onboard_flash::extend_lifetime;
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
-use core::ops::Not;
+use core::cell::RefCell;
+use core::ops::{BitAnd, Not};
 use cortex_m::asm::nop;
+use critical_section::Mutex;
 use defmt::{info, warn, Format};
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::v2::{InputPin, OutputPin, StatefulOutputPin};
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
     _embedded_hal_spi_FullDuplex,
 };
+use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, Pace, CH0};
 use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
+use rp2040_hal::gpio::Interrupt::{EdgeLow, LevelLow};
 use rp2040_hal::gpio::{
-    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, PullUp,
-    SioOutput,
+    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Interrupt, Pin, PullDown, PullNone,
+    PullUp, SioInput, SioOutput,
 };
 use rp2040_hal::pio::{
     PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM0,
 };
+use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
 
 #[repr(u8)]
@@ -32,6 +38,31 @@ pub enum ExtTransferMessage {
     ResumeFileTransfer = 0x4,
     EndFileTransfer = 0x5,
     BeginAndEndFileTransfer = 0x6,
+}
+
+// We can store our ping pin here when we enter the ping-back interrupt
+static GLOBAL_PING_PIN: Mutex<RefCell<Option<Pin<Gpio5, FunctionSio<SioInput>, PullUp>>>> =
+    Mutex::new(RefCell::new(None));
+static GLOBAL_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
+
+#[interrupt]
+fn IO_IRQ_BANK0() {
+    critical_section::with(|cs| {
+        let mut this_ref = GLOBAL_PING_PIN.borrow_ref_mut(cs);
+        let mut ping_pin = this_ref.as_mut().unwrap();
+        if ping_pin.interrupt_status(LevelLow) {
+            ping_pin.clear_interrupt(LevelLow);
+        }
+    });
+}
+
+#[interrupt]
+fn TIMER_IRQ_0() {
+    critical_section::with(|cs| {
+        let mut this_ref = GLOBAL_ALARM.borrow_ref_mut(cs);
+        let mut alarm = this_ref.as_mut().unwrap();
+        alarm.clear_interrupt();
+    });
 }
 
 pub struct ExtSpiTransfers {
@@ -57,7 +88,7 @@ pub struct ExtSpiTransfers {
     clk_pio: Option<Pin<Gpio14, FunctionPio0, PullNone>>,
     cs_pio: Option<Pin<Gpio13, FunctionPio0, PullNone>>,
 
-    ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
+    ping: Option<Pin<Gpio5, FunctionSio<SioInput>, PullDown>>,
     dma_channel_0: Option<Channel<CH0>>,
     payload_buffer: Option<&'static mut [u8; 2066]>,
     return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
@@ -74,7 +105,7 @@ impl ExtSpiTransfers {
         cs: Pin<Gpio13, FunctionNull, PullNone>,
         clk: Pin<Gpio14, FunctionNull, PullNone>,
         miso: Pin<Gpio15, FunctionNull, PullNone>,
-        ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
+        ping: Pin<Gpio5, FunctionSio<SioInput>, PullDown>,
         dma_channel_0: Channel<CH0>,
         payload_buffer: &'static mut [u8; 2066],
         return_payload_buffer: &'static mut [u8; 32 + 104],
@@ -93,7 +124,7 @@ impl ExtSpiTransfers {
             clk_pio: None,
             cs_pio: None,
 
-            ping,
+            ping: Some(ping),
             dma_channel_0: Some(dma_channel_0),
             payload_buffer: Some(payload_buffer),
             return_payload_buffer: Some(return_payload_buffer),
@@ -145,8 +176,55 @@ impl ExtSpiTransfers {
             )
             .init_slave(resets, &embedded_hal::spi::MODE_3);
             self.spi = Some(spi);
-            self.ping.set_low().unwrap();
         }
+    }
+    pub fn ping(&mut self, timer: &mut Timer) -> bool {
+        let start = timer.get_counter();
+        let mut ping_pin = self.ping.take().unwrap().into_pull_up_input();
+        ping_pin.set_interrupt_enabled(LevelLow, true);
+        let mut alarm = timer.alarm_0().unwrap();
+
+        // Give away our pins by moving them into the `GLOBAL_PINS` variable.
+        // We won't need to access them in the main thread again
+        critical_section::with(|cs| {
+            GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
+        });
+        let _ = alarm.schedule(MicrosDurationU32::micros(250)).unwrap();
+        alarm.enable_interrupt();
+        critical_section::with(|cs| {
+            GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
+        });
+        // Unmask the IO_BANK0/TIMER_0) IRQ so that the NVIC interrupt controller
+        // will jump to the interrupt function when the interrupt occurs.
+        // We do this last so that the interrupt can't go off while
+        // it is in the middle of being configured
+        unsafe {
+            pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+            pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
+        }
+        // Block until resumed by an interrupt from either the pin or from the alarm
+        cortex_m::asm::wfi();
+        unsafe {
+            pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
+            pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
+        }
+        let ping_time = (timer.get_counter() - start).to_micros();
+        let (ping_pin, mut alarm) = critical_section::with(|cs| {
+            (
+                GLOBAL_PING_PIN.borrow(cs).take().unwrap(),
+                GLOBAL_ALARM.borrow(cs).take().unwrap(),
+            )
+        });
+        let finished = alarm.finished();
+        alarm.clear_interrupt();
+        let _ = alarm.cancel();
+        alarm.disable_interrupt();
+        ping_pin.set_interrupt_enabled(LevelLow, false);
+        self.ping = Some(ping_pin.into_pull_down_input());
+        if finished {
+            warn!("Alarm triggered, ping took {}", ping_time);
+        }
+        !finished
     }
 
     pub fn begin_message(
@@ -156,6 +234,7 @@ impl ExtSpiTransfers {
         crc: u16,
         is_recording: bool,
         dma_peripheral: &mut DMA,
+        timer: &mut Timer,
     ) -> Option<(
         Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
         u32,
@@ -191,22 +270,24 @@ impl ExtSpiTransfers {
                     break;
                 }
             }
+            if self.ping(timer) {
+                let mut config = single_buffer::Config::new(
+                    self.dma_channel_0.take().unwrap(),
+                    // Does this need to be aligned?  Maybe not.
+                    unsafe { u8_slice_to_u32(extend_lifetime(&payload[..])) },
+                    self.pio_tx.take().unwrap(),
+                );
+                config.bswap(true); // DMA peripheral does our swizzling for us.
+                let transfer = config.start();
+                let start_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
+                    .ch_read_addr
+                    .read()
+                    .bits();
 
-            let mut config = single_buffer::Config::new(
-                self.dma_channel_0.take().unwrap(),
-                // Does this need to be aligned?  Maybe not.
-                unsafe { u8_slice_to_u32(extend_lifetime(&payload[..])) },
-                self.pio_tx.take().unwrap(),
-            );
-            config.bswap(true); // DMA peripheral does our swizzling for us.
-            self.ping.set_high().unwrap();
-            let transfer = config.start();
-            let start_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
-                .ch_read_addr
-                .read()
-                .bits();
-
-            Some((transfer, start_read_address + length, start_read_address))
+                Some((transfer, start_read_address + length, start_read_address))
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -220,7 +301,6 @@ impl ExtSpiTransfers {
         transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
     ) -> bool {
         // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
-
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
         maybe_abort_dma_transfer(
             dma_peripheral,
@@ -229,7 +309,6 @@ impl ExtSpiTransfers {
             transfer_start_address,
             0,
         );
-        self.ping.set_low().unwrap();
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
         let end_read_addr = dma_peripheral.ch[DMA_CHANNEL_NUM]
@@ -281,7 +360,6 @@ impl ExtSpiTransfers {
             sm.set_pindirs([(miso_id, bsp::hal::pio::PinDir::Output)]);
             self.state_machine_0_running = Some((sm.start(), rx));
             self.pio_tx = Some(tx);
-            self.ping.set_low().unwrap();
         }
     }
 
@@ -309,7 +387,6 @@ impl ExtSpiTransfers {
             );
 
             self.state_machine_0_uninit = Some(sm);
-            self.ping.set_low().unwrap();
         }
     }
 
@@ -319,7 +396,7 @@ impl ExtSpiTransfers {
         payload: &[u8],
         crc: u16,
         dma_peripheral: &mut DMA,
-        timer: &Timer,
+        timer: &mut Timer,
         resets: &mut RESETS,
     ) {
         // The transfer header contains the transfer type (2x)
@@ -357,73 +434,77 @@ impl ExtSpiTransfers {
         let mut transferred_without_abort = false;
         while !transmit_success {
             //while !transferred_without_abort {
-            let start = timer.get_counter();
-            let mut transfer = single_buffer::Config::new(
-                self.dma_channel_0.take().unwrap(),
-                self.payload_buffer.take().unwrap(),
-                self.spi.take().unwrap(),
-            );
-            let transfer = transfer.start();
-
-            self.ping.set_high().unwrap();
-            let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
-            transferred_without_abort = !maybe_abort_dma_transfer(
-                dma_peripheral,
-                DMA_CHANNEL_NUM,
-                transfer_read_address + actual_length,
-                transfer_read_address,
-                1,
-            );
-            let (r_ch0, r_buf, tx) = transfer.wait();
-            self.ping.set_low().unwrap();
-            self.dma_channel_0 = Some(r_ch0);
-            self.payload_buffer = Some(r_buf);
-            self.spi = Some(tx);
-            //}
-
-            // Now read the crc + return payload from the pi
-            {
-                self.return_payload_buffer.as_mut().unwrap().fill(0);
-                //self.ping.set_high().unwrap();
-                let transfer = single_buffer::Config::new(
+            if self.ping(timer) {
+                let start = timer.get_counter();
+                let mut transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
+                    self.payload_buffer.take().unwrap(),
                     self.spi.take().unwrap(),
-                    self.return_payload_buffer.take().unwrap(),
-                )
-                .start();
+                );
+                let transfer = transfer.start();
 
-                let transfer_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
-                    .ch_read_addr
-                    .read()
-                    .bits();
-                let (r_ch0, spi, r_buf) = transfer.wait();
+                let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
+                transferred_without_abort = !maybe_abort_dma_transfer(
+                    dma_peripheral,
+                    DMA_CHANNEL_NUM,
+                    transfer_read_address + actual_length,
+                    transfer_read_address,
+                    1,
+                );
+                let (r_ch0, r_buf, tx) = transfer.wait();
                 self.dma_channel_0 = Some(r_ch0);
-                // Find offset crc in buffer:
-                if let Some(start) = r_buf.iter().position(|&x| x == 1) {
-                    if start < r_buf.len() - 8 {
-                        let prelude = &r_buf[start + 1..start + 4];
-                        if prelude[0] == 2 && prelude[1] == 3 && prelude[2] == 4 {
-                            let crc_from_remote =
-                                LittleEndian::read_u16(&r_buf[start + 4..start + 6]);
-                            let crc_from_remote_dup =
-                                LittleEndian::read_u16(&r_buf[start + 6..start + 8]);
-                            if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc {
-                                transmit_success = true;
-                                //info!("Transfer success");
-                                if message_type == ExtTransferMessage::CameraConnectInfo {
-                                    // We also expect to get a bunch of device config handshake info:
-                                    self.return_payload_offset = Some(start + 4);
+                self.payload_buffer = Some(r_buf);
+                self.spi = Some(tx);
+                //}
+
+                // Now read the crc + return payload from the pi
+                {
+                    self.return_payload_buffer.as_mut().unwrap().fill(0);
+                    //self.ping.set_high().unwrap();
+                    let transfer = single_buffer::Config::new(
+                        self.dma_channel_0.take().unwrap(),
+                        self.spi.take().unwrap(),
+                        self.return_payload_buffer.take().unwrap(),
+                    )
+                    .start();
+
+                    let transfer_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
+                        .ch_read_addr
+                        .read()
+                        .bits();
+                    let (r_ch0, spi, r_buf) = transfer.wait();
+                    self.dma_channel_0 = Some(r_ch0);
+                    // Find offset crc in buffer:
+                    if let Some(start) = r_buf.iter().position(|&x| x == 1) {
+                        if start < r_buf.len() - 8 {
+                            let prelude = &r_buf[start + 1..start + 4];
+                            if prelude[0] == 2 && prelude[1] == 3 && prelude[2] == 4 {
+                                let crc_from_remote =
+                                    LittleEndian::read_u16(&r_buf[start + 4..start + 6]);
+                                let crc_from_remote_dup =
+                                    LittleEndian::read_u16(&r_buf[start + 6..start + 8]);
+                                if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc
+                                {
+                                    transmit_success = true;
+                                    //info!("Transfer success");
+                                    if message_type == ExtTransferMessage::CameraConnectInfo {
+                                        // We also expect to get a bunch of device config handshake info:
+                                        self.return_payload_offset = Some(start + 4);
+                                    }
+                                } else {
+                                    info!("Return crc mismatch");
                                 }
-                            } else {
-                                info!("Return crc mismatch");
                             }
                         }
+                    } else {
+                        info!("Failed to find return data start in {:?}", r_buf);
                     }
-                } else {
-                    info!("Failed to find return data start in {:?}", r_buf);
+                    self.return_payload_buffer = Some(r_buf);
+                    self.spi = Some(spi);
                 }
-                self.return_payload_buffer = Some(r_buf);
-                self.spi = Some(spi);
+            } else {
+                warn!("Pi failed to receive");
+                transmit_success = true;
             }
         }
     }

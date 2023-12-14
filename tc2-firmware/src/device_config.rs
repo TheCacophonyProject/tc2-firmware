@@ -121,7 +121,7 @@ impl DeviceConfig {
             (None, None)
         };
 
-        let start_time = if !is_absolute_start {
+        let mut start_time = if !is_absolute_start {
             sunset
                 .unwrap()
                 .naive_utc()
@@ -147,8 +147,10 @@ impl DeviceConfig {
         };
 
         // FIXME: Sometimes wrong for absolute windows?
-
-        if end_time < start_time {
+        if end_time < *now_utc {
+            end_time = end_time.add(chrono::Duration::days(1));
+            start_time = start_time.add(chrono::Duration::days(1));
+        } else if end_time < start_time {
             end_time = end_time.add(chrono::Duration::days(1));
         }
         (start_time, end_time)

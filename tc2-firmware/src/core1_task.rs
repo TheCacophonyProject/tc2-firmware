@@ -3,7 +3,10 @@
 
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp::pac;
-use crate::bsp::pac::{Peripherals, DMA, RESETS};
+use crate::bsp::pac::{interrupt, Peripherals, DMA, RESETS};
+use crate::core1_sub_tasks::{
+    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_flash_storage,
+};
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -24,12 +27,16 @@ use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
 use defmt::export::timestamp;
 use defmt::{error, info, warn, Format};
+use embedded_hal::digital::v2::ToggleableOutputPin;
 use fugit::{Duration, HertzU32, RateExtU32};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
     Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio8, Gpio9,
 };
-use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, PullUp, SioOutput};
+use rp2040_hal::gpio::Interrupt::EdgeLow;
+use rp2040_hal::gpio::{
+    FunctionNull, FunctionSio, Pin, PullDown, PullNone, PullUp, SioInput, SioOutput,
+};
 use rp2040_hal::pio::PIOExt;
 use rp2040_hal::{Sio, Timer};
 
@@ -60,7 +67,7 @@ impl From<u32> for Core1Task {
 }
 
 pub struct Core1Pins {
-    pub(crate) pi_ping: Pin<Gpio5, FunctionSio<SioOutput>, PullDown>,
+    pub(crate) pi_ping: Pin<Gpio5, FunctionSio<SioInput>, PullDown>,
 
     pub(crate) pi_miso: Pin<Gpio15, FunctionNull, PullNone>,
     pub(crate) pi_mosi: Pin<Gpio12, FunctionNull, PullNone>,
@@ -109,6 +116,14 @@ pub fn wake_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, delay:
     }
 }
 
+pub fn advise_raspberry_pi_it_may_shutdown(shared_i2c: &mut SharedI2C, delay: &mut Delay) {
+    if shared_i2c.tell_pi_to_shutdown(delay).is_err() {
+        error!("Error sending power-down signal to raspberry pi");
+    } else {
+        info!("Sent power-down signal to raspberry pi");
+    }
+}
+
 pub fn power_down_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, delay: &mut Delay) {
     if shared_i2c.tell_pi_to_shutdown(delay).is_ok() {
         info!("Sent power-down signal to raspberry pi");
@@ -125,153 +140,6 @@ pub fn power_down_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, 
     }
 }
 
-fn maybe_offload_flash_storage(
-    flash_storage: &mut OnboardFlash,
-    pi_spi: &mut ExtSpiTransfers,
-    resets: &mut RESETS,
-    dma: &mut DMA,
-    raspberry_pi_is_awake: &mut bool,
-    clock_freq: u32,
-    shared_i2c: &mut SharedI2C,
-    delay: &mut Delay,
-    timer: &Timer,
-) {
-    if flash_storage.has_files_to_offload() {
-        warn!("There are files to offload!");
-        if !*raspberry_pi_is_awake {
-            wake_raspberry_pi(raspberry_pi_is_awake, shared_i2c, delay);
-        }
-        if *raspberry_pi_is_awake {
-            // do some offloading.
-            let mut file_count = 0;
-            flash_storage.begin_offload();
-            let mut file_start = true;
-            let mut part_count = 0;
-
-            // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-            while let Some(((part, crc, block_index, page_index), is_last, spi)) =
-                flash_storage.get_file_part()
-            {
-                pi_spi.enable(spi, resets);
-                let transfer_type = if file_start && !is_last {
-                    ExtTransferMessage::BeginFileTransfer
-                } else if !file_start && !is_last {
-                    ExtTransferMessage::ResumeFileTransfer
-                } else if is_last {
-                    ExtTransferMessage::EndFileTransfer
-                } else if file_start && is_last {
-                    ExtTransferMessage::BeginAndEndFileTransfer
-                } else {
-                    crate::unreachable!("Invalid file transfer state");
-                };
-
-                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-                let current_crc = crc_check.checksum(&part);
-                if current_crc != crc {
-                    warn!(
-                        "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
-                        part_count, block_index, page_index
-                    );
-                }
-                //let start = timer.get_counter();
-                pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-                //info!("Took {}µs", (timer.get_counter() - start).to_micros());
-
-                part_count += 1;
-                if is_last {
-                    file_count += 1;
-                    info!("Offloaded {} file(s)", file_count);
-                    file_start = true;
-                } else {
-                    file_start = false;
-                }
-
-                // Give spi peripheral back to flash storage.
-                if let Some(spi) = pi_spi.disable() {
-                    flash_storage.take_spi(spi, resets, clock_freq.Hz());
-                }
-            }
-            info!("Completed file offload, transferred {} files", file_count);
-            // TODO: Some validation from the raspberry pi that the transfer completed
-            //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
-
-            // Once we've successfully offloaded all files, we can erase the flash and we're
-            // ready to start recording new CPTV files there.
-
-            info!("Erasing after successful offload");
-            //flash_storage.erase_all_good_used_blocks();
-            flash_storage.erase_all_blocks();
-        }
-    }
-}
-
-fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
-    raspberry_pi_is_awake: bool,
-    flash_storage: &mut OnboardFlash,
-    pi_spi: &mut ExtSpiTransfers,
-    resets: &mut RESETS,
-    dma: &mut DMA,
-    clock_freq: HertzU32,
-    radiometry_enabled: u32,
-    camera_serial_number: u32,
-    timer: &Timer,
-) -> Option<DeviceConfig> {
-    let existing_config = DeviceConfig::load_existing_config_from_flash();
-    if raspberry_pi_is_awake {
-        let mut payload = [0u8; 12];
-        if let Some(free_spi) = flash_storage.free_spi() {
-            pi_spi.enable(free_spi, resets);
-
-            LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
-            LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
-            LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
-
-            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-            let crc = crc_check.checksum(&payload);
-            info!("Sending camera connect info {:?}", payload);
-            pi_spi.send_message(
-                ExtTransferMessage::CameraConnectInfo,
-                &payload,
-                crc,
-                dma,
-                &timer,
-                resets,
-            );
-            let device_config = pi_spi.return_payload().unwrap();
-            // Skip 4 bytes of CRC checking
-
-            let (new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
-            if let Some(new_config) = &new_config {
-                info!("Got config from rPi {:?}", new_config);
-                if existing_config.is_none() || *new_config != *existing_config.as_ref().unwrap() {
-                    if existing_config.is_some() {
-                        warn!(
-                            "Config has changed {}",
-                            *existing_config.as_ref().unwrap() != *new_config
-                        );
-                    }
-                    write_rp2040_flash(&device_config[4..4 + length_used]);
-                }
-            }
-            if let Some(spi_free) = pi_spi.disable() {
-                flash_storage.take_spi(spi_free, resets, clock_freq);
-            }
-            new_config
-        } else {
-            warn!("Flash spi not enabled");
-            existing_config
-        }
-    } else {
-        if let Some(existing_config) = &existing_config {
-            info!(
-                "Got device config {:?}, {}",
-                existing_config,
-                existing_config.device_name()
-            );
-        }
-        existing_config
-    }
-}
 pub fn core_1_task(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
@@ -281,6 +149,7 @@ pub fn core_1_task(
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
 ) {
+    info!("Core 1 start");
     let mut crc_buf = [0x42u8; 32 + 104];
     let mut payload_buf = [0x42u8; 2066];
     let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
@@ -291,7 +160,7 @@ pub fn core_1_task(
     let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
 
     let mut peripherals = unsafe { Peripherals::steal() };
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
+    let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
@@ -379,7 +248,7 @@ pub fn core_1_task(
         clock_freq.Hz(),
         radiometry_enabled,
         lepton_serial.unwrap_or(0),
-        &timer,
+        &mut timer,
     );
 
     if device_config.is_none() {
@@ -398,7 +267,7 @@ pub fn core_1_task(
         clock_freq,
         &mut shared_i2c,
         &mut delay,
-        &timer,
+        &mut timer,
     );
     if raspberry_pi_is_awake {
         pi_spi.enable_pio_spi();
@@ -422,6 +291,7 @@ pub fn core_1_task(
     let mut prev_frame_telemetry: Option<Telemetry> = None;
     let mut last_datetime = None;
     let mut motion_detection: Option<MotionTracking> = None;
+    let mut should_serve_frame = raspberry_pi_is_awake;
 
     // TODO: If flash storage is full, don't record.
     loop {
@@ -461,15 +331,25 @@ pub fn core_1_task(
                     clock_freq.Hz(),
                     radiometry_enabled,
                     lepton_serial.unwrap_or(0),
-                    &timer,
+                    &mut timer,
                 )
                 .unwrap();
-                // Enable raw frame transfers to pi – if not already enabled.
-                pi_spi.enable_pio_spi();
             }
         }
-        if raspberry_pi_is_awake {
+        //let counter = timer.get_counter();
+        //should_serve_frame = shared_i2c.tc2_agent_running(&mut delay, should_serve_frame);
+        //let time = (timer.get_counter() - counter).to_micros();
+        // if time > 200 {
+        //     info!(
+        //         "check tc2-agent time {}µs",
+        //         (timer.get_counter() - counter).to_micros()
+        //     );
+        // }
+        if should_serve_frame {
+            // Enable raw frame transfers to pi – if not already enabled.
             pi_spi.enable_pio_spi();
+        } else {
+            pi_spi.disable_pio_spi();
         }
         // Transfer RAW frame to pi if it is available.
         let transfer = pi_spi.begin_message(
@@ -481,6 +361,7 @@ pub fn core_1_task(
             0,
             cptv_stream.is_some(),
             &mut peripherals.DMA,
+            &mut timer,
         );
         let frame_buffer = &mut thread_local_frame_buffer
             .as_mut()
@@ -549,16 +430,10 @@ pub fn core_1_task(
                 // Begin cptv file
                 match shared_i2c.get_datetime(&mut delay) {
                     Ok(now) => {
-                        // info!(
-                        //     "NOW {}:{}:{} {}:{}:{}",
-                        //     now.year, now.month, now.day, now.hours, now.minutes, now.seconds
-                        // );
                         queried_rtc_this_frame = true;
                         let date_time_utc = get_naive_datetime(now);
                         let is_inside_recording_window =
                             device_config.time_is_in_recording_window(&date_time_utc);
-                        // FIXME: This is just for debug purposes.
-                        let is_inside_recording_window = true;
                         if is_inside_recording_window {
                             let _ = shared_i2c
                                 .set_recording_flag(&mut delay, true)
@@ -673,19 +548,6 @@ pub fn core_1_task(
             *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
         });
 
-        let end = timer.get_counter();
-        let frame_time_us = (end - start).to_micros();
-        slowest_frame = slowest_frame.max(frame_time_us);
-
-        // TODO: Actually might be more useful as a moving average.
-        // if frames_seen % 100 == 0 {
-        //     info!(
-        //         "Frame processing {}µs, worst case {}µs",
-        //         (end - start).to_micros(),
-        //         slowest_frame
-        //     );
-        // }
-
         if should_start_new_recording && cptv_stream.is_some() {
             info!("Send start recording message to core0");
             sio.fifo.write(Core1Task::StartRecording.into());
@@ -705,7 +567,7 @@ pub fn core_1_task(
                 clock_freq,
                 &mut shared_i2c,
                 &mut delay,
-                &timer,
+                &mut timer,
             );
             // TODO: If we woke to pi, when do we put it back to sleep?
         }
@@ -714,8 +576,9 @@ pub fn core_1_task(
                 info!("Got frame #{}", frame_num);
             }
 
+            // Once per minute, if we're not currently recording, check to see if we're outside the
+            // recording window.  If we are, check if the pi is on, and if so, tell it it can shut down whenever it wants.
             if frames_seen % (60 * 9) == 0 && cptv_stream.is_none() {
-                // Check this every minute.
                 let date_time_utc = if queried_rtc_this_frame && last_datetime.is_some() {
                     last_datetime
                 } else {
@@ -732,72 +595,46 @@ pub fn core_1_task(
                         device_config.time_is_in_recording_window(&date_time_utc);
                     if !is_inside_recording_window {
                         // Tell core0 we're exiting the recording loop
-                        maybe_offload_flash_storage(
-                            &mut flash_storage,
-                            &mut pi_spi,
-                            &mut peripherals.RESETS,
-                            &mut peripherals.DMA,
-                            &mut raspberry_pi_is_awake,
-                            clock_freq,
-                            &mut shared_i2c,
-                            &mut delay,
-                            &timer,
-                        );
-                        pi_spi.disable_pio_spi();
+                        advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                        if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
+                            info!("Pi is now powered down: {}", pi_is_powered_down);
+                            if pi_is_powered_down {
+                                raspberry_pi_is_awake = false;
+                                let date_time_utc = match shared_i2c.get_datetime(&mut delay) {
+                                    Ok(now) => Some(get_naive_datetime(now)),
+                                    Err(err_str) => {
+                                        error!("Unable to get DateTime from RTC: {}", err_str);
+                                        last_datetime
+                                    }
+                                };
+                                let next_recording_window_start = device_config
+                                    .next_recording_window_start(&date_time_utc.unwrap());
 
-                        let date_time_utc = match shared_i2c.get_datetime(&mut delay) {
-                            Ok(now) => Some(get_naive_datetime(now)),
-                            Err(err_str) => {
-                                error!("Unable to get DateTime from RTC: {}", err_str);
-                                last_datetime
+                                shared_i2c.clear_alarm();
+                                if let Ok(_) = shared_i2c
+                                    .set_wakeup_alarm(&next_recording_window_start, &mut delay)
+                                {
+                                    info!(
+                                        "Wake up alarm interrupt enabled {}",
+                                        shared_i2c.alarm_interrupt_enabled()
+                                    );
+                                    info!("Put rp2040 to sleep");
+                                    // Tell core 0 to power down the lepton module, and wait for reply.
+                                    sio.fifo.write(Core1Task::ReadyToSleep.into());
+                                    let _ = sio.fifo.read();
+                                    if let Ok(_) =
+                                        shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay)
+                                    {
+                                        info!("Sleeping");
+                                    } else {
+                                        error!("Failed sending sleep request to attiny");
+                                    }
+                                    // Now we can put ourselves to sleep.
+                                } else {
+                                    error!("Failed setting wake alarm, can't go to sleep");
+                                }
                             }
-                        };
-                        //info!("Would power down rpi");
-                        // let next_recording_window_start =
-                        //     device_config.next_recording_window_start(&date_time_utc.unwrap());
-
-                        let now = date_time_utc.unwrap();
-                        let next_recording_window_start = now.add(chrono::Duration::minutes(2));
-                        shared_i2c.clear_alarm();
-                        if let Ok(_) =
-                            shared_i2c.set_wakeup_alarm(&next_recording_window_start, &mut delay)
-                        {
-                            info!("Interrupt enabled {}", shared_i2c.alarm_interrupt_enabled());
-                            info!("Put us to sleep");
-
-                            power_down_raspberry_pi(
-                                &mut raspberry_pi_is_awake,
-                                &mut shared_i2c,
-                                &mut delay,
-                            );
-                            info!("Pi is now powered down: {}", raspberry_pi_is_awake);
-
-                            // let mut elapsed = 0;
-                            // while !shared_i2c.alarm_triggered() {
-                            //     delay.delay_ms(1000);
-                            //     info!("Alarm has not triggered, {}", elapsed);
-                            //     elapsed += 1;
-                            //     if elapsed > 3 * 60 {
-                            //         break;
-                            //     }
-                            // }
-                            // info!("Alarm triggered after {}s", elapsed);
-
-                            // Tell core 0 to power down the lepton module, and wait for reply.
-                            sio.fifo.write(Core1Task::ReadyToSleep.into());
-                            let _ = sio.fifo.read();
-                            if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
-                                info!("Sleeping");
-                            } else {
-                                error!("Failed sending sleep request to attiny");
-                            }
-                            // Now we can put ourselves to sleep.
-                        } else {
-                            error!("Failed setting wake alarm, can't go to sleep");
                         }
-                        // TODO: If we woke to pi, when do we put it back to sleep?
-                        // TODO: Now set the wakeup alarm to the next window start time, and ask the attiny
-                        // to put us to sleep.
                     }
                 }
             } else {

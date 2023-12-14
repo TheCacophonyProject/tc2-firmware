@@ -291,7 +291,7 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
 }
 
 struct FieldIterator {
-    state: [u8; 20], // TODO: What is the actual high-water mark for field sizes?
+    state: [u8; 30], // TODO: What is the actual high-water mark for field sizes?
     size: u8,
     code: u8,
     cursor: u16,
@@ -350,10 +350,9 @@ fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
     } else {
         size as u8
     };
-    // TODO: Maybe allow longer deviceName strings than 20 chars?
-    assert!(size <= 20);
+    //assert!(size <= 30);
     let mut iter_state = FieldIterator {
-        state: [0u8; 20],
+        state: [0u8; 30],
         size,
         code: code as u8,
         cursor: 0,
@@ -670,7 +669,7 @@ fn push_optional_field_iterator<T: Sized>(value: &Option<T>, code: FieldType) ->
         push_field_iterator(value, code)
     } else {
         FieldIterator {
-            state: [0u8; 20],
+            state: [0u8; 30],
             size: 0,
             code: 0,
             cursor: 0,
@@ -767,10 +766,10 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
 pub struct Cptv2Header {
     pub timestamp: u64,
     pub device_name: [u8; 63],
-    pub model: [u8; 20],
+    pub model: [u8; 30],
     pub device_id: u32,
     pub serial_number: Option<u32>,
-    pub firmware_version: Option<[u8; 20]>,
+    pub firmware_version: Option<[u8; 30]>,
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
     pub loc_timestamp: Option<u64>,
@@ -793,7 +792,7 @@ impl Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
-        let mut firmware = [0u8; 20];
+        let mut firmware = [0u8; 30];
         let mut cursor = CursorMut::new(&mut firmware);
         if let Some(((m_major, m_minor, m_build), (d_major, d_minor, d_build))) =
             lepton_firmware_version
@@ -811,7 +810,7 @@ impl Cptv2Header {
         let mut header = Cptv2Header {
             timestamp,
             device_name: [0; 63],
-            model: [0; 20],
+            model: [0; 30],
             device_id: device_config.device_id,
             serial_number: lepton_serial,
             firmware_version: Some(firmware),
@@ -824,8 +823,10 @@ impl Cptv2Header {
             min_value: u16::MAX,
             max_value: u16::MIN,
         };
-        header.device_name[0..device_config.device_name_bytes().len()]
-            .copy_from_slice(device_config.device_name_bytes());
+        // NOTE: Device names longer than 30 chars are truncated
+        header.device_name[0..device_config.device_name_bytes().len().max(30)].copy_from_slice(
+            &device_config.device_name_bytes()[0..device_config.device_name_bytes().len().max(30)],
+        );
         let model = if lepton_version == 35 {
             &b"lepton3.5"[..]
         } else {

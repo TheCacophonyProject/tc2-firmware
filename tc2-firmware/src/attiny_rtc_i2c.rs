@@ -173,19 +173,26 @@ impl SharedI2C {
         }
     }
 
-    fn try_attiny_read_command(&mut self, command: u8, delay: &mut Delay) -> Result<u8, Error> {
+    fn try_attiny_read_command(
+        &mut self,
+        command: u8,
+        delay: &mut Delay,
+        attempts: Option<i32>,
+    ) -> Result<u8, Error> {
         let mut payload = [0u8; 1];
+        let max_attempts = attempts.unwrap_or(100);
         let mut num_attempts = 0;
         loop {
             match self.attiny_read_command(command, &mut payload) {
                 Ok(_) => {
+                    info!("tc2-agent ready {}, attempts {}", payload[0], num_attempts);
                     return Ok(payload[0]);
                 }
                 Err(e) => {
-                    if num_attempts == 100 {
+                    num_attempts += 1;
+                    if num_attempts == max_attempts {
                         return Err(e);
                     }
-                    num_attempts += 1;
                     delay.delay_us(500);
                 }
             }
@@ -214,7 +221,7 @@ impl SharedI2C {
     }
 
     pub fn get_attiny_firmware_version(&mut self, delay: &mut Delay) -> Result<u8, Error> {
-        self.try_attiny_read_command(REG_VERSION, delay)
+        self.try_attiny_read_command(REG_VERSION, delay, None)
     }
 
     pub fn tell_pi_to_shutdown(&mut self, delay: &mut Delay) -> Result<(), Error> {
@@ -230,7 +237,7 @@ impl SharedI2C {
         delay: &mut Delay,
         is_recording: bool,
     ) -> Result<(), Error> {
-        let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay) {
+        let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => Ok(state & 1 << 1 == 2),
             Err(e) => Err(e),
         };
@@ -254,7 +261,7 @@ impl SharedI2C {
         print: bool,
     ) -> Result<bool, Error> {
         let mut recorded_camera_state = None;
-        let pi_is_awake = match self.try_attiny_read_command(REG_CAMERA_STATE, delay) {
+        let pi_is_awake = match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
             Ok(state) => {
                 recorded_camera_state = Some(CameraState::from(state));
                 let camera_state = CameraState::from(state);
@@ -267,19 +274,7 @@ impl SharedI2C {
         };
         if let Ok(is_awake) = pi_is_awake {
             if is_awake {
-                match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay) {
-                    Ok(state) => {
-                        if print {
-                            info!(
-                                "Camera state {:?}, tc2-agent ready: {}",
-                                recorded_camera_state.as_ref().unwrap(),
-                                state & 1 << 1 == 2
-                            );
-                        }
-                        Ok(state & 1 << 1 == 2)
-                    }
-                    Err(e) => Err(e),
-                }
+                self.tc2_agent_is_ready(delay, print, None)
             } else {
                 if print {
                     if let Some(state) = &recorded_camera_state {
@@ -293,8 +288,30 @@ impl SharedI2C {
         }
     }
 
+    pub fn tc2_agent_is_ready(
+        &mut self,
+        delay: &mut Delay,
+        print: bool,
+        max_attempts: Option<i32>,
+    ) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, max_attempts) {
+            Ok(state) => {
+                if print {
+                    info!("tc2-agent ready: {}", state & 1 << 1 == 2);
+                }
+                Ok(state & 1 << 1 == 2)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_running(&mut self, delay: &mut Delay, prev_value: bool) -> bool {
+        self.tc2_agent_is_ready(delay, false, Some(1))
+            .unwrap_or(prev_value)
+    }
+
     pub fn pi_is_powered_down(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_CAMERA_STATE, delay) {
+        match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
             Ok(state) => {
                 let camera_state = CameraState::from(state);
                 match camera_state {
@@ -357,7 +374,7 @@ impl SharedI2C {
     ) -> Result<(), Error> {
         let wake_hour = datetime_utc.time().hour();
         let wake_min = datetime_utc.time().minute();
-        info!("Setting wake alarm for {}h:{}m", wake_hour, wake_min);
+        info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
         let mut num_attempts = 0;
         loop {
             match self.rtc().set_alarm_hours(wake_hour as u8) {
@@ -406,6 +423,6 @@ impl SharedI2C {
     }
 
     pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        self.try_attiny_write_command(REG_TRIGGER_SLEEP, 0x02, delay)
+        self.try_attiny_write_command(REG_TRIGGER_SLEEP, 0x02 | 0x01, delay)
     }
 }

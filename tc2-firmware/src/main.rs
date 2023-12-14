@@ -19,6 +19,7 @@ mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
 //mod pdm_microphone;
+mod core1_sub_tasks;
 mod rp2040_flash;
 mod sun_times;
 
@@ -246,7 +247,7 @@ fn main() -> ! {
 
     {
         let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_push_pull_output(),
+            pi_ping: pins.gpio5.into_pull_down_input(),
 
             pi_miso: pins.gpio15.into_floating_disabled(),
             pi_mosi: pins.gpio12.into_floating_disabled(),
