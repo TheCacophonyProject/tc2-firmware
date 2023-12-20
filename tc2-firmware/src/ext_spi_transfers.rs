@@ -221,9 +221,11 @@ impl ExtSpiTransfers {
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
         self.ping = Some(ping_pin.into_pull_down_input());
-        if finished {
-            warn!("Alarm triggered, ping took {}", ping_time);
-        }
+
+        // FIXME - Can we print this when we think the Pi should be awake?
+        // if finished {
+        //     warn!("Alarm triggered, ping took {}", ping_time);
+        // }
         !finished
     }
 
@@ -398,7 +400,7 @@ impl ExtSpiTransfers {
         dma_peripheral: &mut DMA,
         timer: &mut Timer,
         resets: &mut RESETS,
-    ) {
+    ) -> bool {
         // The transfer header contains the transfer type (2x)
         // the number of bytes to read for the payload (should this be twice?)
         // the 16 bit crc of the payload (twice)
@@ -432,9 +434,11 @@ impl ExtSpiTransfers {
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut transferred_without_abort = false;
+        let mut finished_transfer = false;
         while !transmit_success {
             //while !transferred_without_abort {
             if self.ping(timer) {
+                finished_transfer = true;
                 let start = timer.get_counter();
                 let mut transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
@@ -504,9 +508,11 @@ impl ExtSpiTransfers {
                 }
             } else {
                 warn!("Pi failed to receive");
+                finished_transfer = false;
                 transmit_success = true;
             }
         }
+        finished_transfer
     }
 
     pub fn disable(&mut self) -> Option<SPI1> {

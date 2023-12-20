@@ -102,6 +102,8 @@ pub fn frame_acquisition_loop(
     let mut needs_ffc = false;
     let mut ffc_requested = false;
 
+    let mut frames_seen = 0;
+    let mut last_frame_seen = None;
     let start = timer.get_counter();
     let end = timer.get_counter();
 
@@ -192,8 +194,25 @@ pub fn frame_acquisition_loop(
                     let segment_num = packet_header >> 12;
                     if prev_packet_id == packet_id_with_valid_segment_num - 1 && segment_num == 1 {
                         prev_frame_counter = frame_counter;
+                        if unverified_frame_counter < prev_frame_counter {
+                            warn!("Frames appear to be out of sync / offset");
+                            got_sync = false;
+                        }
+                        if unverified_frame_counter > frame_counter + 1000 {
+                            warn!("(2) Frames appear to be out of sync / offset");
+                            got_sync = false;
+                        }
                         frame_counter = unverified_frame_counter;
                     }
+                    if frames_seen % 9 == 0 {
+                        // FIXME We seem to be able to get into this state, without out of sync ever triggering,
+                        //  and frame_counter is the same each iteration through the loop.
+                        info!(
+                            "Core0 got frame #{} {}, synced {}",
+                            frames_seen, frame_counter, got_sync
+                        );
+                    }
+                    frames_seen += 1;
 
                     // See if we're starting a frame, or ending it.
                     if valid_frame_current_segment_num > 1
@@ -317,6 +336,15 @@ pub fn frame_acquisition_loop(
 
                             attempt = 0;
                             prev_frame_needs_transfer = true;
+
+                            if let Some(last_frame_seen) = last_frame_seen {
+                                if last_frame_seen != frame_counter - 1 {
+                                    warn!("Looks like we lost sync");
+                                    got_sync = false;
+                                    prev_frame_needs_transfer = false;
+                                }
+                            }
+                            last_frame_seen = Some(frame_counter);
                         } else {
                             // Increment in good faith if we're on the last packet of a valid segment
                             valid_frame_current_segment_num += 1;

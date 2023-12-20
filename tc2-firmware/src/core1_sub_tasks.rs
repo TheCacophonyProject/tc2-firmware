@@ -18,7 +18,6 @@ pub fn maybe_offload_flash_storage(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    raspberry_pi_is_awake: &mut bool,
     clock_freq: u32,
     shared_i2c: &mut SharedI2C,
     delay: &mut Delay,
@@ -26,75 +25,71 @@ pub fn maybe_offload_flash_storage(
 ) {
     if flash_storage.has_files_to_offload() {
         warn!("There are files to offload!");
-        if !*raspberry_pi_is_awake {
-            wake_raspberry_pi(raspberry_pi_is_awake, shared_i2c, delay);
-        }
-        if *raspberry_pi_is_awake {
-            // do some offloading.
-            let mut file_count = 0;
-            flash_storage.begin_offload();
-            let mut file_start = true;
-            let mut part_count = 0;
+        wake_raspberry_pi(shared_i2c, delay);
 
-            // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-            while let Some(((part, crc, block_index, page_index), is_last, spi)) =
-                flash_storage.get_file_part()
-            {
-                pi_spi.enable(spi, resets);
-                let transfer_type = if file_start && !is_last {
-                    ExtTransferMessage::BeginFileTransfer
-                } else if !file_start && !is_last {
-                    ExtTransferMessage::ResumeFileTransfer
-                } else if is_last {
-                    ExtTransferMessage::EndFileTransfer
-                } else if file_start && is_last {
-                    ExtTransferMessage::BeginAndEndFileTransfer
-                } else {
-                    crate::unreachable!("Invalid file transfer state");
-                };
+        // do some offloading.
+        let mut file_count = 0;
+        flash_storage.begin_offload();
+        let mut file_start = true;
+        let mut part_count = 0;
 
-                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-                let current_crc = crc_check.checksum(&part);
-                if current_crc != crc {
-                    warn!(
-                        "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
-                        part_count, block_index, page_index
-                    );
-                }
-                //let start = timer.get_counter();
-                pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-                //info!("Took {}µs", (timer.get_counter() - start).to_micros());
+        // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
+        while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+            flash_storage.get_file_part()
+        {
+            pi_spi.enable(spi, resets);
+            let transfer_type = if file_start && !is_last {
+                ExtTransferMessage::BeginFileTransfer
+            } else if !file_start && !is_last {
+                ExtTransferMessage::ResumeFileTransfer
+            } else if is_last {
+                ExtTransferMessage::EndFileTransfer
+            } else if file_start && is_last {
+                ExtTransferMessage::BeginAndEndFileTransfer
+            } else {
+                crate::unreachable!("Invalid file transfer state");
+            };
 
-                part_count += 1;
-                if is_last {
-                    file_count += 1;
-                    info!("Offloaded {} file(s)", file_count);
-                    file_start = true;
-                } else {
-                    file_start = false;
-                }
-
-                // Give spi peripheral back to flash storage.
-                if let Some(spi) = pi_spi.disable() {
-                    flash_storage.take_spi(spi, resets, clock_freq.Hz());
-                }
+            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+            let current_crc = crc_check.checksum(&part);
+            if current_crc != crc {
+                warn!(
+                    "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                    part_count, block_index, page_index
+                );
             }
-            info!("Completed file offload, transferred {} files", file_count);
-            // TODO: Some validation from the raspberry pi that the transfer completed
-            //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
+            //let start = timer.get_counter();
+            pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+            //info!("Took {}µs", (timer.get_counter() - start).to_micros());
 
-            // Once we've successfully offloaded all files, we can erase the flash and we're
-            // ready to start recording new CPTV files there.
+            part_count += 1;
+            if is_last {
+                file_count += 1;
+                info!("Offloaded {} file(s)", file_count);
+                file_start = true;
+            } else {
+                file_start = false;
+            }
 
-            info!("Erasing after successful offload");
-            //flash_storage.erase_all_good_used_blocks();
-            flash_storage.erase_all_blocks();
+            // Give spi peripheral back to flash storage.
+            if let Some(spi) = pi_spi.disable() {
+                flash_storage.take_spi(spi, resets, clock_freq.Hz());
+            }
         }
+        info!("Completed file offload, transferred {} files", file_count);
+        // TODO: Some validation from the raspberry pi that the transfer completed
+        //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
+
+        // Once we've successfully offloaded all files, we can erase the flash and we're
+        // ready to start recording new CPTV files there.
+
+        info!("Erasing after successful offload");
+        //flash_storage.erase_all_good_used_blocks();
+        flash_storage.erase_all_blocks();
     }
 }
 
 pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
-    raspberry_pi_is_awake: bool,
     flash_storage: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
@@ -105,26 +100,25 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     timer: &mut Timer,
 ) -> Option<DeviceConfig> {
     let existing_config = DeviceConfig::load_existing_config_from_flash();
-    if raspberry_pi_is_awake {
-        let mut payload = [0u8; 12];
-        if let Some(free_spi) = flash_storage.free_spi() {
-            pi_spi.enable(free_spi, resets);
+    let mut payload = [0u8; 12];
+    if let Some(free_spi) = flash_storage.free_spi() {
+        pi_spi.enable(free_spi, resets);
 
-            LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
-            LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
-            LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
+        LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
+        LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
+        LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
 
-            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-            let crc = crc_check.checksum(&payload);
-            info!("Sending camera connect info {:?}", payload);
-            pi_spi.send_message(
-                ExtTransferMessage::CameraConnectInfo,
-                &payload,
-                crc,
-                dma,
-                timer,
-                resets,
-            );
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let crc = crc_check.checksum(&payload);
+        info!("Sending camera connect info {:?}", payload);
+        if pi_spi.send_message(
+            ExtTransferMessage::CameraConnectInfo,
+            &payload,
+            crc,
+            dma,
+            timer,
+            resets,
+        ) {
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
                 // Skip 4 bytes of CRC checking
 
@@ -153,10 +147,10 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             }
             new_config
         } else {
-            warn!("Flash spi not enabled");
             existing_config
         }
     } else {
+        warn!("Flash spi not enabled");
         if let Some(existing_config) = &existing_config {
             info!(
                 "Got device config {:?}, {}",

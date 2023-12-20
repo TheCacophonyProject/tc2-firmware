@@ -474,8 +474,15 @@ impl OnboardFlash {
         // );
     }
 
-    pub fn is_too_full(&self) -> bool {
+    pub fn is_too_full_to_start_new_recordings(&self) -> bool {
+        // Whether or not we should start any new recordings, or should offload.
         self.current_block_index > (2048 - 256)
+    }
+
+    pub fn is_nearly_full(&self) -> bool {
+        // Lets us know when we should end the current recording.
+        // We only need to allow a single frames worth – 2–3 blocks should be more than enough!
+        self.current_block_index > (2048 - 3)
     }
 
     pub fn erase_all_blocks(&mut self) {
