@@ -23,9 +23,12 @@ pub struct DeviceConfig {
 
 impl Default for DeviceConfig {
     fn default() -> Self {
+        let test_name = "default".as_bytes();
+        let mut device_name = [0u8; 64];
+        device_name[0..test_name.len()].copy_from_slice(test_name);
         DeviceConfig {
             device_id: 0,
-            device_name: [0; 64],
+            device_name,
             location: (0.0, 0.0),
             location_altitude: None,
             location_timestamp: None,
