@@ -33,7 +33,7 @@ impl Default for DeviceConfig {
             start_recording_time: (false, 0),
             end_recording_time: (false, 0),
             is_continuous_recorder: false,
-            use_low_power_mode: true,
+            use_low_power_mode: false,
         }
     }
 }
