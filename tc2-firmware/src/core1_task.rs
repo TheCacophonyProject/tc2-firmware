@@ -584,7 +584,8 @@ pub fn core_1_task(
                                 // NOTE: For DEBUG purposes
                                 let next_recording_window_start =
                                     date_time_utc + chrono::Duration::minutes(2);
-                                shared_i2c.clear_alarm();
+                                shared_i2c.enable_alarm(&mut delay);
+                                shared_i2c.print_alarm_status(&mut delay);
                                 if let Ok(_) = shared_i2c
                                     .set_wakeup_alarm(&next_recording_window_start, &mut delay)
                                 {

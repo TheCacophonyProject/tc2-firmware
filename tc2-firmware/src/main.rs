@@ -41,6 +41,7 @@ use bsp::{
     pac::Peripherals,
 };
 use core::cell::RefCell;
+use cortex_m::asm::delay;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::*;
@@ -143,7 +144,11 @@ fn main() -> ! {
     let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
     let alarm_woke_us = shared_i2c.alarm_triggered();
     info!("Woken by RTC alarm? {}", alarm_woke_us);
-    shared_i2c.cancel_alarm();
+    if alarm_woke_us {
+        shared_i2c.clear_alarm();
+    }
+    shared_i2c.disable_alarm(&mut delay);
+    shared_i2c.print_alarm_status(&mut delay);
     let i2c1 = shared_i2c.free();
 
     // If we're waking up to make an audio recording, do that.

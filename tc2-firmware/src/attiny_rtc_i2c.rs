@@ -394,18 +394,55 @@ impl SharedI2C {
         self.rtc().set_datetime(&date_time).unwrap();
     }
 
+    pub fn enable_alarm(&mut self, delay: &mut Delay) {
+        self.rtc().clear_alarm_flag().unwrap_or(());
+        self.rtc()
+            .control_alarm_interrupt(Control::On)
+            .unwrap_or(());
+        self.rtc().control_alarm_day(Control::Off).unwrap_or(());
+        self.rtc().control_alarm_hours(Control::On).unwrap_or(());
+        self.rtc().control_alarm_minutes(Control::On).unwrap_or(());
+        self.rtc().control_alarm_weekday(Control::Off).unwrap_or(());
+    }
+
+    pub fn disable_alarm(&mut self, delay: &mut Delay) {
+        self.rtc().clear_alarm_flag().unwrap_or(());
+        self.rtc()
+            .control_alarm_interrupt(Control::Off)
+            .unwrap_or(());
+        self.rtc().control_alarm_day(Control::Off).unwrap_or(());
+        self.rtc().control_alarm_hours(Control::Off).unwrap_or(());
+        self.rtc().control_alarm_minutes(Control::Off).unwrap_or(());
+        self.rtc().control_alarm_weekday(Control::Off).unwrap_or(());
+    }
+
+    pub fn print_alarm_status(&mut self, delay: &mut Delay) {
+        info!(
+            "Alarm interrupt enabled: {}",
+            self.rtc().is_alarm_interrupt_enabled().unwrap_or(false)
+        );
+        info!(
+            "Alarm day enabled: {}",
+            self.rtc().is_alarm_day_enabled().unwrap_or(false)
+        );
+        info!(
+            "Alarm weekday enabled: {}",
+            self.rtc().is_alarm_weekday_enabled().unwrap_or(false)
+        );
+        info!(
+            "Alarm hour enabled: {}",
+            self.rtc().is_alarm_hours_enabled().unwrap_or(false)
+        );
+        info!(
+            "Alarm minute enabled: {}",
+            self.rtc().is_alarm_minutes_enabled().unwrap_or(false)
+        );
+    }
     pub fn set_wakeup_alarm(
         &mut self,
         datetime_utc: &NaiveDateTime,
         delay: &mut Delay,
     ) -> Result<(), Error> {
-        self.rtc()
-            .control_alarm_interrupt(Control::On)
-            .unwrap_or(());
-        self.rtc().control_alarm_day(Control::On).unwrap_or(());
-        self.rtc().control_alarm_hours(Control::On).unwrap_or(());
-        self.rtc().control_alarm_minutes(Control::On).unwrap_or(());
-        self.rtc().control_alarm_weekday(Control::On).unwrap_or(());
         let wake_hour = datetime_utc.time().hour();
         let wake_min = datetime_utc.time().minute();
         info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
@@ -444,18 +481,26 @@ impl SharedI2C {
         }
     }
 
-    pub fn alarm_triggered(&mut self) -> bool {
-        self.rtc().get_alarm_flag().unwrap_or(false)
+    pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
+        let mut num_attempts = 0;
+        loop {
+            match self.rtc().get_alarm_flag() {
+                Ok(val) => {
+                    return val;
+                }
+                Err(e) => {
+                    if num_attempts == 100 {
+                        error!("Failed reading alarm_triggered from RTC");
+                        return false;
+                    }
+                    num_attempts += 1;
+                    delay.delay_us(500);
+                }
+            }
+        }
     }
 
     pub fn clear_alarm(&mut self) -> () {
-        self.rtc().clear_alarm_flag().unwrap_or(())
-    }
-
-    pub fn cancel_alarm(&mut self) -> () {
-        self.rtc()
-            .control_alarm_interrupt(Control::Off)
-            .unwrap_or(());
         self.rtc().clear_alarm_flag().unwrap_or(())
     }
 
