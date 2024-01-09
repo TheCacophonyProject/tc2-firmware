@@ -21,6 +21,23 @@ pub struct DeviceConfig {
     pub use_low_power_mode: bool,
 }
 
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        DeviceConfig {
+            device_id: 0,
+            device_name: [0; 64],
+            location: (0.0, 0.0),
+            location_altitude: None,
+            location_timestamp: None,
+            location_accuracy: None,
+            start_recording_time: (false, 0),
+            end_recording_time: (false, 0),
+            is_continuous_recorder: false,
+            use_low_power_mode: true,
+        }
+    }
+}
+
 impl DeviceConfig {
     pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
         let slice = read_rp2040_flash();

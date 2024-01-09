@@ -238,10 +238,7 @@ pub fn core_1_task(
         &mut timer,
     );
 
-    if device_config.is_none() {
-        panic!("Device has no configuration yet.");
-    }
-    let mut device_config = device_config.unwrap();
+    let mut device_config = device_config.unwrap_or(DeviceConfig::default());
     if !device_config.use_low_power_mode {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
     }
