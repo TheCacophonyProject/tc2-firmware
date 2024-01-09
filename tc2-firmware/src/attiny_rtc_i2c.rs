@@ -452,7 +452,7 @@ impl SharedI2C {
         self.rtc()
             .control_alarm_interrupt(Control::Off)
             .unwrap_or(());
-        self.rtc().disable_all_alarms().unwrap_or(());
+        //self.rtc().disable_all_alarms().unwrap_or(());
         self.rtc().clear_alarm_flag().unwrap_or(())
     }
 
