@@ -207,10 +207,10 @@ pub fn frame_acquisition_loop(
                     if frames_seen % 9 == 0 {
                         // FIXME We seem to be able to get into this state, without out of sync ever triggering,
                         //  and frame_counter is the same each iteration through the loop.
-                        info!(
-                            "Core0 got frame #{} {}, synced {}",
-                            frames_seen, frame_counter, got_sync
-                        );
+                        // info!(
+                        //     "Core0 got frame #{} {}, synced {}",
+                        //     frames_seen, frame_counter, got_sync
+                        // );
                     }
                     frames_seen += 1;
 

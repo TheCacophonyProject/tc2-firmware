@@ -548,7 +548,7 @@ pub fn core_1_task(
                 //  since the change in frame times can affect our frame sync.  It's fine to call this repeatedly,
                 //  the RPi will shut down when it wants to.
 
-                //advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 last_datetime = match shared_i2c.get_datetime(&mut delay) {
                     Ok(now) => Some(get_naive_datetime(now)),
                     Err(err_str) => {
@@ -637,7 +637,7 @@ pub fn core_1_task(
         }
         prev_frame_telemetry = Some(frame_telemetry);
         frames_seen += 1;
-        info!("Loop took {}", (timer.get_counter() - start).to_micros());
+        //info!("Loop took {}", (timer.get_counter() - start).to_micros());
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
 }
