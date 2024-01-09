@@ -402,6 +402,10 @@ impl SharedI2C {
         self.rtc()
             .control_alarm_interrupt(Control::On)
             .unwrap_or(());
+        self.rtc().control_alarm_day(Control::On).unwrap_or(());
+        self.rtc().control_alarm_hours(Control::On).unwrap_or(());
+        self.rtc().control_alarm_minutes(Control::On).unwrap_or(());
+        self.rtc().control_alarm_weekday(Control::On).unwrap_or(());
         let wake_hour = datetime_utc.time().hour();
         let wake_min = datetime_utc.time().minute();
         info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
@@ -452,7 +456,6 @@ impl SharedI2C {
         self.rtc()
             .control_alarm_interrupt(Control::Off)
             .unwrap_or(());
-        //self.rtc().disable_all_alarms().unwrap_or(());
         self.rtc().clear_alarm_flag().unwrap_or(())
     }
 
