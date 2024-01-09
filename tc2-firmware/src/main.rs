@@ -142,7 +142,7 @@ fn main() -> ! {
     );
     let mut delay = Delay::new(core.SYST, system_clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
-    let alarm_woke_us = shared_i2c.alarm_triggered();
+    let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm();
