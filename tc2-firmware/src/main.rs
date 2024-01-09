@@ -23,6 +23,7 @@ mod core1_sub_tasks;
 mod rp2040_flash;
 mod sun_times;
 
+use crate::attiny_rtc_i2c::SharedI2C;
 pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
@@ -139,6 +140,11 @@ fn main() -> ! {
         &clocks.system_clock,
     );
     let mut delay = Delay::new(core.SYST, system_clock_freq);
+    let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+    let alarm_woke_us = shared_i2c.alarm_triggered();
+    info!("Woken by RTC alarm? {}", alarm_woke_us);
+    shared_i2c.cancel_alarm();
+    let i2c1 = shared_i2c.free();
 
     // If we're waking up to make an audio recording, do that.
     let existing_config = DeviceConfig::load_existing_config_from_flash();

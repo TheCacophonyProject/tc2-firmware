@@ -7,7 +7,7 @@ use embedded_hal::prelude::{
     _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write,
     _embedded_hal_blocking_i2c_WriteRead,
 };
-use pcf8563::{DateTime, PCF8563};
+use pcf8563::{Control, DateTime, PCF8563};
 use rp2040_hal::gpio::bank0::{Gpio6, Gpio7};
 use rp2040_hal::gpio::{FunctionI2C, Pin, PullDown};
 use rp2040_hal::i2c::Error;
@@ -240,6 +240,10 @@ impl SharedI2C {
         self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x01, delay)
     }
 
+    pub fn power_ctrl_status(&mut self, delay: &mut Delay) -> Result<u8, Error> {
+        self.try_attiny_read_command(REG_RP2040_PI_POWER_CTRL, delay, None)
+    }
+
     pub fn set_recording_flag(
         &mut self,
         delay: &mut Delay,
@@ -286,7 +290,12 @@ impl SharedI2C {
         };
         if let Ok(is_awake) = pi_is_awake {
             if is_awake {
-                self.tc2_agent_is_ready(delay, print, None)
+                // If the agent is ready, make sure the REG_RP2040_PI_POWER_CTRL is set to 1
+                let ctrl_state = self.power_ctrl_status(delay);
+                info!("Power ctrl state {:?}", ctrl_state);
+                let _ = self.tell_pi_to_wakeup(delay);
+                let agent_ready = self.tc2_agent_is_ready(delay, print, None);
+                agent_ready
             } else {
                 if print {
                     if let Some(state) = &recorded_camera_state {
@@ -390,6 +399,9 @@ impl SharedI2C {
         datetime_utc: &NaiveDateTime,
         delay: &mut Delay,
     ) -> Result<(), Error> {
+        self.rtc()
+            .control_alarm_interrupt(Control::On)
+            .unwrap_or(());
         let wake_hour = datetime_utc.time().hour();
         let wake_min = datetime_utc.time().minute();
         info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
@@ -433,6 +445,14 @@ impl SharedI2C {
     }
 
     pub fn clear_alarm(&mut self) -> () {
+        self.rtc().clear_alarm_flag().unwrap_or(())
+    }
+
+    pub fn cancel_alarm(&mut self) -> () {
+        self.rtc()
+            .control_alarm_interrupt(Control::Off)
+            .unwrap_or(());
+        self.rtc().disable_all_alarms().unwrap_or(());
         self.rtc().clear_alarm_flag().unwrap_or(())
     }
 

@@ -324,7 +324,11 @@ impl ExtSpiTransfers {
     }
 
     pub fn enable_pio_spi(&mut self) {
-        if self.pio_tx.is_none() {
+        if self.pio_tx.is_none()
+            && self.miso_disabled.is_some()
+            && self.cs_disabled.is_some()
+            && self.clk_disabled.is_some()
+        {
             self.miso_pio = Some(
                 self.miso_disabled
                     .take()
