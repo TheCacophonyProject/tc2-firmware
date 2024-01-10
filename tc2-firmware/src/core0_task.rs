@@ -102,6 +102,8 @@ pub fn frame_acquisition_loop(
     let mut needs_ffc = false;
     let mut ffc_requested = false;
 
+    let mut seen_telemetry_revision = [0u8, 0u8];
+    let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
     let mut last_frame_seen = None;
     let start = timer.get_counter();
@@ -121,9 +123,9 @@ pub fn frame_acquisition_loop(
         {
             // Go to sleep, skip dummy segment
 
-            // FIXME - Whenever recording starts, we lose a frame here.  Let's just use a bit more power
-            //  for now until we figure out how to fix this.
-            // rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq());
+            // FIXME - Whenever recording starts, we lose a frame here. It's the all important first frame of the recording.
+            //  Let's just use a bit more power for now until we figure out how to fix this.
+            // rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
@@ -185,6 +187,40 @@ pub fn frame_acquisition_loop(
                                 {
                                     needs_ffc = true;
                                     ffc_requested = false;
+                                }
+                                // Sometimes the header is invalid, but the frame becomes valid and gets sync.
+                                // Because the telemetry revision is static across frame headers we can detect this
+                                // case and not send the frame, as it may cause false triggers.
+                                if times_telemetry_revision_stable > -1
+                                    && times_telemetry_revision_stable <= 2
+                                {
+                                    if seen_telemetry_revision[0] == telemetry.revision[0]
+                                        && seen_telemetry_revision[1] == telemetry.revision[1]
+                                    {
+                                        times_telemetry_revision_stable += 1;
+                                    } else {
+                                        times_telemetry_revision_stable = -1;
+                                    }
+                                    if times_telemetry_revision_stable > 2 {
+                                        info!(
+                                            "Got stable telemetry revision {:?}",
+                                            telemetry.revision
+                                        );
+                                    }
+                                }
+                                if times_telemetry_revision_stable == -1 {
+                                    // Initialise seen telemetry revision.
+                                    seen_telemetry_revision =
+                                        [telemetry.revision[0], telemetry.revision[1]];
+                                    times_telemetry_revision_stable += 1;
+                                }
+                                if times_telemetry_revision_stable > 2
+                                    && (seen_telemetry_revision[0] != telemetry.revision[0]
+                                        || seen_telemetry_revision[1] != telemetry.revision[1])
+                                {
+                                    // We have a misaligned/invalid frame.
+                                    warn!("Got misaligned frame header");
+                                    got_sync = false;
                                 }
                             }
                         }
@@ -375,26 +411,31 @@ pub fn frame_acquisition_loop(
                             "Packet order mismatch current: {}, prev: {}, seg {} #{}",
                             packet_id, prev_packet_id, current_segment_num, attempt
                         );
-                        lepton.wait_for_ready(false);
-                        lepton.reset_spi(
-                            delay,
-                            resets,
-                            clocks.peripheral_clock.freq(),
-                            LEPTON_SPI_CLOCK_FREQ.Hz(),
-                            false,
-                        );
-                        if !has_done_initial_ffc {
-                            info!("Requesting FFC");
-                            let success = lepton.do_ffc();
-                            match success {
-                                Ok(success) => {
-                                    info!("Success requesting FFC");
+                        if attempt < 500 {
+                            lepton.wait_for_ready(false);
+                            lepton.reset_spi(
+                                delay,
+                                resets,
+                                clocks.peripheral_clock.freq(),
+                                LEPTON_SPI_CLOCK_FREQ.Hz(),
+                                false,
+                            );
+                            if !has_done_initial_ffc {
+                                info!("Requesting FFC");
+                                let success = lepton.do_ffc();
+                                match success {
+                                    Ok(success) => {
+                                        info!("Success requesting FFC");
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to request FFC {:?}", e);
+                                    }
                                 }
-                                Err(e) => {
-                                    info!("Failed to request FFC {:?}", e);
-                                }
+                                has_done_initial_ffc = true;
                             }
-                            has_done_initial_ffc = true;
+                        } else {
+                            has_done_initial_ffc = false;
+                            lepton.reboot(delay);
                         }
                         break 'scanline;
                     } else {

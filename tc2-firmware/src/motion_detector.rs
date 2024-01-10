@@ -19,8 +19,8 @@ fn trigger_threshold() -> u16 {
 type HotMap = [(bool, u16); 64];
 pub struct MotionTracking {
     pub hot_map: HotMap,
-    hot_count: u8,      // How many total segments are hot
-    hot_edge_count: u8, // How many edge segments are hot
+    pub hot_count: u8,      // How many total segments are hot
+    pub hot_edge_count: u8, // How many edge segments are hot
     timeout_in_n_frames: Option<u16>,
     triggered_this_frame: bool,
 }

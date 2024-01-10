@@ -4,6 +4,7 @@ use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::DeviceConfig;
 use crate::lepton::Telemetry;
+use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use crate::FIRMWARE_VERSION;
@@ -485,6 +486,7 @@ impl<'a> CptvStream<'a> {
         prev_frame: &mut [u16],
         frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
+        motion_tracking: &MotionTracking,
     ) {
         let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
@@ -504,8 +506,11 @@ impl<'a> CptvStream<'a> {
 
         if self.cptv_header.total_frame_count % 10 == 0 {
             info!(
-                "Write frame #{}, {}",
-                self.cptv_header.total_frame_count, frame_telemetry.frame_num
+                "Write frame #{}, {}, hot ({}/{})",
+                self.cptv_header.total_frame_count,
+                frame_telemetry.frame_num,
+                motion_tracking.hot_count,
+                motion_tracking.hot_edge_count
             );
         }
         for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
@@ -824,8 +829,8 @@ impl Cptv2Header {
             max_value: u16::MIN,
         };
         // NOTE: Device names longer than 30 chars are truncated
-        header.device_name[0..device_config.device_name_bytes().len().max(30)].copy_from_slice(
-            &device_config.device_name_bytes()[0..device_config.device_name_bytes().len().max(30)],
+        header.device_name[0..device_config.device_name_bytes().len()].copy_from_slice(
+            &device_config.device_name_bytes()[0..device_config.device_name_bytes().len()],
         );
         let model = if lepton_version == 35 {
             &b"lepton3.5"[..]

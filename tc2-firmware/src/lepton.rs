@@ -817,7 +817,7 @@ impl LeptonModule {
         ))
     }
 
-    pub fn reboot(&mut self, delay: &mut Delay, wait: bool) -> bool {
+    pub fn reboot(&mut self, delay: &mut Delay) -> bool {
         warn!("Rebooting lepton module");
         let success = self.execute_command(lepton_command(
             LEPTON_SUB_SYSTEM_OEM,
@@ -1264,6 +1264,7 @@ pub enum TelemetryLocation {
 
 #[derive(Debug, Format)]
 pub struct Telemetry {
+    pub revision: [u8; 2],
     pub frame_num: u32,
     pub msec_on: u32,
     pub msec_since_last_ffc: u32,
@@ -1278,6 +1279,7 @@ struct CentiK {
 }
 
 pub fn read_telemetry(buf: &[u8]) -> Telemetry {
+    let telemetry_revision = LittleEndian::read_u16(&buf[0..2]);
     let frame_num = LittleEndian::read_u32(&buf[40..44]);
     let msec_on = LittleEndian::read_u32(&buf[2..6]);
     let time_at_last_ffc = LittleEndian::read_u32(&buf[60..64]);
@@ -1294,6 +1296,10 @@ pub fn read_telemetry(buf: &[u8]) -> Telemetry {
     let fpa_temp_c = (fpa_temp_kelvin_x_100 as f32 / 100.0) - 273.15;
     let fpa_temp_c_at_last_ffc = (fpa_temp_kelvin_x_100_at_last_ffc as f32 / 100.0) - 273.15;
     Telemetry {
+        revision: [
+            (telemetry_revision << 8) as u8,
+            (telemetry_revision & 0x0f) as u8,
+        ],
         frame_num,
         msec_on,
         time_at_last_ffc,

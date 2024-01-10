@@ -27,7 +27,7 @@ use crate::attiny_rtc_i2c::SharedI2C;
 pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
-use crate::device_config::{get_naive_datetime, DeviceConfig};
+use crate::device_config::DeviceConfig;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use bsp::{
@@ -41,7 +41,6 @@ use bsp::{
     pac::Peripherals,
 };
 use core::cell::RefCell;
-use cortex_m::asm::delay;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::*;
@@ -50,7 +49,6 @@ use fugit::RateExtU32;
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::FunctionI2C;
-use rp2040_hal::pio::PIOExt;
 use rp2040_hal::I2C;
 
 // NOTE: The version number here isn't important.  What's important is that we increment it
@@ -148,7 +146,6 @@ fn main() -> ! {
         shared_i2c.clear_alarm();
     }
     shared_i2c.disable_alarm(&mut delay);
-    shared_i2c.print_alarm_status(&mut delay);
     let i2c1 = shared_i2c.free();
 
     // If we're waking up to make an audio recording, do that.

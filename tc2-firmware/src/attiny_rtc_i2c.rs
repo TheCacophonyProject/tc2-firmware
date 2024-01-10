@@ -1,6 +1,5 @@
 use crate::bsp::pac::I2C1;
-use chrono::{Datelike, NaiveDateTime, Timelike};
-use core::ops::BitAnd;
+use chrono::{NaiveDateTime, Timelike};
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn, Format};
 use embedded_hal::prelude::{
@@ -251,7 +250,7 @@ impl SharedI2C {
     ) -> Result<(), Error> {
         let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                info!("Read raw tc2-agent state {}", state);
+                //info!("Read raw tc2-agent state {}", state);
                 Ok(state & 1 << 1 == 2)
             }
             Err(e) => Err(e),
@@ -261,7 +260,7 @@ impl SharedI2C {
                 let mut val = if state { 2 } else { 0 };
                 let flag = if is_recording { 4 } else { 0 };
                 val |= flag;
-                info!("Set tc2-agent state {}", val);
+                //info!("Set tc2-agent state {}", val);
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),

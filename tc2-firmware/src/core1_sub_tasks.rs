@@ -33,9 +33,13 @@ pub fn maybe_offload_flash_storage(
         let mut file_start = true;
         let mut part_count = 0;
 
+        let mut success = true;
         // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-        while let Some(((part, crc, block_index, page_index), is_last, spi)) =
-            flash_storage.get_file_part()
+        'transfer_all_file_parts: while let Some((
+            (part, crc, block_index, page_index),
+            is_last,
+            spi,
+        )) = flash_storage.get_file_part()
         {
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last {
@@ -59,7 +63,22 @@ pub fn maybe_offload_flash_storage(
                 );
             }
             //let start = timer.get_counter();
-            pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+            let mut attempts = 0;
+            'transfer_part: loop {
+                let did_transfer =
+                    pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+                if !did_transfer {
+                    delay.delay_us(50);
+                    attempts += 1;
+                    if attempts > 100 {
+                        warn!("Failed sending file part to raspberry pi");
+                        success = false;
+                        break 'transfer_all_file_parts;
+                    }
+                } else {
+                    break 'transfer_part;
+                }
+            }
             //info!("Took {}µs", (timer.get_counter() - start).to_micros());
 
             part_count += 1;
@@ -76,16 +95,20 @@ pub fn maybe_offload_flash_storage(
                 flash_storage.take_spi(spi, resets, clock_freq.Hz());
             }
         }
-        info!("Completed file offload, transferred {} files", file_count);
-        // TODO: Some validation from the raspberry pi that the transfer completed
-        //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
+        if success {
+            info!("Completed file offload, transferred {} files", file_count);
+            // TODO: Some validation from the raspberry pi that the transfer completed
+            //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
 
-        // Once we've successfully offloaded all files, we can erase the flash and we're
-        // ready to start recording new CPTV files there.
+            // Once we've successfully offloaded all files, we can erase the flash and we're
+            // ready to start recording new CPTV files there.
 
-        info!("Erasing after successful offload");
-        //flash_storage.erase_all_good_used_blocks();
-        flash_storage.erase_all_blocks();
+            info!("Erasing after successful offload");
+            //flash_storage.erase_all_good_used_blocks();
+            flash_storage.erase_all_blocks();
+        } else {
+            warn!("File transfer to pi failed");
+        }
     }
 }
 
@@ -147,6 +170,9 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             }
             new_config
         } else {
+            if let Some(spi_free) = pi_spi.disable() {
+                flash_storage.take_spi(spi_free, resets, clock_freq);
+            }
             existing_config
         }
     } else {

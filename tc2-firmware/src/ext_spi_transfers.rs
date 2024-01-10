@@ -5,23 +5,19 @@ use crate::onboard_flash::extend_lifetime;
 use crate::utils::u8_slice_to_u32;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
-use core::ops::{BitAnd, Not};
-use cortex_m::asm::nop;
+use core::ops::Not;
 use critical_section::Mutex;
 use defmt::{info, warn, Format};
-use embedded_hal::digital::v2::{InputPin, OutputPin, StatefulOutputPin};
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
-    _embedded_hal_spi_FullDuplex,
 };
 use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
-use rp2040_hal::dma::{single_buffer, Channel, Pace, CH0};
+use rp2040_hal::dma::{single_buffer, Channel, CH0};
 use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
-use rp2040_hal::gpio::Interrupt::{EdgeLow, LevelLow};
+use rp2040_hal::gpio::Interrupt::LevelLow;
 use rp2040_hal::gpio::{
-    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Interrupt, Pin, PullDown, PullNone,
-    PullUp, SioInput, SioOutput,
+    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, PullUp, SioInput,
 };
 use rp2040_hal::pio::{
     PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM0,
@@ -49,7 +45,7 @@ static GLOBAL_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(No
 fn IO_IRQ_BANK0() {
     critical_section::with(|cs| {
         let mut this_ref = GLOBAL_PING_PIN.borrow_ref_mut(cs);
-        let mut ping_pin = this_ref.as_mut().unwrap();
+        let ping_pin = this_ref.as_mut().unwrap();
         if ping_pin.interrupt_status(LevelLow) {
             ping_pin.clear_interrupt(LevelLow);
         }
@@ -60,7 +56,7 @@ fn IO_IRQ_BANK0() {
 fn TIMER_IRQ_0() {
     critical_section::with(|cs| {
         let mut this_ref = GLOBAL_ALARM.borrow_ref_mut(cs);
-        let mut alarm = this_ref.as_mut().unwrap();
+        let alarm = this_ref.as_mut().unwrap();
         alarm.clear_interrupt();
     });
 }
@@ -180,7 +176,7 @@ impl ExtSpiTransfers {
     }
     pub fn ping(&mut self, timer: &mut Timer) -> bool {
         let start = timer.get_counter();
-        let mut ping_pin = self.ping.take().unwrap().into_pull_up_input();
+        let ping_pin = self.ping.take().unwrap().into_pull_up_input();
         ping_pin.set_interrupt_enabled(LevelLow, true);
         let mut alarm = timer.alarm_0().unwrap();
 
@@ -204,10 +200,10 @@ impl ExtSpiTransfers {
         }
         // Block until resumed by an interrupt from either the pin or from the alarm
         cortex_m::asm::wfi();
-        unsafe {
-            pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
-            pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
-        }
+
+        pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
+        pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
+
         let ping_time = (timer.get_counter() - start).to_micros();
         let (ping_pin, mut alarm) = critical_section::with(|cs| {
             (
@@ -366,6 +362,8 @@ impl ExtSpiTransfers {
             sm.set_pindirs([(miso_id, bsp::hal::pio::PinDir::Output)]);
             self.state_machine_0_running = Some((sm.start(), rx));
             self.pio_tx = Some(tx);
+        } else {
+            warn!("Couldn't enable PIO SPI to send raw frames");
         }
     }
 
@@ -437,22 +435,20 @@ impl ExtSpiTransfers {
 
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
-        let mut transferred_without_abort = false;
         let mut finished_transfer = false;
+        let mut attempt = 1;
         while !transmit_success {
-            //while !transferred_without_abort {
             if self.ping(timer) {
                 finished_transfer = true;
                 let start = timer.get_counter();
-                let mut transfer = single_buffer::Config::new(
+                let transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
                     self.spi.take().unwrap(),
                 );
                 let transfer = transfer.start();
-
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
-                transferred_without_abort = !maybe_abort_dma_transfer(
+                maybe_abort_dma_transfer(
                     dma_peripheral,
                     DMA_CHANNEL_NUM,
                     transfer_read_address + actual_length,
@@ -463,7 +459,6 @@ impl ExtSpiTransfers {
                 self.dma_channel_0 = Some(r_ch0);
                 self.payload_buffer = Some(r_buf);
                 self.spi = Some(tx);
-                //}
 
                 // Now read the crc + return payload from the pi
                 {
@@ -511,9 +506,10 @@ impl ExtSpiTransfers {
                     self.spi = Some(spi);
                 }
             } else {
-                warn!("Pi failed to receive");
+                warn!("Pi failed to receive, attempt #{}", attempt);
                 finished_transfer = false;
                 transmit_success = true;
+                attempt += 1;
             }
         }
         finished_transfer
