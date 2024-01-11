@@ -5,12 +5,11 @@ const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;
 const SEG_HEIGHT: usize = FRAME_HEIGHT / SEG_DIV;
 const ATTENUATION_OFFSET: i32 = 60;
-const DAYTIME: bool = true;
 // TODO: These are lepton 3.5 values, probably need to come up with new ones for lepton3
 const NIGHTTIME_TRIGGER_THRESHOLD: u16 = 30; //50; //30
 const DAYTIME_TRIGGER_THRESHOLD: u16 = 35; //49;
-fn trigger_threshold() -> u16 {
-    if DAYTIME {
+fn trigger_threshold(is_daytime: bool) -> u16 {
+    if is_daytime {
         DAYTIME_TRIGGER_THRESHOLD
     } else {
         NIGHTTIME_TRIGGER_THRESHOLD
@@ -90,6 +89,7 @@ pub fn track_motion(
     current_frame: &[u16],
     prev_frame: &[u16],
     prev_frame_stats: &Option<MotionTracking>,
+    is_daytime: bool,
 ) -> MotionTracking {
     //  The hot map stores whether a segment is currently triggering, and what it's previous
     //  (pre-triggering) max value was.
@@ -97,6 +97,7 @@ pub fn track_motion(
         Some(ref stats) => MotionTracking::with_previous(&stats),
         None => MotionTracking::new(),
     };
+    let trigger_threshold_val = trigger_threshold(is_daytime);
 
     for seg_y in 0..SEG_DIV {
         let line = seg_y * SEG_DIV;
@@ -141,18 +142,19 @@ pub fn track_motion(
             // we may want to allow triggering on smaller amounts of motion at the top of the
             // frame.  This could be a more graduated falloff.
             let motion_threshold = if y < 30 {
-                2
-            } else if y < 60 {
-                2
-            } else {
                 3
+            } else if y < 60 {
+                3
+            } else {
+                4
             };
             let seg_val = seg_max.max(0) as u16;
             if let Some(prev_frame_stats) = &prev_frame_stats {
                 let (mut hot, mut pre_hot_val) = prev_frame_stats.hot_map[segment_index];
                 // TODO: Possibly the segments should overlap each other slightly?
                 let segment_diff = (seg_val as i32 - pre_hot_val as i32).max(0) as u16;
-                if !hot && segment_diff > trigger_threshold() && motion_count >= motion_threshold {
+                if !hot && segment_diff > trigger_threshold_val && motion_count >= motion_threshold
+                {
                     hot = true;
                     // val gets used from previous frame: keeping the value pre-hot,
                     // so that we keep triggering

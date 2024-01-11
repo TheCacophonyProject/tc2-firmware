@@ -1,7 +1,7 @@
 use crate::byte_slice_cursor::Cursor;
 use crate::rp2040_flash::read_rp2040_flash;
 use crate::sun_times::sun_times;
-use chrono::{NaiveDateTime, NaiveTime};
+use chrono::{NaiveDateTime, NaiveTime, Timelike};
 use core::ops::Add;
 use defmt::{info, Format};
 use embedded_io::Read;
@@ -176,6 +176,18 @@ impl DeviceConfig {
         (start_time, end_time)
     }
 
+    pub fn time_is_in_daylight(&self, date_time_utc: &NaiveDateTime) -> bool {
+        let (lat, lng) = self.location;
+        let altitude = self.location_altitude;
+        let (sunrise, sunset) = sun_times(
+            date_time_utc.date(),
+            lat as f64,
+            lng as f64,
+            altitude.unwrap_or(0.0) as f64,
+        )
+        .unwrap();
+        date_time_utc.hour() > sunrise.hour() && date_time_utc.hour() < sunset.hour()
+    }
     pub fn time_is_in_recording_window(&self, date_time_utc: &NaiveDateTime) -> bool {
         if self.is_continuous_recorder {
             return true;

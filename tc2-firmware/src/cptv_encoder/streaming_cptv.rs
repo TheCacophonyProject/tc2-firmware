@@ -4,7 +4,7 @@ use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::DeviceConfig;
 use crate::lepton::Telemetry;
-use crate::motion_detector::{track_motion, MotionTracking};
+use crate::motion_detector::MotionTracking;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use crate::FIRMWARE_VERSION;
