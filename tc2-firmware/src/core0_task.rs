@@ -435,7 +435,11 @@ pub fn frame_acquisition_loop(
                             }
                         } else {
                             has_done_initial_ffc = false;
-                            lepton.reboot(delay);
+                            current_segment_num = 0;
+                            frames_seen = 0;
+                            last_frame_seen = None;
+                            lepton.power_down_sequence(delay);
+                            lepton.power_on_sequence(delay);
                         }
                         break 'scanline;
                     } else {

@@ -174,7 +174,7 @@ impl ExtSpiTransfers {
             self.spi = Some(spi);
         }
     }
-    pub fn ping(&mut self, timer: &mut Timer) -> bool {
+    pub fn ping(&mut self, timer: &mut Timer, pi_is_awake: bool) -> bool {
         let start = timer.get_counter();
         let ping_pin = self.ping.take().unwrap().into_pull_up_input();
         ping_pin.set_interrupt_enabled(LevelLow, true);
@@ -185,7 +185,7 @@ impl ExtSpiTransfers {
         critical_section::with(|cs| {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
-        let _ = alarm.schedule(MicrosDurationU32::micros(250)).unwrap();
+        let _ = alarm.schedule(MicrosDurationU32::micros(300)).unwrap();
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
@@ -219,8 +219,11 @@ impl ExtSpiTransfers {
         self.ping = Some(ping_pin.into_pull_down_input());
 
         // FIXME - Can we print this when we think the Pi should be awake?
-        // if finished {
-        //     warn!("Alarm triggered, ping took {}", ping_time);
+        if finished && pi_is_awake {
+            warn!("Alarm triggered, ping took {}", ping_time);
+        }
+        // else if pi_is_awake {
+        //     warn!("Pi responded, ping took {}", ping_time);
         // }
         !finished
     }
@@ -268,7 +271,7 @@ impl ExtSpiTransfers {
                     break;
                 }
             }
-            if self.ping(timer) {
+            if self.ping(timer, false) {
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
@@ -436,9 +439,8 @@ impl ExtSpiTransfers {
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
-        let mut attempt = 1;
         while !transmit_success {
-            if self.ping(timer) {
+            if self.ping(timer, true) {
                 finished_transfer = true;
                 let start = timer.get_counter();
                 let transfer = single_buffer::Config::new(
@@ -506,10 +508,9 @@ impl ExtSpiTransfers {
                     self.spi = Some(spi);
                 }
             } else {
-                warn!("Pi failed to receive, attempt #{}", attempt);
+                warn!("Pi failed to receive");
                 finished_transfer = false;
                 transmit_success = true;
-                attempt += 1;
             }
         }
         finished_transfer

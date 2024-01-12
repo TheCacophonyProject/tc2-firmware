@@ -1005,6 +1005,9 @@ impl LeptonModule {
                 return LeptonError::from_i8((camera_status >> 8) as i8);
             } else {
                 failures += 1;
+                if failures > 100 {
+                    return LeptonError::from_i8((camera_status >> 8) as i8);
+                }
                 //warn!("i2c error");
                 if print {
                     info!("Booted {:#018b}", camera_status & LEPTON_BOOTED);

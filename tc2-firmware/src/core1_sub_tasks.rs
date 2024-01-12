@@ -68,8 +68,12 @@ pub fn maybe_offload_flash_storage(
                 let did_transfer =
                     pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
                 if !did_transfer {
-                    delay.delay_us(50);
+                    //delay.delay_us(50);
                     attempts += 1;
+                    // warn!(
+                    //     "Part #{} ({},{}) failed on attempt #{}",
+                    //     part_count, block_index, page_index, attempts
+                    // );
                     if attempts > 100 {
                         warn!("Failed sending file part to raspberry pi");
                         success = false;

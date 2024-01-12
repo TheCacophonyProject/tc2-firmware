@@ -142,34 +142,35 @@ pub fn track_motion(
             // we may want to allow triggering on smaller amounts of motion at the top of the
             // frame.  This could be a more graduated falloff.
             let motion_threshold = if y < 30 {
-                3
+                2
             } else if y < 60 {
-                3
+                2
             } else {
-                4
+                3
             };
             let seg_val = seg_max.max(0) as u16;
             if let Some(prev_frame_stats) = &prev_frame_stats {
                 let (mut hot, mut pre_hot_val) = prev_frame_stats.hot_map[segment_index];
                 // TODO: Possibly the segments should overlap each other slightly?
                 let segment_diff = (seg_val as i32 - pre_hot_val as i32).max(0) as u16;
-                if !hot && segment_diff > trigger_threshold_val && motion_count >= motion_threshold
-                {
-                    hot = true;
-                    // val gets used from previous frame: keeping the value pre-hot,
-                    // so that we keep triggering
+                if !hot {
+                    if segment_diff > trigger_threshold_val && motion_count >= motion_threshold {
+                        hot = true;
+                        // val gets used from previous frame: keeping the value pre-hot,
+                        // so that we keep triggering
+                    } else {
+                        // Update pre-hot val
+                        pre_hot_val = seg_val;
+                    }
                 } else if hot && seg_val < pre_hot_val + 10 && motion_count < 2 {
                     // TODO: Tune values for lepton3
                     // Needs to drop by 10 to un-trigger hot, and have very little motion.
                     hot = false;
                     // Update the max value with the new value.
                     pre_hot_val = seg_val;
-                } else {
-                    // Stays hot, and value stays the same, which should be the previous value before it
-                    // went hot.
-
-                    // Maybe print motion count?
                 }
+                // NOTE: implicit else when hot – Stays hot, and value stays the same, which should be the previous value before it
+                // went hot.
                 if hot {
                     motion_tracking.hot_count += 1;
                     // We got motion, so reset timeout

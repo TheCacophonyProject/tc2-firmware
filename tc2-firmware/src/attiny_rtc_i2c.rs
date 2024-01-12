@@ -88,20 +88,31 @@ impl SharedI2C {
             rtc: None,
         };
 
-        let _ = match shared_i2c.get_attiny_firmware_version(delay) {
-            Ok(version) => match version {
-                8 => {}
-                version => {
-                    error!(
-                        "Mismatched Attiny firmware version – expected {}, got {}",
-                        8, version
-                    );
+        let mut attempts = 0;
+        loop {
+            let _ = match shared_i2c.get_attiny_firmware_version(delay) {
+                Ok(version) => match version {
+                    8 => {
+                        break;
+                    }
+                    version => {
+                        error!(
+                            "Mismatched Attiny firmware version – expected {}, got {}",
+                            8, version
+                        );
+                        break;
+                    }
+                },
+                Err(e) => {
+                    attempts += 1;
+                    if attempts > 100 {
+                        crate::panic!("Unable to communicate with Attiny over i2c: {:?}", e);
+                    } else {
+                        delay.delay_us(500);
+                    }
                 }
-            },
-            Err(e) => {
-                crate::panic!("Unable to communicate with Attiny over i2c: {:?}", e);
-            }
-        };
+            };
+        }
 
         shared_i2c
     }

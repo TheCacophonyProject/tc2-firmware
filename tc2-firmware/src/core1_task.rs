@@ -182,7 +182,7 @@ pub fn core_1_task(
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
 ) {
-    let dev_mode = true;
+    let dev_mode = false;
     info!("Core 1 start");
     if dev_mode {
         warn!("DEV MODE");
