@@ -13,7 +13,7 @@ use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{get_naive_datetime, DeviceConfig};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
-use crate::motion_detector::{track_motion, MotionTracking};
+use crate::motion_detector::{track_motion, DetectionMask, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::utils::u8_slice_to_u16;
 use crate::{bsp, FrameBuffer};
@@ -182,7 +182,7 @@ pub fn core_1_task(
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
 ) {
-    let dev_mode = false;
+    let dev_mode = true;
     info!("Core 1 start");
     if dev_mode {
         warn!("DEV MODE");
@@ -283,6 +283,7 @@ pub fn core_1_task(
         lepton_serial.unwrap_or(0),
         &mut timer,
     );
+    let motion_detection_mask = DetectionMask::new(None);
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
     if !device_config.use_low_power_mode {
@@ -436,6 +437,7 @@ pub fn core_1_task(
                 &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
                 &motion_detection,
                 is_daytime,
+                &motion_detection_mask,
             );
             // TODO: While testing, we'll limit the max_length_in_frames to 1 minutes worth,
             //  but once we've reduced instances of random false positives, we can extend it.
@@ -501,7 +503,6 @@ pub fn core_1_task(
                         &mut prev_frame, // This should be zeroed out before starting a new clip.
                         &prev_frame_telemetry.as_ref().unwrap(),
                         &mut flash_storage,
-                        motion_detection.as_ref().unwrap(),
                     );
                     prev_frame.copy_from_slice(&prev_frame_2);
                     frames_written += 1;
@@ -530,7 +531,6 @@ pub fn core_1_task(
                         &mut prev_frame,
                         &frame_telemetry,
                         &mut flash_storage,
-                        motion_detection.as_ref().unwrap(),
                     );
                     frames_written += 1;
                 }
@@ -539,7 +539,18 @@ pub fn core_1_task(
                 // to give more breathing room.
                 if let Some(cptv_stream) = &mut cptv_stream {
                     error!("Ending current recording");
+                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
+                    let cptv_start_block_index = cptv_stream.starting_block_index as isize;
                     cptv_stream.finalise(&mut flash_storage);
+
+                    if motion_detection.as_ref().unwrap().was_false_positive() {
+                        error!("Discarding as a false-positive");
+                        cptv_stream.discard(
+                            &mut flash_storage,
+                            cptv_start_block_index,
+                            cptv_end_block_index,
+                        );
+                    }
                     ended_recording = true;
                     let _ = shared_i2c
                         .set_recording_flag(&mut delay, false)
@@ -624,8 +635,9 @@ pub fn core_1_task(
             if is_outside_recording_window || flash_storage_nearly_full {
                 if !device_config.use_low_power_mode {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
-                    advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                    //advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 }
+                // FIXME (on Attiny - Pi Camera State PowerOnTimeout)
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
                     if pi_is_powered_down {
                         info!("Pi is now powered down: {}", pi_is_powered_down);
@@ -695,10 +707,6 @@ pub fn core_1_task(
             } else {
                 1
             };
-            if frames_elapsed != 1 && cptv_stream.is_none() {
-                // Reset motion detection if we skipped frames.
-                motion_detection = None;
-            }
 
             incremented_datetime += chrono::Duration::milliseconds(115 * frames_elapsed as i64);
             if incremented_datetime > date_time_utc {

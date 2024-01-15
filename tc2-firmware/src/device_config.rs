@@ -1,4 +1,5 @@
 use crate::byte_slice_cursor::Cursor;
+use crate::motion_detector::DetectionMask;
 use crate::rp2040_flash::read_rp2040_flash;
 use crate::sun_times::sun_times;
 use chrono::{NaiveDateTime, NaiveTime, Timelike};
@@ -19,6 +20,7 @@ pub struct DeviceConfig {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
+    //pub motion_detection_mask: DetectionMask,
 }
 
 impl Default for DeviceConfig {
@@ -37,6 +39,7 @@ impl Default for DeviceConfig {
             end_recording_time: (false, 0),
             is_continuous_recorder: false,
             use_low_power_mode: false,
+            //motion_detection_mask: DetectionMask::new(None),
         }
     }
 }
@@ -80,7 +83,9 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
-
+        // let mut mask_inner = [0u8; 2400];
+        // cursor.read(&mut mask_inner).unwrap();
+        // let motion_detection_mask = DetectionMask::new(Some(mask_inner));
         (
             Some(DeviceConfig {
                 device_id,
@@ -93,6 +98,7 @@ impl DeviceConfig {
                 end_recording_time,
                 is_continuous_recorder,
                 use_low_power_mode,
+                // motion_detection_mask,
             }),
             cursor.position(),
         )

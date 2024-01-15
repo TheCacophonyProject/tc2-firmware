@@ -537,6 +537,34 @@ impl OnboardFlash {
         }
     }
 
+    pub fn erase_block_range(
+        &mut self,
+        start_block_index: isize,
+        end_block_index: isize,
+    ) -> Result<(), &str> {
+        for block_index in start_block_index..end_block_index {
+            while self.bad_blocks.contains(&(block_index as i16)) {
+                info!("Skipping erase of bad block {}", block_index);
+                continue;
+            }
+            if !self.erase_block(block_index).is_ok() {
+                error!("Block erase failed for block {}", block_index);
+                return Err("Block erase failed");
+            }
+        }
+        if start_block_index == 0 {
+            self.first_used_block_index = None;
+            self.last_used_block_index = None;
+            self.current_page_index = 0;
+            self.current_block_index = 0;
+        } else {
+            self.last_used_block_index = Some(start_block_index - 1);
+            self.current_block_index = start_block_index;
+            self.current_page_index = 0;
+        }
+        Ok(())
+    }
+
     pub fn free_spi(&mut self) -> Option<SPI1> {
         if self.spi.is_some() {
             let spi_enabled = self.spi.take().unwrap();
@@ -887,7 +915,6 @@ impl OnboardFlash {
             warn!("Ending file at {}:{}", b, p);
         }
 
-        //self.spi_write_dma(&bytes[1..]);
         if self.record_to_flash {
             self.spi_write(&bytes[1..]);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);

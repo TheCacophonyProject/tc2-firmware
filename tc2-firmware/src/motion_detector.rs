@@ -22,6 +22,8 @@ pub struct MotionTracking {
     pub hot_edge_count: u8, // How many edge segments are hot
     timeout_in_n_frames: Option<u16>,
     triggered_this_frame: bool,
+    cumulative_motion: usize,
+    max_delta_variance: u16,
 }
 
 impl MotionTracking {
@@ -32,6 +34,8 @@ impl MotionTracking {
             hot_map: [(false, 0u16); 64],
             timeout_in_n_frames: None,
             triggered_this_frame: false,
+            max_delta_variance: 0,
+            cumulative_motion: 0,
         }
     }
 
@@ -47,6 +51,8 @@ impl MotionTracking {
             hot_map: [(false, 0u16); 64],
             timeout_in_n_frames: next_timeout,
             triggered_this_frame: false,
+            cumulative_motion: other.cumulative_motion,
+            max_delta_variance: other.max_delta_variance,
         }
     }
 
@@ -81,6 +87,10 @@ impl MotionTracking {
         }
         bytes
     }
+
+    pub fn was_false_positive(&self) -> bool {
+        self.max_delta_variance < 60 && self.cumulative_motion < 10
+    }
 }
 
 // NOTE: If there was an FFC event in the last second, don't try to call this.
@@ -90,6 +100,7 @@ pub fn track_motion(
     prev_frame: &[u16],
     prev_frame_stats: &Option<MotionTracking>,
     is_daytime: bool,
+    mask: &DetectionMask,
 ) -> MotionTracking {
     //  The hot map stores whether a segment is currently triggering, and what it's previous
     //  (pre-triggering) max value was.
@@ -110,30 +121,32 @@ pub fn track_motion(
             for yy in y..y + SEG_HEIGHT {
                 let is_topmost = yy == 0;
                 let is_bottommost = yy == 119;
+                let y_edge = is_topmost || is_bottommost;
+                let mod_y = if y_edge { 30 } else { 0 };
+                let row = yy * 160;
                 for xx in x..x + SEG_WIDTH {
-                    let idx = yy * 160 + xx;
-                    let is_leftmost = xx < 2;
-                    let is_rightmost = xx == 159;
-                    let mod_x = if is_leftmost || is_rightmost { 30 } else { 0 };
-                    let mod_y = if is_topmost || is_bottommost { 30 } else { 0 };
-                    let curr_px = current_frame[idx] as i32;
-                    let prev_px = prev_frame[idx] as i32;
-                    let diff = curr_px - prev_px;
-                    // TODO: Adjust thresholds for lepton3, since it has different scaling.
-                    //  Check dynamic range of lepton3 vs lepton3.5 recordings to understand the mapping.
-                    // if xx == 80 && yy == 60 {
-                    //     info!("Diff {}, px {}, prev px {}", diff, curr_px, prev_px);
-                    // }
-                    let diff_is_over_threshold =
-                        if is_leftmost || is_bottommost || is_topmost || is_rightmost {
+                    let idx = row + xx;
+                    // NOTE: This mask check contributes to half the time spent tracking.
+                    if !mask.is_masked_at_index(idx) {
+                        let is_leftmost = xx < 2;
+                        let is_rightmost = xx == 159;
+                        let x_edge = is_leftmost || is_rightmost;
+                        let mod_x = if x_edge { 30 } else { 0 };
+                        let curr_px = current_frame[idx] as i32;
+                        let prev_px = prev_frame[idx] as i32;
+                        let delta = curr_px - prev_px;
+                        // TODO: Adjust thresholds for lepton3, since it has different scaling.
+                        //  Check dynamic range of lepton3 vs lepton3.5 recordings to understand the mapping.
+                        let delta_is_over_threshold = if x_edge || y_edge {
                             seg_max = seg_max.max(curr_px - ATTENUATION_OFFSET);
-                            diff > 50 + mod_x + mod_y
+                            delta > 50 + mod_x + mod_y
                         } else {
                             seg_max = seg_max.max(curr_px);
-                            diff > 50
+                            delta > 50
                         };
-                    if diff_is_over_threshold {
-                        motion_count += 1;
+                        if delta_is_over_threshold {
+                            motion_count += 1;
+                        }
                     }
                 }
             }
@@ -148,13 +161,22 @@ pub fn track_motion(
             } else {
                 3
             };
+
             let seg_val = seg_max.max(0) as u16;
             if let Some(prev_frame_stats) = &prev_frame_stats {
                 let (mut hot, mut pre_hot_val) = prev_frame_stats.hot_map[segment_index];
                 // TODO: Possibly the segments should overlap each other slightly?
                 let segment_diff = (seg_val as i32 - pre_hot_val as i32).max(0) as u16;
+
+                motion_tracking.max_delta_variance =
+                    motion_tracking.max_delta_variance.max(segment_diff);
+                let triggers =
+                    segment_diff > trigger_threshold_val && motion_count >= motion_threshold;
+                if triggers {
+                    motion_tracking.cumulative_motion += motion_count;
+                }
                 if !hot {
-                    if segment_diff > trigger_threshold_val && motion_count >= motion_threshold {
+                    if triggers {
                         hot = true;
                         // val gets used from previous frame: keeping the value pre-hot,
                         // so that we keep triggering
@@ -185,19 +207,14 @@ pub fn track_motion(
                         motion_tracking.hot_edge_count += 1;
                     }
                 }
-                // TODO: Maybe store segment motion count too?
-                // TODO: Move this back to draw test app and visualise more there
                 motion_tracking.hot_map[segment_index] = (hot, pre_hot_val);
             } else {
                 // Seed the initial values
-
-                // TODO: Maybe hold onto a longer term reference map that we can refer back to?
                 motion_tracking.hot_map[segment_index] = (false, seg_val);
             }
         }
     }
 
-    // TODO: Figure out what to do here if we're not actually in the recording window.
     if let Some(prev_frame_stats) = &prev_frame_stats {
         // If we're no longer triggering, maybe start decrementing a timeout to stop recording.
         if !motion_tracking.is_triggering() {
@@ -224,4 +241,35 @@ pub fn track_motion(
     // TODO: If we have persistently hot frames, but no motion, we know there's still an
     //  animal there, and we'd pause the recording.
     motion_tracking
+}
+
+pub struct DetectionMask {
+    inner: [u8; 2400],
+}
+
+impl DetectionMask {
+    pub fn new(mask: Option<[u8; 2400]>) -> DetectionMask {
+        DetectionMask {
+            inner: mask.unwrap_or([0u8; 2400]),
+        }
+    }
+    pub fn is_masked_at_pos(&self, x: usize, y: usize) -> bool {
+        let index = (y * 160) + x;
+        self.inner[index >> 3] & (1 << (index % 8)) != 0
+    }
+
+    pub fn set_index(&mut self, index: usize) {
+        self.inner[index >> 3] |= 1 << (index % 8);
+    }
+
+    pub fn set_pos(&mut self, x: usize, y: usize) {
+        let i = (y * 160) + x;
+        self.inner[i >> 3] |= 1 << (i % 8);
+    }
+
+    #[inline(always)]
+    pub fn is_masked_at_index(&self, index: usize) -> bool {
+        let group = self.inner[index >> 3];
+        group != 0 && group & (1 << (index % 8)) != 0
+    }
 }

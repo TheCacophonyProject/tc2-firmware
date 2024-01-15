@@ -14,7 +14,10 @@ use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
 use defmt::{info, warn};
-use fugit::{HertzU32, RateExtU32};
+use embedded_hal::prelude::{
+    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogEnable,
+};
+use fugit::{ExtU32, HertzU32, RateExtU32};
 use rp2040_hal::Timer;
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
@@ -64,6 +67,7 @@ pub fn frame_acquisition_loop(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     timer: &Timer,
+    mut watchdog: bsp::hal::Watchdog,
 ) -> ! {
     let mut selected_frame_buffer = 0;
     let mut frame_counter = 0;
@@ -109,7 +113,13 @@ pub fn frame_acquisition_loop(
     let start = timer.get_counter();
     let end = timer.get_counter();
 
+    watchdog.pause_on_debug(true);
+    watchdog.start(8388607.micros());
+
     'frame_loop: loop {
+        if got_sync || is_recording {
+            watchdog.feed();
+        }
         if got_sync {
             current_segment_num += 1;
             if current_segment_num > total_segments_including_dummy_frames {

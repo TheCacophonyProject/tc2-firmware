@@ -4,7 +4,6 @@ use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::DeviceConfig;
 use crate::lepton::Telemetry;
-use crate::motion_detector::MotionTracking;
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
 use crate::FIRMWARE_VERSION;
@@ -386,7 +385,7 @@ pub struct CptvStream<'a> {
     huffman_table: &'a [HuffmanEntry; 257],
     crc_val: u32,
     total_uncompressed: u32,
-    starting_block_index: u16,
+    pub starting_block_index: u16,
 }
 
 pub fn make_crc_table() -> [u32; 256] {
@@ -486,7 +485,6 @@ impl<'a> CptvStream<'a> {
         prev_frame: &mut [u16],
         frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
-        motion_tracking: &MotionTracking,
     ) {
         let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
@@ -506,11 +504,8 @@ impl<'a> CptvStream<'a> {
 
         if self.cptv_header.total_frame_count % 10 == 0 {
             info!(
-                "Write frame #{}, {}, hot ({}/{})",
-                self.cptv_header.total_frame_count,
-                frame_telemetry.frame_num,
-                motion_tracking.hot_count,
-                motion_tracking.hot_edge_count
+                "Write frame #{}, {}",
+                self.cptv_header.total_frame_count, frame_telemetry.frame_num
             );
         }
         for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
@@ -620,6 +615,16 @@ impl<'a> CptvStream<'a> {
             }
         }
         self.write_gzip_trailer(flash_storage, true);
+    }
+
+    pub fn discard(
+        &mut self,
+        flash_storage: &mut OnboardFlash,
+        start_block_index: isize,
+        end_block_index: isize,
+    ) {
+        // NOTE: In the case that the block erase fails, that just means we won't reclaim the space at the moment.
+        let _ = flash_storage.erase_block_range(start_block_index, end_block_index);
     }
 }
 
