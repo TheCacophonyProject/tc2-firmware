@@ -182,7 +182,7 @@ pub fn core_1_task(
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
 ) {
-    let dev_mode = true;
+    let dev_mode = false;
     info!("Core 1 start");
     if dev_mode {
         warn!("DEV MODE");
@@ -635,7 +635,7 @@ pub fn core_1_task(
             if is_outside_recording_window || flash_storage_nearly_full {
                 if !device_config.use_low_power_mode {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
-                    //advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                    advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 }
                 // FIXME (on Attiny - Pi Camera State PowerOnTimeout)
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
