@@ -92,13 +92,13 @@ impl SharedI2C {
         loop {
             let _ = match shared_i2c.get_attiny_firmware_version(delay) {
                 Ok(version) => match version {
-                    8 => {
+                    10 => {
                         break;
                     }
                     version => {
                         error!(
-                            "Mismatched Attiny firmware version – expected {}, got {}",
-                            8, version
+                            "Mismatched Attiny firmwarefoo version – expected {}, got {}",
+                            10, version
                         );
                         break;
                     }
