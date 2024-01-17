@@ -816,19 +816,19 @@ impl Cptv2Header {
             let _ = write!(&mut cursor, "{}", FIRMWARE_VERSION);
         }
 
-        let (lat, lng) = device_config.location;
+        let (lat, lng) = device_config.config().location;
         let mut header = Cptv2Header {
             timestamp,
             device_name: [0; 63],
             model: [0; 30],
-            device_id: device_config.device_id,
+            device_id: device_config.config().device_id,
             serial_number: lepton_serial,
             firmware_version: Some(firmware),
             latitude: Some(lat),
             longitude: Some(lng),
-            loc_timestamp: device_config.location_timestamp,
-            altitude: device_config.location_altitude,
-            accuracy: device_config.location_accuracy,
+            loc_timestamp: device_config.config().location_timestamp,
+            altitude: device_config.config().location_altitude,
+            accuracy: device_config.config().location_accuracy,
             total_frame_count: 0,
             min_value: u16::MAX,
             max_value: u16::MIN,

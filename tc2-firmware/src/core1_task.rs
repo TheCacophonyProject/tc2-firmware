@@ -13,13 +13,12 @@ use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{get_naive_datetime, DeviceConfig};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
-use crate::motion_detector::{track_motion, DetectionMask, MotionTracking};
+use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::utils::u8_slice_to_u16;
 use crate::{bsp, FrameBuffer};
 use chrono::NaiveDateTime;
 use core::cell::RefCell;
-use cortex_m::asm::wfe;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
@@ -267,7 +266,9 @@ pub fn core_1_task(
     let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
     let existing_config = DeviceConfig::load_existing_config_from_flash();
 
-    info!("Existing config {:?}", existing_config);
+    if let Some(existing_config) = &existing_config {
+        info!("Existing config {:?}", existing_config.config());
+    }
     if existing_config.is_none() {
         // We need to wake up the rpi and get a config
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
@@ -282,11 +283,12 @@ pub fn core_1_task(
         radiometry_enabled,
         lepton_serial.unwrap_or(0),
         &mut timer,
+        existing_config,
     );
-    let motion_detection_mask = DetectionMask::new(None);
+    //let motion_detection_mask = DetectionMask::new(None);
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
-    if !device_config.use_low_power_mode {
+    if !device_config.use_low_power_mode() {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
     }
     maybe_offload_flash_storage(
@@ -300,7 +302,7 @@ pub fn core_1_task(
         &mut timer,
     );
 
-    warn!("Unset recording flag on attiny");
+    // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
         .set_recording_flag(&mut delay, false)
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
@@ -328,7 +330,7 @@ pub fn core_1_task(
             date_time_utc = get_naive_datetime(now);
             startup_date_time_utc = date_time_utc.clone();
             got_initial_datetime = true;
-            warn!("Got initial time from RTC: {}", date_time_utc.timestamp());
+            // warn!("Got initial time from RTC: {}", date_time_utc.timestamp());
         } else {
             warn!("Failed getting date from RTC, retrying");
             delay.delay_ms(10);
@@ -337,32 +339,19 @@ pub fn core_1_task(
 
     let mut is_daytime = device_config.time_is_in_daylight(&date_time_utc);
     let mut motion_detection: Option<MotionTracking> = None;
-    let mut should_reboot = false;
 
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     loop {
-        let start_block = timer.get_counter();
-        loop {
-            let input = sio.fifo.read();
-            if let Some(input) = input {
-                crate::assert_eq!(
-                    input,
-                    Core1Task::ReceiveFrame.into(),
-                    "Got unknown fifo input to core1 task loop {}",
-                    input
-                );
-                break;
-            } else {
-                if (timer.get_counter() - start_block).to_millis() > 30_000 {
-                    // Something went wrong and we didn't get any frames for 30 seconds
-                    should_reboot = true;
-                    break;
-                }
-                wfe();
-            }
-        }
+        let input = sio.fifo.read_blocking();
+        crate::assert_eq!(
+            input,
+            Core1Task::ReceiveFrame.into(),
+            "Got unknown fifo input to core1 task loop {}",
+            input
+        );
 
+        let start = timer.get_counter();
         // Get the currently selected buffer to transfer/write to disk.
         let selected_frame_buffer = sio.fifo.read_blocking();
         critical_section::with(|cs| {
@@ -374,6 +363,7 @@ pub fn core_1_task(
             };
             thread_local_frame_buffer = buffer.borrow_ref_mut(cs).take();
         });
+        let frame_swap_time = timer.get_counter();
 
         let (frame_telemetry, frame_header_is_valid) = {
             let frame_buffer = &mut thread_local_frame_buffer
@@ -389,6 +379,7 @@ pub fn core_1_task(
             (frame_telemetry, frame_header_is_valid)
         };
 
+        let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame to pi if it is available.
         let transfer = if frame_header_is_valid {
             pi_spi.begin_message(
@@ -426,7 +417,7 @@ pub fn core_1_task(
         // NOTE: In low power mode, don't try to start recordings/motion detection until frames have stabilised.
         if !too_close_to_ffc_event
             && frames_seen > WAIT_N_FRAMES_FOR_STABLE
-            && device_config.use_low_power_mode
+            && device_config.use_low_power_mode()
             && frame_header_is_valid
         {
             let current_raw_frame =
@@ -437,7 +428,7 @@ pub fn core_1_task(
                 &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
                 &motion_detection,
                 is_daytime,
-                &motion_detection_mask,
+                &device_config.motion_detection_mask,
             );
             // TODO: While testing, we'll limit the max_length_in_frames to 1 minutes worth,
             //  but once we've reduced instances of random false positives, we can extend it.
@@ -572,9 +563,13 @@ pub fn core_1_task(
                 transfer,
             );
             if did_abort_transfer {
-                warn!("Transfer aborted, pi must be asleep?");
+                warn!(
+                    "Transfer aborted for frame #{}, pi must be asleep?",
+                    frame_num
+                );
             }
         }
+        let frame_transfer_end = timer.get_counter();
 
         critical_section::with(|cs| {
             // Now we just swap the buffers?
@@ -586,6 +581,7 @@ pub fn core_1_task(
             *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
         });
 
+        let swap_buffer = timer.get_counter();
         if should_start_new_recording && cptv_stream.is_some() {
             info!("Send start recording message to core0");
             sio.fifo.write(Core1Task::StartRecording.into());
@@ -599,14 +595,15 @@ pub fn core_1_task(
             info!("Got frame #{}", frame_num);
         }
 
-        if (should_reboot || (frames_seen > 1 && frames_seen % (60 * 9) == 0))
-            && cptv_stream.is_none()
-        {
+        let one_min_check_start = timer.get_counter();
+        let expected_rtc_sync_time_us = 2100;
+        if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
+            let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
             //  since the change in frame times can affect our frame sync.  It's fine to call this repeatedly,
             //  the RPi will shut down when it wants to.
 
-            if device_config.use_low_power_mode {
+            if device_config.use_low_power_mode() {
                 // Once per minute, if we're not currently recording, tell the RPi it can shut-down, as it's not
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
                 advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
@@ -633,7 +630,7 @@ pub fn core_1_task(
 
             let flash_storage_nearly_full = flash_storage.is_too_full_to_start_new_recordings();
             if is_outside_recording_window || flash_storage_nearly_full {
-                if !device_config.use_low_power_mode {
+                if !device_config.use_low_power_mode() {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
                     advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 }
@@ -696,6 +693,16 @@ pub fn core_1_task(
                     }
                 }
             }
+            // Make sure timing is as close as possible to the non-sync case
+            let sync_rtc_end = timer.get_counter();
+            let sync_time = (sync_rtc_end - sync_rtc_start).to_micros() as i32;
+            let additional_wait = (expected_rtc_sync_time_us - sync_time).max(0);
+            if additional_wait > 0 {
+                // warn!("Additional wait after RTC sync {}µs", additional_wait);
+                delay.delay_us(additional_wait as u32);
+            } else {
+                // warn!("RTC sync took {}µs", sync_time)
+            }
         } else {
             // Increment the datetime n frame's worth.
             // NOTE: We only get the actual date from the RTC every minutes' worth of frames, so that we
@@ -715,13 +722,19 @@ pub fn core_1_task(
 
             // Spend the same time as we would otherwise use querying the RTC to keep frame-times
             //  about the same
-            delay.delay_us(2150);
+            delay.delay_us(expected_rtc_sync_time_us as u32);
         }
+        let one_min_check_end = timer.get_counter();
         if frame_header_is_valid {
             prev_frame_telemetry = Some(frame_telemetry);
         }
         frames_seen += 1;
-        //info!("Loop took {}", (timer.get_counter() - start).to_micros());
+        // info!(
+        //     "Loop took {}µs, 1min check {}µs, frame transfer {}µs",
+        //     (timer.get_counter() - start).to_micros(),
+        //     (one_min_check_end - one_min_check_start).to_micros(),
+        //     (frame_transfer_end - frame_transfer_start).to_micros()
+        // );
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
 }

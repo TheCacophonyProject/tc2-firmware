@@ -1,5 +1,5 @@
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use defmt::info;
+use defmt::{info, Format};
 
 const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;
@@ -243,14 +243,25 @@ pub fn track_motion(
     motion_tracking
 }
 
+#[derive(Format, PartialEq)]
 pub struct DetectionMask {
-    inner: [u8; 2400],
+    pub inner: [u8; 2400],
+    length: usize,
 }
 
 impl DetectionMask {
+    pub fn set_empty(&mut self) {
+        self.length = 0;
+    }
+    pub fn append_piece(&mut self, piece: &[u8]) {
+        self.inner[self.length..self.length + piece.len()].copy_from_slice(piece);
+        self.length += piece.len();
+    }
     pub fn new(mask: Option<[u8; 2400]>) -> DetectionMask {
+        let length = if mask.is_some() { 2400 } else { 0 };
         DetectionMask {
             inner: mask.unwrap_or([0u8; 2400]),
+            length,
         }
     }
     pub fn is_masked_at_pos(&self, x: usize, y: usize) -> bool {

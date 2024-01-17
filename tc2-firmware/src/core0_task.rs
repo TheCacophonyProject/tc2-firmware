@@ -58,7 +58,7 @@ fn go_dormant_until_woken<T: PinId>(
 }
 
 pub fn frame_acquisition_loop(
-    mut rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     clocks: &ClocksManager,
@@ -384,7 +384,7 @@ pub fn frame_acquisition_loop(
                             prev_frame_needs_transfer = true;
 
                             if let Some(last_frame_seen) = last_frame_seen {
-                                if last_frame_seen != frame_counter - 1 {
+                                if got_sync && last_frame_seen != frame_counter - 1 {
                                     warn!("Looks like we lost sync");
                                     got_sync = false;
                                     prev_frame_needs_transfer = false;
@@ -417,10 +417,12 @@ pub fn frame_acquisition_loop(
                     prev_segment_was_4 = false;
 
                     if attempt > 250 && attempt % 5 == 0 {
-                        warn!(
-                            "Packet order mismatch current: {}, prev: {}, seg {} #{}",
-                            packet_id, prev_packet_id, current_segment_num, attempt
-                        );
+                        if got_sync {
+                            warn!(
+                                "Packet order mismatch current: {}, prev: {}, seg {} #{}",
+                                packet_id, prev_packet_id, current_segment_num, attempt
+                            );
+                        }
                         if attempt < 500 {
                             lepton.wait_for_ready(false);
                             lepton.reset_spi(
@@ -520,8 +522,8 @@ pub fn frame_acquisition_loop(
                 recording_ended = false;
             }
             if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-                rosc =
-                    go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
+                // rosc =
+                //     go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
             } else if current_segment_num == 3 {
                 //warn!("Overrunning frame time");
             }
