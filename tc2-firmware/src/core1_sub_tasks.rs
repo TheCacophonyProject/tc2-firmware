@@ -125,8 +125,8 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     radiometry_enabled: u32,
     camera_serial_number: u32,
     timer: &mut Timer,
+    existing_config: Option<DeviceConfig>,
 ) -> Option<DeviceConfig> {
-    let existing_config = DeviceConfig::load_existing_config_from_flash();
     let mut payload = [0u8; 12];
     if let Some(free_spi) = flash_storage.free_spi() {
         pi_spi.enable(free_spi, resets);
@@ -149,9 +149,46 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
                 // Skip 4 bytes of CRC checking
 
-                let (new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
-                if let Some(new_config) = &new_config {
-                    info!("Got config from rPi {:?}", new_config);
+                let (mut new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
+                let mut new_config_bytes = [0u8; 2400 + 104];
+                new_config_bytes[0..length_used]
+                    .copy_from_slice(&device_config[4..4 + length_used]);
+                if let Some(new_config) = &mut new_config {
+                    // Now get the motion detection mask which should take 24 transfers (since the return payload size is small)
+                    for piece in 0..24 {
+                        let payload = [piece];
+                        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                        let crc = crc_check.checksum(&payload);
+                        loop {
+                            if pi_spi.send_message(
+                                ExtTransferMessage::GetMotionDetectionMask,
+                                &payload,
+                                crc,
+                                dma,
+                                timer,
+                                resets,
+                            ) {
+                                if let Some(piece_bytes) = pi_spi.return_payload() {
+                                    let crc_from_remote =
+                                        LittleEndian::read_u16(&piece_bytes[0..2]);
+                                    let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                                    let length = piece_bytes[2];
+                                    let crc = crc_check
+                                        .checksum(&piece_bytes[2..2 + length as usize + 1]);
+                                    if crc == crc_from_remote {
+                                        new_config
+                                            .motion_detection_mask
+                                            .append_piece(&piece_bytes[4..4 + length as usize]);
+                                        break;
+                                    } else {
+                                        warn!("crc failed for mask piece {}, re-requesting", piece);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    info!("Got config from rPi {:?}", new_config.config());
                     if existing_config.is_none()
                         || *new_config != *existing_config.as_ref().unwrap()
                     {
@@ -161,7 +198,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 *existing_config.as_ref().unwrap() != *new_config
                             );
                         }
-                        write_rp2040_flash(&device_config[4..4 + length_used]);
+
+                        new_config_bytes[length_used..length_used + 2400]
+                            .copy_from_slice(&new_config.motion_detection_mask.inner);
+                        let slice_to_write = &new_config_bytes[0..length_used + 2400];
+                        write_rp2040_flash(slice_to_write);
                     }
                 }
                 new_config

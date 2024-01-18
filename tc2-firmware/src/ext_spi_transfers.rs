@@ -34,6 +34,7 @@ pub enum ExtTransferMessage {
     ResumeFileTransfer = 0x4,
     EndFileTransfer = 0x5,
     BeginAndEndFileTransfer = 0x6,
+    GetMotionDetectionMask = 0x7,
 }
 
 // We can store our ping pin here when we enter the ping-back interrupt
@@ -220,7 +221,7 @@ impl ExtSpiTransfers {
 
         // FIXME - Can we print this when we think the Pi should be awake?
         if finished && pi_is_awake {
-            warn!("Alarm triggered, ping took {}", ping_time);
+            //warn!("Alarm triggered, ping took {}", ping_time);
         }
         // else if pi_is_awake {
         //     warn!("Pi responded, ping took {}", ping_time);
@@ -316,7 +317,7 @@ impl ExtSpiTransfers {
             .ch_read_addr
             .read()
             .bits();
-        let did_abort = transfer_end_address != end_read_addr;
+        let did_abort = end_read_addr + 20 < transfer_end_address;
         self.dma_channel_0 = Some(r_ch0);
         self.pio_tx = Some(tx);
         did_abort
@@ -465,7 +466,6 @@ impl ExtSpiTransfers {
                 // Now read the crc + return payload from the pi
                 {
                     self.return_payload_buffer.as_mut().unwrap().fill(0);
-                    //self.ping.set_high().unwrap();
                     let transfer = single_buffer::Config::new(
                         self.dma_channel_0.take().unwrap(),
                         self.spi.take().unwrap(),
@@ -495,6 +495,10 @@ impl ExtSpiTransfers {
                                     if message_type == ExtTransferMessage::CameraConnectInfo {
                                         // We also expect to get a bunch of device config handshake info:
                                         self.return_payload_offset = Some(start + 4);
+                                    } else if message_type
+                                        == ExtTransferMessage::GetMotionDetectionMask
+                                    {
+                                        self.return_payload_offset = Some(start + 8);
                                     }
                                 } else {
                                     info!("Return crc mismatch");
@@ -508,7 +512,7 @@ impl ExtSpiTransfers {
                     self.spi = Some(spi);
                 }
             } else {
-                warn!("Pi failed to receive");
+                // warn!("Pi failed to receive");
                 finished_transfer = false;
                 transmit_success = true;
             }

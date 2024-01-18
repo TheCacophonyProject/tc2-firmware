@@ -1,4 +1,5 @@
 use crate::bsp::pac::I2C1;
+use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
 use chrono::{NaiveDateTime, Timelike};
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn, Format};
@@ -74,7 +75,6 @@ enum CameraConnectionState {
 }
 
 const ATTINY_ADDRESS: u8 = 0x25;
-
 const REG_VERSION: u8 = 0x01;
 const REG_CAMERA_STATE: u8 = 0x02;
 const REG_CAMERA_CONNECTION: u8 = 0x03;
@@ -92,13 +92,13 @@ impl SharedI2C {
         loop {
             let _ = match shared_i2c.get_attiny_firmware_version(delay) {
                 Ok(version) => match version {
-                    10 => {
+                    EXPECTED_ATTINY_FIRMWARE_VERSION => {
                         break;
                     }
                     version => {
                         error!(
-                            "Mismatched Attiny firmwarefoo version – expected {}, got {}",
-                            10, version
+                            "Mismatched Attiny firmware version – expected {}, got {}",
+                            EXPECTED_ATTINY_FIRMWARE_VERSION, version
                         );
                         break;
                     }
@@ -301,8 +301,6 @@ impl SharedI2C {
         if let Ok(is_awake) = pi_is_awake {
             if is_awake {
                 // If the agent is ready, make sure the REG_RP2040_PI_POWER_CTRL is set to 1
-                let ctrl_state = self.power_ctrl_status(delay);
-                info!("Power ctrl state {:?}", ctrl_state);
                 let _ = self.tell_pi_to_wakeup(delay);
                 let agent_ready = self.tc2_agent_is_ready(delay, print, None);
                 agent_ready

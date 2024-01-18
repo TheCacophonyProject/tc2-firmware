@@ -4,12 +4,12 @@ use crate::rp2040_flash::read_rp2040_flash;
 use crate::sun_times::sun_times;
 use chrono::{NaiveDateTime, NaiveTime, Timelike};
 use core::ops::Add;
-use defmt::{info, Format};
+use defmt::{info, Format, Formatter};
 use embedded_io::Read;
 use pcf8563::DateTime;
 
 #[derive(Format, PartialEq)]
-pub struct DeviceConfig {
+pub struct DeviceConfigInner {
     pub device_id: u32,
     device_name: [u8; 64], // length, ...payload
     pub location: (f32, f32),
@@ -20,7 +20,16 @@ pub struct DeviceConfig {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
-    //pub motion_detection_mask: DetectionMask,
+}
+
+#[derive(PartialEq)]
+pub struct DeviceConfig {
+    config_inner: DeviceConfigInner,
+    pub motion_detection_mask: DetectionMask,
+}
+
+impl Format for DeviceConfig {
+    fn format(&self, fmt: Formatter) {}
 }
 
 impl Default for DeviceConfig {
@@ -29,17 +38,19 @@ impl Default for DeviceConfig {
         let mut device_name = [0u8; 64];
         device_name[0..test_name.len()].copy_from_slice(test_name);
         DeviceConfig {
-            device_id: 0,
-            device_name,
-            location: (0.0, 0.0),
-            location_altitude: None,
-            location_timestamp: None,
-            location_accuracy: None,
-            start_recording_time: (false, 0),
-            end_recording_time: (false, 0),
-            is_continuous_recorder: false,
-            use_low_power_mode: false,
-            //motion_detection_mask: DetectionMask::new(None),
+            config_inner: DeviceConfigInner {
+                device_id: 0,
+                device_name,
+                location: (0.0, 0.0),
+                location_altitude: None,
+                location_timestamp: None,
+                location_accuracy: None,
+                start_recording_time: (false, 0),
+                end_recording_time: (false, 0),
+                is_continuous_recorder: false,
+                use_low_power_mode: false,
+            },
+            motion_detection_mask: DetectionMask::new(None),
         }
     }
 }
@@ -78,51 +89,70 @@ impl DeviceConfig {
         device_name[0] = device_name_length as u8;
         let len = device_name.len();
         let device_name = {
-            cursor
+            let read_bytes = cursor
                 .read(&mut device_name[1..(device_name_length + 1).min(len)])
                 .unwrap();
             device_name
         };
-        // let mut mask_inner = [0u8; 2400];
-        // cursor.read(&mut mask_inner).unwrap();
-        // let motion_detection_mask = DetectionMask::new(Some(mask_inner));
+        let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
+        let len_before_mask = cursor.position();
+        let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
+        let mut used_mask = true;
+        if len != motion_detection_mask.inner.len() {
+            // This payload came without the mask attached (i.e. from the rPi)
+            motion_detection_mask.set_empty();
+            used_mask = false;
+        }
         (
             Some(DeviceConfig {
-                device_id,
-                device_name,
-                location: (latitude, longitude),
-                location_altitude,
-                location_timestamp,
-                location_accuracy,
-                start_recording_time,
-                end_recording_time,
-                is_continuous_recorder,
-                use_low_power_mode,
-                // motion_detection_mask,
+                config_inner: DeviceConfigInner {
+                    device_id,
+                    device_name,
+                    location: (latitude, longitude),
+                    location_altitude,
+                    location_timestamp,
+                    location_accuracy,
+                    start_recording_time,
+                    end_recording_time,
+                    is_continuous_recorder,
+                    use_low_power_mode,
+                },
+                motion_detection_mask,
             }),
-            cursor.position(),
+            if used_mask {
+                cursor.position()
+            } else {
+                len_before_mask
+            },
         )
     }
 
+    pub fn config(&self) -> &DeviceConfigInner {
+        &self.config_inner
+    }
     pub fn device_name(&self) -> &str {
-        let len = self.device_name[0] as usize;
-        let slice_len = self.device_name.len();
-        core::str::from_utf8(&self.device_name[1..(1 + len).min(slice_len)])
+        let len = self.config_inner.device_name[0] as usize;
+        let slice_len = self.config_inner.device_name.len();
+        core::str::from_utf8(&self.config_inner.device_name[1..(1 + len).min(slice_len)])
             .unwrap_or("Invalid device name")
     }
 
     pub fn device_name_bytes(&self) -> &[u8] {
-        let len = self.device_name[0] as usize;
-        &self.device_name[1..1 + len]
+        let len = self.config_inner.device_name[0] as usize;
+        &self.config_inner.device_name[1..1 + len]
     }
 
     pub fn next_recording_window_start(&self, now_utc: &NaiveDateTime) -> NaiveDateTime {
         self.next_recording_window(now_utc).0
     }
 
+    pub fn use_low_power_mode(&self) -> bool {
+        self.config_inner.use_low_power_mode
+    }
+
     pub fn next_recording_window(&self, now_utc: &NaiveDateTime) -> (NaiveDateTime, NaiveDateTime) {
-        let (is_absolute_start, mut start_offset) = self.start_recording_time;
-        let (is_absolute_end, mut end_offset) = self.end_recording_time;
+        let (is_absolute_start, mut start_offset) = self.config_inner.start_recording_time;
+        let (is_absolute_end, mut end_offset) = self.config_inner.end_recording_time;
         if is_absolute_end && end_offset < 0 {
             end_offset = 86_400 + end_offset;
         }
@@ -130,8 +160,8 @@ impl DeviceConfig {
             start_offset = 86_400 + start_offset;
         }
         let (sunrise, sunset) = if !is_absolute_start || !is_absolute_end {
-            let (lat, lng) = self.location;
-            let altitude = self.location_altitude;
+            let (lat, lng) = self.config_inner.location;
+            let altitude = self.config_inner.location_altitude;
             let (mut sunrise, sunset) = sun_times(
                 now_utc.date(),
                 lat as f64,
@@ -183,8 +213,8 @@ impl DeviceConfig {
     }
 
     pub fn time_is_in_daylight(&self, date_time_utc: &NaiveDateTime) -> bool {
-        let (lat, lng) = self.location;
-        let altitude = self.location_altitude;
+        let (lat, lng) = self.config_inner.location;
+        let altitude = self.config_inner.location_altitude;
         let (sunrise, sunset) = sun_times(
             date_time_utc.date(),
             lat as f64,
@@ -195,7 +225,7 @@ impl DeviceConfig {
         date_time_utc.hour() > sunrise.hour() && date_time_utc.hour() < sunset.hour()
     }
     pub fn time_is_in_recording_window(&self, date_time_utc: &NaiveDateTime) -> bool {
-        if self.is_continuous_recorder {
+        if self.config_inner.is_continuous_recorder {
             return true;
         }
         let (start_time, end_time) = self.next_recording_window(date_time_utc);
