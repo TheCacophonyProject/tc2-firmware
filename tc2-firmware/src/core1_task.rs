@@ -326,7 +326,7 @@ pub fn core_1_task(
     //info!("Next recording window {}", device_config.next_recording_window(&date_time_utc));
     info!(
         "Time is in window {}",
-        device_config.time_is_in_recording_window(&date_time_utc, true)
+        device_config.time_is_in_recording_window(&date_time_utc)
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
@@ -449,7 +449,7 @@ pub fn core_1_task(
                 //  we just get it periodically, and then each frame add to it, then re-sync it
                 // (when we do our once a minute checks) when we're *not* trying to start a recording.
                 let is_inside_recording_window = if !dev_mode {
-                    device_config.time_is_in_recording_window(&date_time_utc, false)
+                    device_config.time_is_in_recording_window(&date_time_utc)
                 } else {
                     // Recording window is 5 minutes from startup time in dev mode.
                     date_time_utc < startup_date_time_utc + chrono::Duration::minutes(5)
@@ -612,7 +612,7 @@ pub fn core_1_task(
             // never shut down.
             is_daytime = device_config.time_is_in_daylight(&date_time_utc);
             let is_outside_recording_window = if !dev_mode {
-                !device_config.time_is_in_recording_window(&date_time_utc, false)
+                !device_config.time_is_in_recording_window(&date_time_utc)
             } else {
                 let is_inside_recording_window =
                     date_time_utc < startup_date_time_utc + chrono::Duration::minutes(5);
