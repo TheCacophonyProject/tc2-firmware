@@ -5,12 +5,14 @@ use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::core1_sub_tasks::{
-    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_flash_storage,
+    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
+    maybe_offload_flash_storage_and_events,
 };
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{get_naive_datetime, DeviceConfig};
+use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
@@ -19,6 +21,7 @@ use crate::utils::u8_slice_to_u16;
 use crate::{bsp, FrameBuffer};
 use chrono::NaiveDateTime;
 use core::cell::RefCell;
+use core::ops::Add;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
@@ -29,6 +32,7 @@ use rp2040_hal::gpio::bank0::{
 };
 use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioInput, SioOutput};
 use rp2040_hal::pio::PIOExt;
+use rp2040_hal::timer::Instant;
 use rp2040_hal::Sio;
 
 #[repr(u32)]
@@ -72,7 +76,9 @@ pub struct Core1Pins {
 }
 const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
 const WAIT_N_FRAMES_FOR_STABLE: usize = 45;
-pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) {
+
+/// Returns `true` if it did wake the rPI
+pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool {
     match shared_i2c.pi_is_powered_down(delay) {
         Ok(true) => {
             if shared_i2c.tell_pi_to_wakeup(delay).is_ok() {
@@ -91,19 +97,27 @@ pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) {
                     }
                     delay.delay_ms(1000);
                 }
+                true
+            } else {
+                warn!("Failed to send wake signal to raspberry pi");
+                false
             }
         }
-        _ => loop {
-            if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
-                if pi_is_awake {
-                    break;
-                } else {
-                    // Try to wake it again, just in case it was shutdown behind our backs.
-                    let _ = shared_i2c.tell_pi_to_wakeup(delay);
+        _ => {
+            loop {
+                if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true)
+                {
+                    if pi_is_awake {
+                        break;
+                    } else {
+                        // Try to wake it again, just in case it was shutdown behind our back.
+                        let _ = shared_i2c.tell_pi_to_wakeup(delay);
+                    }
                 }
+                delay.delay_ms(1000);
             }
-            delay.delay_ms(1000);
-        },
+            false
+        }
     }
 }
 
@@ -156,6 +170,43 @@ fn is_frame_telemetry_is_valid(
     }
 }
 
+// NOTE: Important: If we start using dormant states again, the timer will be incorrect
+pub struct SyncedDateTime {
+    pub date_time_utc: NaiveDateTime,
+    timer_offset: Instant,
+}
+
+impl Default for SyncedDateTime {
+    fn default() -> Self {
+        SyncedDateTime {
+            date_time_utc: NaiveDateTime::default(),
+            timer_offset: Instant::from_ticks(0),
+        }
+    }
+}
+
+impl SyncedDateTime {
+    pub fn get_timestamp_micros(&self, timer: &rp2040_hal::Timer) -> u64 {
+        (self.date_time_utc
+            + chrono::Duration::microseconds(
+                (timer.get_counter() - self.timer_offset).to_micros() as i64
+            ))
+        .timestamp_micros() as u64
+    }
+
+    pub fn set(&mut self, date_time: NaiveDateTime, timer: &rp2040_hal::Timer) {
+        self.date_time_utc = date_time;
+        self.timer_offset = timer.get_counter();
+    }
+
+    pub fn new(date_time: NaiveDateTime, timer: &rp2040_hal::Timer) -> SyncedDateTime {
+        SyncedDateTime {
+            date_time_utc: date_time,
+            timer_offset: timer.get_counter(),
+        }
+    }
+}
+
 pub fn core_1_task(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
@@ -173,6 +224,8 @@ pub fn core_1_task(
         warn!("FIELD MODE");
     }
 
+    let mut synced_date_time = SyncedDateTime::default();
+
     let mut crc_buf = [0x42u8; 32 + 104];
     let mut payload_buf = [0x42u8; 2066];
     let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
@@ -181,13 +234,28 @@ pub fn core_1_task(
     let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
     let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
     let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+    let mut peripherals = unsafe { Peripherals::steal() };
+    let core = unsafe { pac::CorePeripherals::steal() };
+    let mut delay = Delay::new(core.SYST, clock_freq);
+    let mut sio = Sio::new(peripherals.SIO);
+    let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
 
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
+
+    loop {
+        // NOTE: Keep retrying until we get a datetime from RTC.
+        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
+            synced_date_time.set(get_naive_datetime(now), &timer);
+            break;
+        } else {
+            warn!("Failed getting date from RTC, retrying");
+            delay.delay_ms(10);
+        }
+    }
 
     let mut pi_spi = ExtSpiTransfers::new(
         pins.pi_mosi,
@@ -226,6 +294,11 @@ pub fn core_1_task(
         }
     }
 
+    let mut event_logger = EventLogger::new(&mut flash_storage);
+    if event_logger.has_events_to_offload() {
+        info!("There are {} events to offload", event_logger.count());
+    }
+
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
     //let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
@@ -239,15 +312,10 @@ pub fn core_1_task(
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let core = unsafe { pac::CorePeripherals::steal() };
-    let mut delay = Delay::new(core.SYST, clock_freq);
-    let mut sio = Sio::new(peripherals.SIO);
     sio.fifo.write_blocking(Core1Task::Ready.into());
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-    let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
     let existing_config = DeviceConfig::load_existing_config_from_flash();
 
     if let Some(existing_config) = &existing_config {
@@ -257,25 +325,44 @@ pub fn core_1_task(
         // We need to wake up the rpi and get a config
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
     }
-
-    let device_config = get_existing_device_config_or_config_from_pi_on_initial_handshake(
-        &mut flash_storage,
-        &mut pi_spi,
-        &mut peripherals.RESETS,
-        &mut peripherals.DMA,
-        clock_freq.Hz(),
-        radiometry_enabled,
-        lepton_serial.unwrap_or(0),
-        &mut timer,
-        existing_config,
-    );
-    //let motion_detection_mask = DetectionMask::new(None);
+    let (device_config, device_config_was_updated) =
+        get_existing_device_config_or_config_from_pi_on_initial_handshake(
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            clock_freq.Hz(),
+            radiometry_enabled,
+            lepton_serial.unwrap_or(0),
+            &mut timer,
+            existing_config,
+        );
+    if device_config_was_updated {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::SavedNewConfig,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
     if !device_config.use_low_power_mode() {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
+        warn!("MAYBE OFFLOAD EVENTS");
+        maybe_offload_events(
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            &mut delay,
+            &mut timer,
+            &mut event_logger,
+            &mut flash_storage,
+            clock_freq,
+        );
     }
-    maybe_offload_flash_storage(
+    if maybe_offload_flash_storage_and_events(
         &mut flash_storage,
         &mut pi_spi,
         &mut peripherals.RESETS,
@@ -284,7 +371,17 @@ pub fn core_1_task(
         &mut shared_i2c,
         &mut delay,
         &mut timer,
-    );
+        &mut event_logger,
+        &synced_date_time,
+    ) {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::OffloadedRecording,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    };
 
     // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
@@ -305,34 +402,27 @@ pub fn core_1_task(
     let mut prev_frame_telemetry: Option<Telemetry> = None;
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
-    let mut date_time_utc = NaiveDateTime::default();
-    let mut startup_date_time_utc = NaiveDateTime::default();
-    let mut got_initial_datetime = false;
-    while !got_initial_datetime {
+    let startup_date_time_utc;
+    loop {
         // NOTE: Keep retrying until we get a datetime from RTC.
         if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
-            date_time_utc = get_naive_datetime(now);
-            startup_date_time_utc = date_time_utc.clone();
-            got_initial_datetime = true;
-            // warn!("Got initial time from RTC: {}", date_time_utc.timestamp());
+            synced_date_time.set(get_naive_datetime(now), &timer);
+            startup_date_time_utc = synced_date_time.date_time_utc.clone();
+            break;
         } else {
             warn!("Failed getting date from RTC, retrying");
             delay.delay_ms(10);
         }
     }
 
-    let mut is_daytime = device_config.time_is_in_daylight(&date_time_utc);
-
-    //info!("Next recording window {}", device_config.next_recording_window(&date_time_utc));
-    info!(
-        "Time is in window {}",
-        device_config.time_is_in_recording_window(&date_time_utc)
-    );
-
+    let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
     let mut motion_detection: Option<MotionTracking> = None;
-
+    let mut logged_frame_transfer = false;
+    let mut logged_told_rpi_to_sleep = false;
+    let mut logged_pi_powered_down = false;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
+    info!("Entering frame loop");
     loop {
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
@@ -363,7 +453,6 @@ pub fn core_1_task(
                 .frame_data_as_u8_slice_mut();
             // Read the telemetry:
             let frame_telemetry = read_telemetry(&frame_buffer);
-
             // Sometimes we get an invalid frame header on this thread; we detect and ignore these frames.
             let frame_header_is_valid =
                 is_frame_telemetry_is_valid(&frame_telemetry, &mut stable_telemetry_tracker);
@@ -387,6 +476,21 @@ pub fn core_1_task(
         } else {
             None
         };
+        if !logged_frame_transfer && frame_header_is_valid && transfer.is_some() {
+            let start = timer.get_counter();
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::StartedSendingFramesToRpi,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+            info!(
+                "Log event took {}µs",
+                (timer.get_counter() - start).to_micros()
+            );
+            logged_frame_transfer = true;
+        }
 
         let frame_buffer = &mut thread_local_frame_buffer
             .as_mut()
@@ -449,10 +553,11 @@ pub fn core_1_task(
                 //  we just get it periodically, and then each frame add to it, then re-sync it
                 // (when we do our once a minute checks) when we're *not* trying to start a recording.
                 let is_inside_recording_window = if !dev_mode {
-                    device_config.time_is_in_recording_window(&date_time_utc)
+                    device_config.time_is_in_recording_window(&synced_date_time.date_time_utc)
                 } else {
                     // Recording window is 5 minutes from startup time in dev mode.
-                    date_time_utc < startup_date_time_utc + chrono::Duration::minutes(5)
+                    synced_date_time.date_time_utc
+                        < startup_date_time_utc + chrono::Duration::minutes(5)
                 };
                 if is_inside_recording_window {
                     warn!("Setting recording flag on attiny");
@@ -465,7 +570,7 @@ pub fn core_1_task(
                     error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
                     let mut cptv_streamer = CptvStream::new(
-                        date_time_utc.timestamp() as u64 * 1000 * 1000, // Microseconds
+                        synced_date_time.get_timestamp_micros(&timer), // Microseconds
                         lepton_version,
                         lepton_serial.clone(),
                         lepton_firmware_version.clone(),
@@ -488,6 +593,14 @@ pub fn core_1_task(
                     );
                     prev_frame.copy_from_slice(&prev_frame_2);
                     frames_written += 1;
+
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::StartedRecording,
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
 
                     cptv_stream = Some(cptv_streamer);
                 } else {
@@ -537,6 +650,14 @@ pub fn core_1_task(
                     let _ = shared_i2c
                         .set_recording_flag(&mut delay, false)
                         .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::EndedRecording,
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
                 }
                 cptv_stream = None;
                 frames_written = 0;
@@ -599,23 +720,23 @@ pub fn core_1_task(
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
                 advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
             }
-            date_time_utc = match shared_i2c.get_datetime(&mut delay) {
-                Ok(now) => get_naive_datetime(now),
+            synced_date_time = match shared_i2c.get_datetime(&mut delay) {
+                Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
                 Err(err_str) => {
                     error!("Unable to get DateTime from RTC: {}", err_str);
-                    date_time_utc
+                    synced_date_time
                 }
             };
 
             // NOTE: In continuous recording mode, the device will only shutdown briefly when the flash storage
             // is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
             // never shut down.
-            is_daytime = device_config.time_is_in_daylight(&date_time_utc);
+            is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
             let is_outside_recording_window = if !dev_mode {
-                !device_config.time_is_in_recording_window(&date_time_utc)
+                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc)
             } else {
-                let is_inside_recording_window =
-                    date_time_utc < startup_date_time_utc + chrono::Duration::minutes(5);
+                let is_inside_recording_window = synced_date_time.date_time_utc
+                    < startup_date_time_utc + chrono::Duration::minutes(5);
                 !is_inside_recording_window
             };
 
@@ -624,10 +745,30 @@ pub fn core_1_task(
                 if !device_config.use_low_power_mode() {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
                     advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                    if !logged_told_rpi_to_sleep {
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::ToldRpiToSleep,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
+                        logged_told_rpi_to_sleep = true;
+                    }
                 }
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
                     if pi_is_powered_down {
-                        info!("Pi is now powered down: {}", pi_is_powered_down);
+                        if !logged_pi_powered_down {
+                            info!("Pi is now powered down: {}", pi_is_powered_down);
+                            event_logger.log_event(
+                                LoggerEvent::new(
+                                    LoggerEventKind::GotRpiPoweredDown,
+                                    synced_date_time.get_timestamp_micros(&timer),
+                                ),
+                                &mut flash_storage,
+                            );
+                            logged_pi_powered_down = true;
+                        }
                         // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if flash_storage_nearly_full
@@ -635,14 +776,15 @@ pub fn core_1_task(
                         {
                             // If flash storage is nearly full, or we're now outside the recording window,
                             //  restart in 2 minutes so we can offload files.
-                            date_time_utc + chrono::Duration::minutes(2)
+                            synced_date_time.date_time_utc + chrono::Duration::minutes(2)
                         } else {
                             // Otherwise, restart at the start of the next recording window.
                             if !dev_mode {
-                                device_config.next_recording_window_start(&date_time_utc)
+                                device_config
+                                    .next_recording_window_start(&synced_date_time.date_time_utc)
                             } else {
                                 // In dev mode, we always set the restart alarm for 2 minutes time.
-                                date_time_utc + chrono::Duration::minutes(2)
+                                synced_date_time.date_time_utc + chrono::Duration::minutes(2)
                             }
                         };
                         shared_i2c.enable_alarm(&mut delay);
@@ -652,6 +794,16 @@ pub fn core_1_task(
                             let alarm_enabled = shared_i2c.alarm_interrupt_enabled();
                             info!("Wake up alarm interrupt enabled {}", alarm_enabled);
                             if alarm_enabled {
+                                event_logger.log_event(
+                                    LoggerEvent::new(
+                                        LoggerEventKind::SetAlarm(
+                                            next_recording_window_start.timestamp_micros() as u64,
+                                        ),
+                                        synced_date_time.get_timestamp_micros(&timer),
+                                    ),
+                                    &mut flash_storage,
+                                );
+
                                 info!("Tell core0 to get ready to sleep");
                                 // Tell core0 we're exiting the recording loop, and it should
                                 // down the lepton module, and wait for reply.
@@ -664,6 +816,13 @@ pub fn core_1_task(
                                     }
                                 }
                                 info!("Ask Attiny to power down rp2040");
+                                event_logger.log_event(
+                                    LoggerEvent::new(
+                                        LoggerEventKind::Rp2040Sleep,
+                                        synced_date_time.get_timestamp_micros(&timer),
+                                    ),
+                                    &mut flash_storage,
+                                );
                                 if let Ok(_) =
                                     shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay)
                                 {
@@ -700,7 +859,7 @@ pub fn core_1_task(
             // NOTE: We only get the actual date from the RTC every minutes' worth of frames, so that we
             // don't have too many stalls trying to communicate via I2C with the RTC.
 
-            let mut incremented_datetime = date_time_utc.clone();
+            let mut incremented_datetime = synced_date_time.date_time_utc.clone();
             let frames_elapsed = if frame_header_is_valid {
                 get_frames_elapsed(&frame_telemetry, &prev_frame_telemetry)
             } else {
@@ -708,8 +867,8 @@ pub fn core_1_task(
             };
 
             incremented_datetime += chrono::Duration::milliseconds(115 * frames_elapsed as i64);
-            if incremented_datetime > date_time_utc {
-                date_time_utc = incremented_datetime;
+            if incremented_datetime > synced_date_time.date_time_utc {
+                synced_date_time.set(incremented_datetime, &timer);
             }
 
             // Spend the same time as we would otherwise use querying the RTC to keep frame-times
@@ -729,6 +888,10 @@ pub fn core_1_task(
         // );
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
+}
+
+fn current_time(synced_time: &NaiveDateTime, offset: chrono::Duration) -> NaiveDateTime {
+    synced_time.add(offset)
 }
 
 fn get_frames_elapsed(

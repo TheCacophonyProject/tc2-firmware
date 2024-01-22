@@ -49,6 +49,8 @@ const FEATURE_CONFIG: u8 = 0xb0;
 const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const FEATURE_DIE_SELECT: u8 = 0xd0;
 
+const NUM_RECORDING_BLOCKS: isize = 2048 - 5; // Leave 1 block between recordings and event logs
+
 struct FileAllocation {
     offset: u32,
     length: u32,
@@ -256,7 +258,7 @@ pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
 // }
 
 pub struct OnboardFlash {
-    spi: Option<
+    pub spi: Option<
         Spi<
             Enabled,
             SPI1,
@@ -276,7 +278,7 @@ pub struct OnboardFlash {
     pub current_block_index: isize,
     pub last_used_block_index: Option<isize>,
     pub first_used_block_index: Option<isize>,
-    bad_blocks: [i16; 40],
+    pub bad_blocks: [i16; 40],
     pub current_page: Page,
     pub prev_page: Page,
     dma_channel_1: Option<Channel<CH1>>,
@@ -333,18 +335,6 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
-        let erase = false;
-        if erase {
-            info!("Erasing");
-            //
-            for block in 0..2048 {
-                if !self.erase_block(block).is_ok() {
-                    error!("Block erase failed for block {}", block);
-                }
-            }
-            self.scan();
-        }
-        // crate::unreachable!("Foo");
     }
 
     pub fn reset(&mut self) {
@@ -371,7 +361,7 @@ impl OnboardFlash {
             }
         }
 
-        for block_index in 0..2048isize {
+        for block_index in 0..2048 {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
@@ -379,16 +369,12 @@ impl OnboardFlash {
             self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
-                //warn!("Found bad block {}", block_index);
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
                 }
-            } else {
+            } else if block_index < NUM_RECORDING_BLOCKS {
                 if !self.current_page.page_is_used() {
-                    // if self.first_used_block_index.is_none() {
-                    //     println!("Meta {:?}", self.current_page.user_metadata_1()[0..10]);
-                    // }
                     // This will be the starting block of the next file to be written.
                     if self.last_used_block_index.is_none() && self.first_used_block_index.is_some()
                     {
@@ -398,14 +384,7 @@ impl OnboardFlash {
                         println!("Setting next starting block index {}", block_index);
                     }
                 } else {
-                    // println!(
-                    //     "Scan found used page on block {}: {}, {:?}",
-                    //     block_index,
-                    //     self.current_page.page_is_used(),
-                    //     self.current_page.user_metadata_1()[0..10]
-                    // );
                     let address = OnboardFlash::get_address(block_index, 0);
-                    // println!("Block address {:?}", address);
                     if self.first_used_block_index.is_none() {
                         // This is the starting block of the first file stored.
                         println!("Storing first used block {}", block_index);
@@ -434,12 +413,7 @@ impl OnboardFlash {
                 clk.into_function().into_pull_type(),
             ),
         )
-        .init(
-            resets,
-            freq, // 125_000_000
-            40_000_000.Hz(),
-            &embedded_hal::spi::MODE_3,
-        );
+        .init(resets, freq, 40_000_000.Hz(), &embedded_hal::spi::MODE_3);
         self.spi = Some(spi);
     }
 
@@ -468,25 +442,21 @@ impl OnboardFlash {
             self.current_block_index = next_block_index;
             self.current_page_index = 0;
         }
-        // println!(
-        //     "Advanced cursor {}:{}",
-        //     self.current_block_index, self.current_page_index
-        // );
     }
 
     pub fn is_too_full_to_start_new_recordings(&self) -> bool {
         // Whether or not we should start any new recordings, or should offload.
-        self.current_block_index > (2048 - 256)
+        self.current_block_index > (NUM_RECORDING_BLOCKS - 256)
     }
 
     pub fn is_nearly_full(&self) -> bool {
         // Lets us know when we should end the current recording.
         // We only need to allow a single frames worth – 2–3 blocks should be more than enough!
-        self.current_block_index > (2048 - 3)
+        self.current_block_index > (NUM_RECORDING_BLOCKS - 3)
     }
 
     pub fn erase_all_blocks(&mut self) {
-        for block_index in 0..2048 {
+        for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
                 continue;
@@ -499,7 +469,7 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_good_used_blocks(&mut self) {
-        for block_index in 0..2048isize {
+        for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
                 continue;
@@ -509,7 +479,6 @@ impl OnboardFlash {
             // TODO: Could just read the user-metadata, not the full page, might be faster.
             self.read_page_metadata(block_index);
             if self.current_page.page_is_used() {
-                //println!("Erasing used block {}", block_index);
                 self.erase_block(block_index).unwrap();
             } else {
                 // If we encounter an unused first page of a block, that means we've gone past the
@@ -586,20 +555,10 @@ impl OnboardFlash {
             .is_ok()
         {
             self.read_page_from_cache(self.current_block_index);
-            //self.wait_for_all_ready();
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
                 let crc = self.current_page.page_crc();
                 let is_last_page_for_file = self.current_page.is_last_page_for_file();
-                // info!(
-                //     "Get file part {:?}, {:?}, at {}:{}, length {}, was last {}",
-                //     &self.current_page.user_data()[0..10],
-                //     &self.current_page.user_metadata_1()[0..10],
-                //     self.current_block_index,
-                //     self.current_page_index,
-                //     length,
-                //     is_last_page_for_file
-                // );
                 self.advance_file_cursor(is_last_page_for_file);
                 let spi = self.free_spi().unwrap();
                 Some((
@@ -613,18 +572,6 @@ impl OnboardFlash {
                     spi,
                 ))
             } else {
-                // warn!(
-                //     "Unoccupied {}:{}",
-                //     self.current_block_index, self.current_page_index
-                // );
-                // info!(
-                //     "Get file part {:?}, {:?}, at {}:{}",
-                //     &self.current_page.user_data()[0..10],
-                //     &self.current_page.user_metadata_1()[0..10],
-                //     self.current_block_index,
-                //     self.current_page_index,
-                // );
-
                 None
             }
         } else {
@@ -777,22 +724,24 @@ impl OnboardFlash {
         self.prev_page.inner = Some(current_page);
     }
 
-    pub fn read_from_cache_at_column_offset_spi(
+    pub fn read_event_from_cache_at_column_offset_spi(
         &mut self,
         block: isize,
         offset: isize,
-        length: Option<usize>,
-    ) {
-        let plane = ((block % 2) << 4) as u8;
-        let bytes = self.current_page.page_mut();
+    ) -> [u8; 10] {
+        let plane = (((block % 2) << 4) | offset >> 8) as u8;
+        let mut bytes = [0u8; 14];
         bytes[0] = CACHE_READ;
         bytes[1] = plane;
-        bytes[2] = 0;
+        bytes[2] = (offset & 0xff) as u8;
         bytes[3] = 0;
         //info!("Reading block {}, plane {}", block, plane);
         self.cs.set_low().unwrap();
-        self.spi.as_mut().unwrap().transfer(bytes).unwrap();
+        self.spi.as_mut().unwrap().transfer(&mut bytes).unwrap();
         self.cs.set_high().unwrap();
+        let mut event = [0u8; 10];
+        event.copy_from_slice(&bytes[4..]);
+        event
     }
 
     pub fn read_page_metadata(&mut self, block: isize) {
@@ -806,20 +755,6 @@ impl OnboardFlash {
         self.cs.set_low().unwrap();
         self.spi.as_mut().unwrap().write(bytes).unwrap();
         self.cs.set_high().unwrap();
-    }
-
-    pub fn spi_write_dma(&mut self, bytes: &[u8]) {
-        self.cs.set_low().unwrap();
-        let transfer = single_buffer::Config::new(
-            self.dma_channel_1.take().unwrap(),
-            unsafe { extend_lifetime(bytes) },
-            self.spi.take().unwrap(),
-        )
-        .start();
-        let (r_ch1, r_buf, spi) = transfer.wait();
-        self.cs.set_high().unwrap();
-        self.dma_channel_1 = Some(r_ch1);
-        self.spi = Some(spi);
     }
 
     fn print_feature(&mut self, name: &str, feature: u8) {
@@ -839,11 +774,6 @@ impl OnboardFlash {
         self.spi_transfer(&mut id);
         info!("Device id {:x}", id);
     }
-
-    fn check_occupancy() {
-        // TODO: Check if we're getting dangerously full, and if so, wake up the pi to offload files.
-    }
-
     pub fn start_file(&mut self) -> isize {
         // We always start writing a new file at page 1, reserving page 0 for when we come back
         // and write the header once we've finished writing the file.
@@ -864,8 +794,6 @@ impl OnboardFlash {
         page_index: Option<isize>,
     ) {
         self.write_enable();
-        // FIXME Are we now getting bubbles in our spi transfers?
-        // Maybe check we can write the id?
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
         assert_eq!(bytes.len(), 2112 + 4); // 2116
@@ -946,6 +874,46 @@ impl OnboardFlash {
             // Relocate earlier pages on this block to the next free block
             // Re-write this page
             // Erase and mark the earlier block as bad.
+        }
+    }
+
+    pub fn write_event(
+        &mut self,
+        event_bytes: &[u8; 10],
+        block_index: isize,
+        page_index: isize,
+        offset: u16,
+    ) {
+        if self.spi.is_some() {
+            self.write_enable();
+            assert_eq!(self.write_enabled(), true);
+            let mut bytes = [0u8; 13];
+            bytes[3..13].copy_from_slice(event_bytes);
+            let address = OnboardFlash::get_address(block_index, page_index);
+            let plane = ((block_index % 2) << 4) as u8 | (offset >> 8) as u8;
+
+            // Skip the first byte in the buffer
+            bytes[0] = PROGRAM_LOAD;
+            bytes[1] = plane;
+            bytes[2] = (offset & 0x0f) as u8;
+
+            self.spi_write(&bytes);
+            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+            // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
+            let status = self.wait_for_ready();
+            // TODO: Check ECC status, mark and relocate block if needed.
+            //info!("Status after program {:#010b}", status.inner);
+            if !status.program_failed() {
+            } else {
+                error!("Programming failed");
+            }
+            if !status.erase_failed() {
+                // Relocate earlier pages on this block to the next free block
+                // Re-write this page
+                // Erase and mark the earlier block as bad.
+            }
+        } else {
+            error!("Failed writing event: SPI not available");
         }
     }
 }

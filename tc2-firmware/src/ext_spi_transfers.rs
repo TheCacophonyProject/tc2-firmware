@@ -35,6 +35,7 @@ pub enum ExtTransferMessage {
     EndFileTransfer = 0x5,
     BeginAndEndFileTransfer = 0x6,
     GetMotionDetectionMask = 0x7,
+    SendLoggerEvent = 0x8,
 }
 
 // We can store our ping pin here when we enter the ping-back interrupt

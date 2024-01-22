@@ -1,6 +1,6 @@
 use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
-use crate::rp2040_flash::read_rp2040_flash;
+use crate::rp2040_flash::read_device_config_from_rp2040_flash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
@@ -56,7 +56,7 @@ impl Default for DeviceConfig {
 
 impl DeviceConfig {
     pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
-        let slice = read_rp2040_flash();
+        let slice = read_device_config_from_rp2040_flash();
         let (device_config, _) = DeviceConfig::from_bytes(slice);
         device_config
     }
@@ -352,6 +352,6 @@ pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
             datetime.hours as u32, datetime.minutes as u32, datetime.seconds as u32,
         );
     }
-    let naive_datetime = chrono::NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());
+    let naive_datetime = NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());
     naive_datetime
 }
