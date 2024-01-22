@@ -115,22 +115,6 @@ pub fn advise_raspberry_pi_it_may_shutdown(shared_i2c: &mut SharedI2C, delay: &m
     }
 }
 
-pub fn power_down_raspberry_pi(is_awake: &mut bool, shared_i2c: &mut SharedI2C, delay: &mut Delay) {
-    if shared_i2c.tell_pi_to_shutdown(delay).is_ok() {
-        info!("Sent power-down signal to raspberry pi");
-        loop {
-            delay.delay_ms(1000);
-            info!("Checking if pi is powered down yet");
-            if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(delay) {
-                if pi_is_powered_down {
-                    *is_awake = false;
-                    break;
-                }
-            }
-        }
-    }
-}
-
 fn is_frame_telemetry_is_valid(
     frame_telemetry: &Telemetry,
     telemetry_revision_stable: &mut ([u8; 2], i8),
@@ -338,6 +322,13 @@ pub fn core_1_task(
     }
 
     let mut is_daytime = device_config.time_is_in_daylight(&date_time_utc);
+
+    //info!("Next recording window {}", device_config.next_recording_window(&date_time_utc));
+    info!(
+        "Time is in window {}",
+        device_config.time_is_in_recording_window(&date_time_utc, true)
+    );
+
     let mut motion_detection: Option<MotionTracking> = None;
 
     // Enable raw frame transfers to pi – if not already enabled.
@@ -458,7 +449,7 @@ pub fn core_1_task(
                 //  we just get it periodically, and then each frame add to it, then re-sync it
                 // (when we do our once a minute checks) when we're *not* trying to start a recording.
                 let is_inside_recording_window = if !dev_mode {
-                    device_config.time_is_in_recording_window(&date_time_utc)
+                    device_config.time_is_in_recording_window(&date_time_utc, false)
                 } else {
                     // Recording window is 5 minutes from startup time in dev mode.
                     date_time_utc < startup_date_time_utc + chrono::Duration::minutes(5)
@@ -621,7 +612,7 @@ pub fn core_1_task(
             // never shut down.
             is_daytime = device_config.time_is_in_daylight(&date_time_utc);
             let is_outside_recording_window = if !dev_mode {
-                !device_config.time_is_in_recording_window(&date_time_utc)
+                !device_config.time_is_in_recording_window(&date_time_utc, false)
             } else {
                 let is_inside_recording_window =
                     date_time_utc < startup_date_time_utc + chrono::Duration::minutes(5);
@@ -634,7 +625,6 @@ pub fn core_1_task(
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
                     advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 }
-                // FIXME (on Attiny - Pi Camera State PowerOnTimeout)
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
                     if pi_is_powered_down {
                         info!("Pi is now powered down: {}", pi_is_powered_down);
