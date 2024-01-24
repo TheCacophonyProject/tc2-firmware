@@ -683,11 +683,7 @@ pub fn core_1_task(
                     }
                 }
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
-                if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
-                    if pi_is_powered_down {
-                        wake_raspberry_pi(&mut shared_i2c, &mut delay);
-                    }
-                }
+                wake_raspberry_pi(&mut shared_i2c, &mut delay);
             }
             // Make sure timing is as close as possible to the non-sync case
             let sync_rtc_end = timer.get_counter();
