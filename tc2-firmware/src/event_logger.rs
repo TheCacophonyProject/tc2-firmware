@@ -2,12 +2,11 @@
 //  There would be a maximum number of errors we can store before we run out of memory.  Timestamp can
 //  be in 32bit seconds past a given epoch (let's say Jan 1 2023).  Is a 1 second granularity enough?
 use crate::onboard_flash::OnboardFlash;
-use crate::rp2040_flash::{BLOCK_SIZE, FLASH_END, FLASH_EVENT_LOG_SIZE, FLASH_XIP_BASE, PAGE_SIZE};
 use byteorder::{ByteOrder, LittleEndian};
 use core::ops::Range;
-use core::slice;
-use defmt::{error, info, warn};
+use defmt::{error, info, warn, Format};
 
+#[derive(Format, Copy, Clone)]
 pub enum LoggerEventKind {
     Rp2040Sleep,
     OffloadedRecording,
@@ -45,6 +44,30 @@ impl Into<u16> for LoggerEventKind {
     }
 }
 
+impl TryFrom<u16> for LoggerEventKind {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        use LoggerEventKind::*;
+        match value {
+            1 => Ok(Rp2040Sleep),
+            2 => Ok(OffloadedRecording),
+            3 => Ok(SavedNewConfig),
+            4 => Ok(StartedSendingFramesToRpi),
+            5 => Ok(StartedRecording),
+            6 => Ok(EndedRecording),
+            7 => Ok(ToldRpiToSleep),
+            8 => Ok(GotRpiPoweredDown),
+            9 => Ok(GotRpiPoweredOn),
+            10 => Ok(ToldRpiToWake),
+            11 => Ok(LostSync),
+            12 => Ok(SetAlarm(0)),
+            13 => Ok(GotPowerOnTimeout),
+            _ => Err(()),
+        }
+    }
+}
+
 // TODO: Maybe have a map of various event payload sizes?
 pub struct LoggerEvent {
     timestamp: u64,
@@ -75,8 +98,12 @@ impl EventLogger {
             let event = logger.event_at_index(event_index, flash_storage);
             if let Some(event) = event {
                 let kind = LittleEndian::read_u16(&event[0..2]);
-                let time = LittleEndian::read_u64(&event[2..2 + 8]);
-                info!("Event #{}, kind {}, timestamp {}", event, kind, time);
+                if let Ok(kind) = LoggerEventKind::try_from(kind) {
+                    let time = LittleEndian::read_u64(&event[2..10]);
+                    info!("Event #{}, kind {}, timestamp {}", i, kind, time);
+                } else {
+                    warn!("Unknown event kind found on flash log {}", kind);
+                }
             }
         }
 
@@ -94,10 +121,15 @@ impl EventLogger {
         if index < MAX_EVENTS_IN_LOGGER {
             next_free_page_index = Some(index);
         }
-        info!(
-            "Init EventLogger: next free event logger slot at {}",
-            next_free_page_index
-        );
+        if let Some(index) = next_free_page_index {
+            info!(
+                "Init EventLogger: next free event logger slot at {}, slots available {}",
+                index,
+                MAX_EVENTS_IN_LOGGER - index
+            );
+        } else {
+            info!("Init EventLogger: no free slots available, logger full");
+        }
 
         EventLogger {
             next_event_index: next_free_page_index,
@@ -107,17 +139,16 @@ impl EventLogger {
     fn get_event_at_index(
         event_index: usize,
         flash_storage: &mut OnboardFlash,
-    ) -> Option<[u8; 10]> {
+    ) -> Option<[u8; 18]> {
         // 4 blocks per page, 64 pages per block.
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index as isize / 256);
         let page = ((event_index % 256) / 4) as isize;
-        let page_offset = (event_index % 4) * 10;
+        let page_offset = (event_index % 4) * 64; // Allocate 64 bytes for each event
         if block >= 2048 {
             None
         } else if flash_storage.read_page(block, page).is_ok() {
             let event = flash_storage
                 .read_event_from_cache_at_column_offset_spi(block, page_offset as isize);
-            info!("Got event {:?}", event);
             if event[0] != 0xff {
                 Some(event)
             } else {
@@ -180,16 +211,19 @@ impl EventLogger {
         &self,
         index: usize,
         flash_storage: &mut OnboardFlash,
-    ) -> Option<[u8; 10]> {
+    ) -> Option<[u8; 18]> {
         Self::get_event_at_index(index, flash_storage)
     }
 
     pub fn log_event(&mut self, event: LoggerEvent, flash_storage: &mut OnboardFlash) {
         if self.count() < MAX_EVENTS_IN_LOGGER {
             if let Some(next_event_index) = &mut self.next_event_index {
-                let mut event_data = [0u8; 10];
+                let mut event_data = [0u8; 18];
                 LittleEndian::write_u16(&mut event_data[0..2], event.event.into());
-                LittleEndian::write_u64(&mut event_data[2..2 + 8], event.timestamp);
+                LittleEndian::write_u64(&mut event_data[2..10], event.timestamp);
+                if let LoggerEventKind::SetAlarm(alarm_time) = event.event {
+                    LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
+                }
                 // Write to the end of the flash storage.
                 // We can do up to 4 partial page writes per page, so in a block of 64 pages we get 256 entries.
                 // We reserve 4 blocks at the end of the flash memory for events, so 1280 events, which should be plenty.
@@ -197,7 +231,7 @@ impl EventLogger {
                 let block =
                     FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index as isize / 256);
                 let page = ((event_index % 256) / 4) as isize;
-                let page_offset = (event_index % 4) * 10;
+                let page_offset = (event_index % 4) * 64;
                 flash_storage.write_event(&event_data, block, page, page_offset as u16);
                 *next_event_index += 1;
             }

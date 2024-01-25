@@ -288,6 +288,7 @@ impl DeviceConfig {
     }
     pub fn time_is_in_recording_window(&self, date_time_utc: &NaiveDateTime) -> bool {
         if self.is_continuous_recorder() {
+            info!("Continuous recording mode enabled");
             return true;
         }
         let (start_time, end_time) = self.next_recording_window(date_time_utc);

@@ -15,13 +15,13 @@ use crate::bsp::pac::SPI1;
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
 use crc::{Crc, CRC_16_XMODEM};
-use defmt::{error, info, println, warn};
+use defmt::{error, info, println, warn, Format};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::dma::{bidirectional, single_buffer, Channel, CH1, CH2};
+use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2};
 use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio8, Gpio9};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
@@ -79,6 +79,7 @@ pub struct OnboardFlashStatus {
     inner: u8,
 }
 
+#[derive(Format)]
 pub struct EccStatus {
     pub okay: bool,
     should_relocate: bool,
@@ -646,7 +647,10 @@ impl OnboardFlash {
             // that the file spans as temporarily corrupt, so this file doesn't get read and
             // send to the raspberry pi
             //Err(&"unrecoverable data corruption error")
-            warn!("unrecoverable data corruption error at {}:{}", block, page);
+            warn!(
+                "unrecoverable data corruption error at {}:{} - should relocate? {}",
+                block, page, should_relocate
+            );
             Ok(())
         }
     }
@@ -728,18 +732,17 @@ impl OnboardFlash {
         &mut self,
         block: isize,
         offset: isize,
-    ) -> [u8; 10] {
-        let plane = (((block % 2) << 4) | offset >> 8) as u8;
-        let mut bytes = [0u8; 14];
+    ) -> [u8; 18] {
+        let plane = ((block % 2) << 4) as u8;
+        let mut bytes = [0u8; 22];
         bytes[0] = CACHE_READ;
         bytes[1] = plane;
-        bytes[2] = (offset & 0xff) as u8;
+        bytes[2] = offset as u8;
         bytes[3] = 0;
-        //info!("Reading block {}, plane {}", block, plane);
         self.cs.set_low().unwrap();
         self.spi.as_mut().unwrap().transfer(&mut bytes).unwrap();
         self.cs.set_high().unwrap();
-        let mut event = [0u8; 10];
+        let mut event = [0u8; 18];
         event.copy_from_slice(&bytes[4..]);
         event
     }
@@ -879,7 +882,7 @@ impl OnboardFlash {
 
     pub fn write_event(
         &mut self,
-        event_bytes: &[u8; 10],
+        event_bytes: &[u8; 18],
         block_index: isize,
         page_index: isize,
         offset: u16,
@@ -887,22 +890,19 @@ impl OnboardFlash {
         if self.spi.is_some() {
             self.write_enable();
             assert_eq!(self.write_enabled(), true);
-            let mut bytes = [0u8; 13];
-            bytes[3..13].copy_from_slice(event_bytes);
+            let mut bytes = [0u8; 21];
+            bytes[3..21].copy_from_slice(event_bytes);
             let address = OnboardFlash::get_address(block_index, page_index);
-            let plane = ((block_index % 2) << 4) as u8 | (offset >> 8) as u8;
+            let plane = ((block_index % 2) << 4) as u8;
 
             // Skip the first byte in the buffer
             bytes[0] = PROGRAM_LOAD;
             bytes[1] = plane;
-            bytes[2] = (offset & 0x0f) as u8;
-
+            bytes[2] = offset as u8;
             self.spi_write(&bytes);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
             // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
             let status = self.wait_for_ready();
-            // TODO: Check ECC status, mark and relocate block if needed.
-            //info!("Status after program {:#010b}", status.inner);
             if !status.program_failed() {
             } else {
                 error!("Programming failed");

@@ -79,9 +79,10 @@ const WAIT_N_FRAMES_FOR_STABLE: usize = 45;
 
 /// Returns `true` if it did wake the rPI
 pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool {
-    match shared_i2c.pi_is_powered_down(delay) {
+    match shared_i2c.pi_is_powered_down(delay, false) {
         Ok(true) => {
             if shared_i2c.tell_pi_to_wakeup(delay).is_ok() {
+                // TODO: Log here if this was an unexpected wakeup
                 warn!("Sent wake signal to raspberry pi");
                 // Poll to see when tc2-agent is ready.
                 loop {
@@ -105,7 +106,7 @@ pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool 
         }
         _ => {
             loop {
-                if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true)
+                if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, false)
                 {
                     if pi_is_awake {
                         break;
@@ -217,7 +218,7 @@ pub fn core_1_task(
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
 ) {
     let dev_mode = false;
-    info!("Core 1 start");
+    info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
     } else {
@@ -296,7 +297,7 @@ pub fn core_1_task(
 
     let mut event_logger = EventLogger::new(&mut flash_storage);
     if event_logger.has_events_to_offload() {
-        info!("There are {} events to offload", event_logger.count());
+        info!("There are {} event(s) to offload", event_logger.count());
     }
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
@@ -319,7 +320,7 @@ pub fn core_1_task(
     let existing_config = DeviceConfig::load_existing_config_from_flash();
 
     if let Some(existing_config) = &existing_config {
-        info!("Existing config {:?}", existing_config.config());
+        info!("Existing config {:#?}", existing_config.config());
     }
     if existing_config.is_none() {
         // We need to wake up the rpi and get a config
@@ -350,7 +351,6 @@ pub fn core_1_task(
     let device_config = device_config.unwrap_or(DeviceConfig::default());
     if !device_config.use_low_power_mode() {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
-        warn!("MAYBE OFFLOAD EVENTS");
         maybe_offload_events(
             &mut pi_spi,
             &mut peripherals.RESETS,
@@ -416,6 +416,12 @@ pub fn core_1_task(
     }
 
     let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
+
+    info!(
+        "Current time is in recording window? {}",
+        device_config.time_is_in_recording_window(&synced_date_time.date_time_utc)
+    );
+
     let mut motion_detection: Option<MotionTracking> = None;
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
@@ -477,17 +483,12 @@ pub fn core_1_task(
             None
         };
         if !logged_frame_transfer && frame_header_is_valid && transfer.is_some() {
-            let start = timer.get_counter();
             event_logger.log_event(
                 LoggerEvent::new(
                     LoggerEventKind::StartedSendingFramesToRpi,
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
                 &mut flash_storage,
-            );
-            info!(
-                "Log event took {}µs",
-                (timer.get_counter() - start).to_micros()
             );
             logged_frame_transfer = true;
         }
@@ -756,7 +757,7 @@ pub fn core_1_task(
                         logged_told_rpi_to_sleep = true;
                     }
                 }
-                if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay) {
+                if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
                         if !logged_pi_powered_down {
                             info!("Pi is now powered down: {}", pi_is_powered_down);

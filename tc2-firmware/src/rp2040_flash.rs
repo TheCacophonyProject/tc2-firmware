@@ -1,5 +1,4 @@
 use core::slice;
-use defmt::warn;
 use rp2040_hal::rom_data;
 
 /// Taken from https://github.com/rp-rs/rp-hal/issues/257
@@ -38,53 +37,7 @@ pub fn write_device_config_to_rp2040_flash(data: &[u8]) {
             rom_data::flash_enter_cmd_xip(); // Start XIP back up
         });
     }
-    // defmt::println!("write_device_config_to_rp2040_flash() Complete"); // TEMP
 }
-
-#[inline(never)]
-#[link_section = ".data.ram_func"]
-pub fn write_event_to_rp2040_flash(data: &[u8], page_index: usize) {
-    let mut addr = FLASH_END - (BLOCK_SIZE + FLASH_EVENT_LOG_SIZE);
-    addr += PAGE_SIZE * page_index as u32;
-    unsafe {
-        cortex_m::interrupt::free(|_cs| {
-            rom_data::connect_internal_flash();
-            rom_data::flash_exit_xip();
-            rom_data::flash_range_program(addr, data.as_ptr(), data.len());
-            rom_data::flash_flush_cache(); // Get the XIP working again
-            rom_data::flash_enter_cmd_xip(); // Start XIP back up
-        });
-    }
-    defmt::println!("write_event_to_rp2040_flash() Complete"); // TEMP
-}
-
-#[inline(never)]
-#[link_section = ".data.ram_func"]
-pub fn clear_events() {
-    let addr = FLASH_END - (BLOCK_SIZE + FLASH_EVENT_LOG_SIZE);
-    unsafe {
-        cortex_m::interrupt::free(|_cs| {
-            rom_data::connect_internal_flash();
-            rom_data::flash_exit_xip();
-            // rom_data::flash_range_erase(
-            //     addr,
-            //     (BLOCK_SIZE * 16) as usize,
-            //     SECTOR_SIZE as u32,
-            //     BLOCK64_ERASE,
-            // );
-            rom_data::flash_range_erase(
-                addr,
-                FLASH_EVENT_LOG_SIZE as usize,
-                BLOCK_SIZE,
-                BLOCK64_ERASE,
-            );
-            rom_data::flash_flush_cache(); // Get the XIP working again
-            rom_data::flash_enter_cmd_xip(); // Start XIP back up
-        });
-    }
-    defmt::println!("clear_events() Complete"); // TEMP
-}
-
 pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }

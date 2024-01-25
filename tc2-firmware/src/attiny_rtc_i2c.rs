@@ -344,11 +344,13 @@ impl SharedI2C {
         }
     }
 
-    pub fn pi_is_powered_down(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+    pub fn pi_is_powered_down(&mut self, delay: &mut Delay, print: bool) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
             Ok(state) => {
                 let camera_state = CameraState::from(state);
-                info!("Pi camera state {}", camera_state);
+                if print {
+                    info!("Pi camera state {}", camera_state);
+                }
                 match camera_state {
                     CameraState::PoweredOff => Ok(true),
                     _ => Ok(false),

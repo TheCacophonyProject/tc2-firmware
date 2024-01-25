@@ -288,7 +288,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         }
                     }
 
-                    info!("Got config from rPi {:?}", new_config.config());
+                    info!("Got config from rPi {:#?}", new_config.config());
                     if existing_config.is_none()
                         || *new_config != *existing_config.as_ref().unwrap()
                     {
