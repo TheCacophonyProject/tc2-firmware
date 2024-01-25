@@ -517,16 +517,17 @@ pub fn frame_acquisition_loop(
 
             // NOTE: If we're not transferring the previous frame, and the current segment is the second
             //  to last for a real frame, we can go dormant until the next vsync interrupt.
-            if recording_ended && !transferring_prev_frame && current_segment_num == 3 {
+            if recording_ended {
+                // && !transferring_prev_frame && current_segment_num == 3 {
                 is_recording = false;
                 recording_ended = false;
             }
-            if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-                // rosc =
-                //     go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
-            } else if current_segment_num == 3 {
-                //warn!("Overrunning frame time");
-            }
+            // if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
+            //     // rosc =
+            //     //     go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
+            // } else if current_segment_num == 3 {
+            //     //warn!("Overrunning frame time");
+            // }
         }
     }
 }

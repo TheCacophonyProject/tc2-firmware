@@ -386,6 +386,7 @@ pub struct CptvStream<'a> {
     crc_val: u32,
     total_uncompressed: u32,
     pub starting_block_index: u16,
+    pub num_frames: u32,
 }
 
 pub fn make_crc_table() -> [u32; 256] {
@@ -433,6 +434,7 @@ impl<'a> CptvStream<'a> {
             total_uncompressed: 0,
             starting_block_index: starting_block_index as u16,
             cptv_header,
+            num_frames: 0,
         }
     }
 
@@ -521,6 +523,7 @@ impl<'a> CptvStream<'a> {
                 self.cursor.flush_residual_bits();
             }
         }
+        self.num_frames += 1;
     }
 
     fn write_gzip_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {

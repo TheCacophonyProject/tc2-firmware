@@ -639,14 +639,6 @@ pub fn core_1_task(
                     let cptv_start_block_index = cptv_stream.starting_block_index as isize;
                     cptv_stream.finalise(&mut flash_storage);
 
-                    if motion_detection.as_ref().unwrap().was_false_positive() {
-                        error!("Discarding as a false-positive");
-                        cptv_stream.discard(
-                            &mut flash_storage,
-                            cptv_start_block_index,
-                            cptv_end_block_index,
-                        );
-                    }
                     ended_recording = true;
                     let _ = shared_i2c
                         .set_recording_flag(&mut delay, false)
@@ -659,6 +651,24 @@ pub fn core_1_task(
                         ),
                         &mut flash_storage,
                     );
+                    if motion_detection.as_ref().unwrap().was_false_positive()
+                        && cptv_stream.num_frames <= 45
+                    {
+                        // error!("Discarding as a false-positive");
+                        // cptv_stream.discard(
+                        //     &mut flash_storage,
+                        //     cptv_start_block_index,
+                        //     cptv_end_block_index,
+                        // );
+                        // TODO: Also consider recording length in cptv stream.
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::WouldDiscardAsFalsePositive,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
+                    }
                 }
                 cptv_stream = None;
                 frames_written = 0;
