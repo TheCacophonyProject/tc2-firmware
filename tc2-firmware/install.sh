@@ -21,4 +21,4 @@ else
   scp ./target/thumbv6m-none-eabi/debug/tc2-firmware $device:
 fi
 
-ssh $device 'openocd -f interface/raspberrypi-swd.cfg -f target/rp2040.cfg -c "program ./tc2-firmware verify reset exit"'
+ssh $device 'tc2-hat-rp2040 --elf tc2-firmware'
