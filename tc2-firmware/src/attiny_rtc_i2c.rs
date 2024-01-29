@@ -1,11 +1,12 @@
 use crate::bsp::pac::I2C1;
 use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
+use byteorder::{BigEndian, ByteOrder};
 use chrono::{NaiveDateTime, Timelike};
 use cortex_m::delay::Delay;
+use crc::{Algorithm, Crc};
 use defmt::{error, info, warn, Format};
 use embedded_hal::prelude::{
-    _embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write,
-    _embedded_hal_blocking_i2c_WriteRead,
+    _embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_i2c_WriteRead,
 };
 use pcf8563::{Control, DateTime, PCF8563};
 use rp2040_hal::gpio::bank0::{Gpio6, Gpio7};
@@ -81,6 +82,17 @@ const REG_CAMERA_CONNECTION: u8 = 0x03;
 const REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
 //const REG_PI_WAKEUP: u8 = 0x06;
 const REG_TC2_AGENT_STATE: u8 = 0x07;
+
+pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
+    width: 16,
+    poly: 0x1021,
+    init: 0x1D0F,
+    refin: false,
+    refout: false,
+    xorout: 0x0000,
+    check: 0x0000,
+    residue: 0x0000,
+};
 impl SharedI2C {
     pub fn new(i2c: I2CConfig, delay: &mut Delay) -> SharedI2C {
         let mut shared_i2c = SharedI2C {
@@ -142,54 +154,73 @@ impl SharedI2C {
         self.rtc.as_mut().unwrap()
     }
 
-    fn attiny_write_command(&mut self, command: u8, value: u8) -> Result<(), Error> {
-        self.i2c().write(ATTINY_ADDRESS, &[command, value])
+    fn attiny_write_command(&mut self, command: u8, value: u8, crc: u16) -> Result<(), Error> {
+        let mut payload = [command, value, 0, 0];
+        BigEndian::write_u16(&mut payload[2..=3], crc);
+        self.i2c().write(ATTINY_ADDRESS, &payload)
     }
 
-    fn attiny_read_command(&mut self, command: u8, payload: &mut [u8; 1]) -> Result<(), Error> {
-        match self.i2c().write(ATTINY_ADDRESS, &[command]) {
-            Ok(_) => self.i2c().read(ATTINY_ADDRESS, payload),
-            Err(e) => Err(e),
-        }
-    }
+    // fn attiny_read_command(&mut self, command: u8, payload: &mut [u8; 3]) -> Result<(), Error> {
+    //     match self.i2c().write(ATTINY_ADDRESS, &[command]) {
+    //         Ok(_) => self.i2c().read(ATTINY_ADDRESS, payload),
+    //         Err(e) => Err(e),
+    //     }
+    //
+    //     let mut response = [0u8; 3];
+    //     let mut payload = [command, 0x00, 0x00];
+    //     let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&payload[0..1]);
+    //     BigEndian::write_u16(&mut payload[1..=2], crc);
+    //     match self.i2c()
+    //         .write_read(ATTINY_ADDRESS, &payload, &mut response) {
+    //         Ok(_) => {
+    //
+    //         },
+    //         Err(e) => Err(e),
+    //     }
+    // }
 
     fn attiny_write_read_command(
         &mut self,
         command: u8,
         value: Option<u8>,
-        payload: &mut [u8; 1],
+        payload: &mut [u8; 3],
     ) -> Result<(), Error> {
         if let Some(v) = value {
-            self.i2c()
-                .write_read(ATTINY_ADDRESS, &[command, v], payload)
+            let mut request = [command, v, 0x00, 0x00];
+            let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..=1]);
+            BigEndian::write_u16(&mut request[2..=3], crc);
+            self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
         } else {
-            self.i2c().write_read(ATTINY_ADDRESS, &[command], payload)
+            let mut request = [command, 0x00, 0x00];
+            let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
+            BigEndian::write_u16(&mut request[1..=2], crc);
+            self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
         }
     }
 
-    fn try_attiny_write_read_command(
-        &mut self,
-        command: u8,
-        value: Option<u8>,
-        delay: &mut Delay,
-    ) -> Result<u8, Error> {
-        let mut payload = [0u8; 1];
-        let mut num_attempts = 0;
-        loop {
-            match self.attiny_write_read_command(command, value, &mut payload) {
-                Ok(_) => {
-                    return Ok(payload[0]);
-                }
-                Err(e) => {
-                    if num_attempts == 100 {
-                        return Err(e);
-                    }
-                    num_attempts += 1;
-                    delay.delay_us(500);
-                }
-            }
-        }
-    }
+    // fn try_attiny_write_read_command(
+    //     &mut self,
+    //     command: u8,
+    //     value: Option<u8>,
+    //     delay: &mut Delay,
+    // ) -> Result<u8, Error> {
+    //     let mut payload = [0u8; 3];
+    //     let mut num_attempts = 0;
+    //     loop {
+    //         match self.attiny_write_read_command(command, value, &mut payload) {
+    //             Ok(_) => {
+    //                 return Ok(payload[0]);
+    //             }
+    //             Err(e) => {
+    //                 if num_attempts == 100 {
+    //                     return Err(e);
+    //                 }
+    //                 num_attempts += 1;
+    //                 delay.delay_us(500);
+    //             }
+    //         }
+    //     }
+    // }
 
     fn try_attiny_read_command(
         &mut self,
@@ -197,14 +228,24 @@ impl SharedI2C {
         delay: &mut Delay,
         attempts: Option<i32>,
     ) -> Result<u8, Error> {
-        let mut payload = [0u8; 1];
+        let mut payload = [0u8; 3];
         let max_attempts = attempts.unwrap_or(100);
         let mut num_attempts = 0;
         loop {
             payload[0] = 0;
-            match self.attiny_read_command(command, &mut payload) {
+            match self.attiny_write_read_command(command, None, &mut payload) {
                 Ok(_) => {
-                    return Ok(payload[0]);
+                    let value = payload[0];
+                    let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&payload[0..1]);
+                    if BigEndian::read_u16(&payload[1..=2]) == crc {
+                        return Ok(payload[0]);
+                    } else {
+                        num_attempts += 1;
+                        if num_attempts == max_attempts {
+                            return Err(Error::Abort(1));
+                        }
+                        delay.delay_us(500);
+                    }
                 }
                 Err(e) => {
                     num_attempts += 1;
@@ -224,9 +265,23 @@ impl SharedI2C {
         delay: &mut Delay,
     ) -> Result<(), Error> {
         let mut num_attempts = 0;
+        let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command, value]);
         loop {
-            match self.attiny_write_command(command, value) {
-                Ok(_) => return Ok(()),
+            match self.attiny_write_command(command, value, crc) {
+                Ok(_) => {
+                    // Now immediately read it back to see that it actually got set properly.
+                    let result = self.try_attiny_read_command(command, delay, None);
+                    return match result {
+                        Ok(set_val) => {
+                            if set_val == value {
+                                Ok(())
+                            } else {
+                                Err(Error::Abort(1))
+                            }
+                        }
+                        Err(e) => Err(e),
+                    };
+                }
                 Err(e) => {
                     if num_attempts == 100 {
                         return Err(e);

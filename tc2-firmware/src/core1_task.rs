@@ -216,6 +216,7 @@ pub fn core_1_task(
     i2c_config: I2CConfig,
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
+    woken_by_alarm: bool,
 ) {
     let dev_mode = false;
     info!("=== Core 1 start ===");
@@ -300,6 +301,15 @@ pub fn core_1_task(
         info!("There are {} event(s) to offload", event_logger.count());
     }
 
+    if woken_by_alarm {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::Rp2040WokenByAlarm,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
     //let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
@@ -426,6 +436,7 @@ pub fn core_1_task(
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
+    let mut logged_flash_storage_nearly_full = false;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     info!("Entering frame loop");
@@ -482,14 +493,24 @@ pub fn core_1_task(
         } else {
             None
         };
-        if !logged_frame_transfer && frame_header_is_valid && transfer.is_some() {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::StartedSendingFramesToRpi,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                &mut flash_storage,
-            );
+        if !logged_frame_transfer && frame_header_is_valid {
+            if transfer.is_some() {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::StartedSendingFramesToRpi,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
+            } else {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::StartedGettingFrames,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
+            }
             logged_frame_transfer = true;
         }
 
@@ -526,10 +547,7 @@ pub fn core_1_task(
                 is_daytime,
                 &device_config.motion_detection_mask,
             );
-            // TODO: While testing, we'll limit the max_length_in_frames to 1 minutes worth,
-            //  but once we've reduced instances of random false positives, we can extend it.
-            // let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
-            let max_length_in_frames = 60 * 9;
+            let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
 
             should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
                 && this_frame_motion_detection.got_new_trigger()
@@ -631,7 +649,7 @@ pub fn core_1_task(
                     frames_written += 1;
                 }
             } else {
-                // Finalise on a a different frame period to writing out the prev/last frame,
+                // Finalise on a different frame period to writing out the prev/last frame,
                 // to give more breathing room.
                 if let Some(cptv_stream) = &mut cptv_stream {
                     error!("Ending current recording");
@@ -652,7 +670,7 @@ pub fn core_1_task(
                         &mut flash_storage,
                     );
                     if motion_detection.as_ref().unwrap().was_false_positive()
-                        && cptv_stream.num_frames <= 45
+                    // && cptv_stream.num_frames <= 100
                     {
                         // error!("Discarding as a false-positive");
                         // cptv_stream.discard(
@@ -660,7 +678,6 @@ pub fn core_1_task(
                         //     cptv_start_block_index,
                         //     cptv_end_block_index,
                         // );
-                        // TODO: Also consider recording length in cptv stream.
                         event_logger.log_event(
                             LoggerEvent::new(
                                 LoggerEventKind::WouldDiscardAsFalsePositive,
@@ -730,10 +747,27 @@ pub fn core_1_task(
                 // Once per minute, if we're not currently recording, tell the RPi it can shut-down, as it's not
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
                 advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                if !logged_told_rpi_to_sleep {
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::ToldRpiToSleep,
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
+                    logged_told_rpi_to_sleep = true;
+                }
             }
             synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
                 Err(err_str) => {
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::RtcCommError,
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
                     error!("Unable to get DateTime from RTC: {}", err_str);
                     synced_date_time
                 }
@@ -752,6 +786,16 @@ pub fn core_1_task(
             };
 
             let flash_storage_nearly_full = flash_storage.is_too_full_to_start_new_recordings();
+            if flash_storage_nearly_full && !logged_flash_storage_nearly_full {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::FlashStorageNearlyFull,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
+                logged_flash_storage_nearly_full = true;
+            }
             if is_outside_recording_window || flash_storage_nearly_full {
                 if !device_config.use_low_power_mode() {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.

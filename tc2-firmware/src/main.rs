@@ -274,6 +274,7 @@ fn main() -> ! {
                 i2c1,
                 lepton_serial,
                 lepton_firmware_version,
+                alarm_woke_us,
             )
         });
     }

@@ -22,6 +22,11 @@ pub enum LoggerEventKind {
     SetAlarm(u64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
     GotPowerOnTimeout,
     WouldDiscardAsFalsePositive,
+    StartedGettingFrames,
+    FlashStorageNearlyFull,
+    Rp2040WokenByAlarm,
+    RtcCommError,
+    AttinyCommError,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -42,6 +47,11 @@ impl Into<u16> for LoggerEventKind {
             SetAlarm(_) => 12,
             GotPowerOnTimeout => 13,
             WouldDiscardAsFalsePositive => 14,
+            StartedGettingFrames => 15,
+            FlashStorageNearlyFull => 16,
+            Rp2040WokenByAlarm => 17,
+            RtcCommError => 18,
+            AttinyCommError => 19,
         }
     }
 }
@@ -66,6 +76,11 @@ impl TryFrom<u16> for LoggerEventKind {
             12 => Ok(SetAlarm(0)),
             13 => Ok(GotPowerOnTimeout),
             14 => Ok(WouldDiscardAsFalsePositive),
+            15 => Ok(StartedGettingFrames),
+            16 => Ok(FlashStorageNearlyFull),
+            17 => Ok(Rp2040WokenByAlarm),
+            18 => Ok(RtcCommError),
+            19 => Ok(AttinyCommError),
             _ => Err(()),
         }
     }
