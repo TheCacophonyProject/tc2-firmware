@@ -45,7 +45,8 @@ use critical_section::Mutex;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::prelude::{
-    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogEnable,
+    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
+    _embedded_hal_watchdog_WatchdogEnable,
 };
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
@@ -259,6 +260,7 @@ fn main() -> ! {
     let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
+    watchdog.disable();
     {
         let pins = Core1Pins {
             pi_ping: pins.gpio5.into_pull_down_input(),
