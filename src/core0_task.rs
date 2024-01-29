@@ -2,12 +2,10 @@ use crate::core1_task::Core1Task;
 use crate::lepton::{read_telemetry, FFCStatus, LeptonModule};
 use crate::utils::u16_slice_to_u8;
 use crate::{bsp, FrameBuffer, FFC_INTERVAL_MS};
-use bsp::hal::clocks::ClocksManager;
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
 use bsp::hal::rosc::RingOscillator;
 use bsp::hal::sio::SioFifo;
-use bsp::hal::Clock;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
@@ -18,7 +16,6 @@ use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogEnable,
 };
 use fugit::{ExtU32, HertzU32, RateExtU32};
-use rp2040_hal::Timer;
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
 fn go_dormant_until_next_vsync(
@@ -61,12 +58,11 @@ pub fn frame_acquisition_loop(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
-    clocks: &ClocksManager,
+    peripheral_clock_freq: HertzU32,
     delay: &mut Delay,
     resets: &mut RESETS,
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    timer: &Timer,
     mut watchdog: bsp::hal::Watchdog,
 ) -> ! {
     let mut selected_frame_buffer = 0;
@@ -110,8 +106,6 @@ pub fn frame_acquisition_loop(
     let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
     let mut last_frame_seen = None;
-    let start = timer.get_counter();
-    let end = timer.get_counter();
 
     watchdog.pause_on_debug(true);
     watchdog.start(8388607.micros());
@@ -226,7 +220,7 @@ pub fn frame_acquisition_loop(
                                 }
                                 if times_telemetry_revision_stable > 2
                                     && (seen_telemetry_revision[0] != telemetry.revision[0]
-                                        || seen_telemetry_revision[1] != telemetry.revision[1])
+                                    || seen_telemetry_revision[1] != telemetry.revision[1])
                                 {
                                     // We have a misaligned/invalid frame.
                                     warn!("Got misaligned frame header");
@@ -277,7 +271,7 @@ pub fn frame_acquisition_loop(
                         lepton.reset_spi(
                             delay,
                             resets,
-                            clocks.peripheral_clock.freq(),
+                            peripheral_clock_freq,
                             LEPTON_SPI_CLOCK_FREQ.Hz(),
                             true,
                         );
@@ -428,7 +422,7 @@ pub fn frame_acquisition_loop(
                             lepton.reset_spi(
                                 delay,
                                 resets,
-                                clocks.peripheral_clock.freq(),
+                                peripheral_clock_freq,
                                 LEPTON_SPI_CLOCK_FREQ.Hz(),
                                 false,
                             );

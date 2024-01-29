@@ -117,7 +117,7 @@ fn main() -> ! {
     watchdog.pause_on_debug(true);
     watchdog.start(8388607.micros());
     info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
+    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
@@ -261,6 +261,7 @@ fn main() -> ! {
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
     watchdog.disable();
+    let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
         let pins = Core1Pins {
             pi_ping: pins.gpio5.into_pull_down_input(),
@@ -285,6 +286,7 @@ fn main() -> ! {
                 lepton_serial,
                 lepton_firmware_version,
                 alarm_woke_us,
+                timer,
             )
         });
     }
@@ -301,12 +303,11 @@ fn main() -> ! {
         rosc,
         &mut lepton,
         &mut sio.fifo,
-        &clocks,
+        peripheral_clock_freq,
         &mut delay,
         &mut peripherals.RESETS,
         frame_buffer_local,
         frame_buffer_local_2,
-        &timer,
         watchdog,
     );
 }

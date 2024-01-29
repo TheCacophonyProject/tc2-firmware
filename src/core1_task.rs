@@ -18,7 +18,7 @@ use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::utils::u8_slice_to_u16;
-use crate::{bsp, FrameBuffer};
+use crate::FrameBuffer;
 use chrono::NaiveDateTime;
 use core::cell::RefCell;
 use core::ops::Add;
@@ -33,7 +33,7 @@ use rp2040_hal::gpio::bank0::{
 use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioInput, SioOutput};
 use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
-use rp2040_hal::Sio;
+use rp2040_hal::{Sio, Timer};
 
 #[repr(u32)]
 #[derive(Format)]
@@ -161,7 +161,7 @@ fn is_frame_telemetry_is_valid(
         false
     } else if telemetry_revision_stable.1 > 2
         && (telemetry_revision_stable.0[0] != frame_telemetry.revision[0]
-            || telemetry_revision_stable.0[1] != frame_telemetry.revision[1])
+        || telemetry_revision_stable.0[1] != frame_telemetry.revision[1])
     {
         // We have a misaligned/invalid frame.
         warn!("Misaligned header (core 1)");
@@ -190,9 +190,9 @@ impl SyncedDateTime {
     pub fn get_timestamp_micros(&self, timer: &rp2040_hal::Timer) -> u64 {
         (self.date_time_utc
             + chrono::Duration::microseconds(
-                (timer.get_counter() - self.timer_offset).to_micros() as i64
-            ))
-        .timestamp_micros() as u64
+            (timer.get_counter() - self.timer_offset).to_micros() as i64
+        ))
+            .timestamp_micros() as u64
     }
 
     pub fn set(&mut self, date_time: NaiveDateTime, timer: &rp2040_hal::Timer) {
@@ -217,6 +217,7 @@ pub fn core_1_task(
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
+    mut timer: Timer,
 ) {
     let dev_mode = false;
     info!("=== Core 1 start ===");
@@ -237,7 +238,6 @@ pub fn core_1_task(
     let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
     let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
     let mut peripherals = unsafe { Peripherals::steal() };
-    let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let mut peripherals = unsafe { Peripherals::steal() };
     let core = unsafe { pac::CorePeripherals::steal() };
@@ -560,8 +560,8 @@ pub fn core_1_task(
             //  Also consider the case where we have a mask region to ignore or pay attention to.
             let should_end_current_recording = cptv_stream.is_some()
                 && (this_frame_motion_detection.triggering_ended()
-                    || frames_written >= max_length_in_frames
-                    || flash_storage.is_nearly_full());
+                || frames_written >= max_length_in_frames
+                || flash_storage.is_nearly_full());
 
             motion_detection = Some(this_frame_motion_detection);
 
@@ -828,8 +828,8 @@ pub fn core_1_task(
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if flash_storage_nearly_full
                             || (is_outside_recording_window
-                                && (flash_storage.has_files_to_offload()
-                                    || event_logger.has_events_to_offload()))
+                            && (flash_storage.has_files_to_offload()
+                            || event_logger.has_events_to_offload()))
                         {
                             // If flash storage is nearly full, or we're now outside the recording window,
                             //  restart in 2 minutes so we can offload files/events

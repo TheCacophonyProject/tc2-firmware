@@ -174,7 +174,7 @@ Some of the options for your `runner` are listed below:
   runner = "cargo embed"
   ```
 
-  *Step 3* - Update settings in [Embed.toml](./Embed.toml)  
+  *Step 3* - Update settings in [Embed.toml](Embed.toml)  
   - The defaults are to flash, reset, and start a defmt logging session
   You can find all the settings and their meanings [in the cargo-embed repo](https://github.com/probe-rs/cargo-embed/blob/master/src/config/default.toml)
 
