@@ -827,10 +827,12 @@ pub fn core_1_task(
                         // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if flash_storage_nearly_full
-                            || (is_outside_recording_window && flash_storage.has_files_to_offload())
+                            || (is_outside_recording_window
+                                && (flash_storage.has_files_to_offload()
+                                    || event_logger.has_events_to_offload()))
                         {
                             // If flash storage is nearly full, or we're now outside the recording window,
-                            //  restart in 2 minutes so we can offload files.
+                            //  restart in 2 minutes so we can offload files/events
                             synced_date_time.date_time_utc + chrono::Duration::minutes(2)
                         } else {
                             // Otherwise, restart at the start of the next recording window.
