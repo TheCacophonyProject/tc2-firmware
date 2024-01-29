@@ -44,7 +44,10 @@ use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::*;
 use defmt_rtt as _;
-use fugit::RateExtU32;
+use embedded_hal::prelude::{
+    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogEnable,
+};
+use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::FunctionI2C;
@@ -110,6 +113,9 @@ fn main() -> ! {
     // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
     let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
     watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
+    watchdog.pause_on_debug(true);
+    watchdog.start(8388607.micros());
+    info!("Enabled watchdog timer");
     let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS);
 
     let core = pac::CorePeripherals::take().unwrap();
@@ -139,7 +145,9 @@ fn main() -> ! {
         &clocks.system_clock,
     );
     let mut delay = Delay::new(core.SYST, system_clock_freq);
+    info!("Initing shared i2c");
     let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+    info!("Got shared i2c");
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
@@ -250,7 +258,7 @@ fn main() -> ! {
         unsafe { extend_lifetime_generic(&frame_buffer) };
     let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
-
+    watchdog.feed();
     {
         let pins = Core1Pins {
             pi_ping: pins.gpio5.into_pull_down_input(),

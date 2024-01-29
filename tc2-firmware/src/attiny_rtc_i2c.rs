@@ -116,6 +116,7 @@ impl SharedI2C {
                     }
                 },
                 Err(e) => {
+                    warn!("Error communicating with i2c, attempt #{}", attempts);
                     attempts += 1;
                     if attempts > 100 {
                         crate::panic!("Unable to communicate with Attiny over i2c: {:?}", e);
@@ -271,19 +272,29 @@ impl SharedI2C {
                 Ok(_) => {
                     // Now immediately read it back to see that it actually got set properly.
                     let result = self.try_attiny_read_command(command, delay, None);
-                    return match result {
-                        Ok(set_val) => {
-                            if set_val == value {
-                                Ok(())
-                            } else {
-                                Err(Error::Abort(1))
-                            }
+                    if let Ok(set_val) = result {
+                        if set_val == value {
+                            return Ok(());
+                        } else {
+                            warn!(
+                                "Failed writing command {} with value {} to attiny, got {}",
+                                command, value, set_val
+                            );
                         }
-                        Err(e) => Err(e),
-                    };
+                    } else {
+                        warn!(
+                            "Failed reading back value from attiny for command {}",
+                            command
+                        );
+                        // Continue
+                    }
                 }
                 Err(e) => {
                     if num_attempts == 100 {
+                        error!(
+                            "Failed writing command {} with value {} to attiny",
+                            command, value
+                        );
                         return Err(e);
                     }
                     num_attempts += 1;
