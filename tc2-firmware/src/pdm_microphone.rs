@@ -7,7 +7,8 @@ use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMachine, PIO, SM1};
 
-const PDM_DECIMATION: usize = 64;
+const CLOCK_RATE: HertzU32 = 1323000;
+const PDM_DECIMATION: usize = 60;
 const SAMPLE_RATE: usize = 8000;
 
 struct RecordingStatus {
