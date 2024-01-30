@@ -9,6 +9,7 @@ dist: bionic
 
 before_script:
   - rustup target add thumbv6m-none-eabi
+  - cargo install flip-link
 
 script:
   - cargo build --release
