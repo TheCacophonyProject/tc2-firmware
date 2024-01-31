@@ -58,7 +58,7 @@ use rp2040_hal::I2C;
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
 pub const FIRMWARE_VERSION: u32 = 9;
-pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 11;
+pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
 static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
