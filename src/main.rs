@@ -244,16 +244,16 @@ fn main() -> ! {
                 let mut front_ptr = &mut &mut front;
                 let mut back_ptr = &mut &mut back;
                 let mut peripherals = unsafe { Peripherals::steal() };
-
-                microphone.record_for_n_seconds(
-                    5,
-                    dma_channels.ch1,
-                    dma_channels.ch2,
-                    timer,
-                    &mut peripherals.DMA,
-                    &mut peripherals.RESETS,
-                    peripherals.SPI1,
-                );
+                microphone.enable();
+                // microphone.record_for_n_seconds(
+                //     5,
+                //     dma_channels.ch1,
+                //     dma_channels.ch2,
+                //     timer,
+                //     &mut peripherals.DMA,
+                //     &mut peripherals.RESETS,
+                //     peripherals.SPI1,
+                // );
                 // while let Some(data) = microphone.record_for_n_seconds(60) {
                 // info!("Got mic data {:?}", data)
                 // TODO: Process and stream the data out to flash before we get the next block.
