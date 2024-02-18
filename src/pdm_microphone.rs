@@ -1,5 +1,8 @@
 use crate::bsp;
-use crate::bsp::pac::{DMA, PIO1};
+use crate::bsp::pac::RESETS;
+use crate::bsp::pac::{DMA, PIO1, SPI1};
+use crate::utils::u32_slice_to_u8;
+use bsp::{hal::sio::Sio, pac::Peripherals};
 use cortex_m::singleton;
 use defmt::{info, warn};
 use fugit::HertzU32;
@@ -9,13 +12,13 @@ use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMachine, PIO, SM1};
 
-
-use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-
+use byteorder::{ByteOrder, LittleEndian};
+use embedded_hal::blocking::delay::DelayMs;
+use rp2040_hal::Timer;
 const PDM_DECIMATION: usize = 64;
-const SAMPLE_RATE: usize = 8000;
-
+const SAMPLE_RATE: usize = 18000;
+// actually more like 8125 equates to 800 sr
 struct RecordingStatus {
     total_samples: usize,
     samples_taken: usize,
@@ -23,7 +26,7 @@ struct RecordingStatus {
 
 impl RecordingStatus {
     pub fn is_complete(&self) -> bool {
-        self.total_samples == self.samples_taken
+        self.total_samples <= self.samples_taken
     }
 }
 pub type PageBufferRef = &'static mut [u8; 4 + 2048 + 128];
@@ -43,7 +46,10 @@ pub struct PdmMicrophone {
     current_recording: Option<RecordingStatus>,
     dma_channel_0: Option<Channel<CH3>>,
     dma_channel_1: Option<Channel<CH4>>,
+    spi: ExtSpiTransfers,
 }
+use rp2040_hal::dma::CH1;
+use rp2040_hal::dma::CH2;
 
 impl PdmMicrophone {
     pub fn new(
@@ -52,6 +58,7 @@ impl PdmMicrophone {
         system_clock_hz: HertzU32,
         pio: PIO<PIO1>,
         state_machine_1_uninit: UninitStateMachine<(PIO1, SM1)>,
+        spi: ExtSpiTransfers,
     ) -> PdmMicrophone {
         PdmMicrophone {
             data_disabled: Some(data),
@@ -67,6 +74,7 @@ impl PdmMicrophone {
             current_recording: None,
             dma_channel_0: None,
             dma_channel_1: None,
+            spi: spi,
         }
     }
 
@@ -110,7 +118,8 @@ impl PdmMicrophone {
 
         // data_pin is in
         // clk pin is out
-
+        // let data_pin_id = 1;
+        // let clk_pin_id = 0;
         let (mut sm, rx, tx) = PIOBuilder::from_program(installed)
             .in_pin_base(data_pin_id)
             .side_set_pin_base(clk_pin_id)
@@ -146,109 +155,86 @@ impl PdmMicrophone {
     pub fn record_for_n_seconds(
         &mut self,
         num_seconds: usize,
-        // buffers: (
-        //     singleton!(: [u32; 4] = [0;4]).unwrap(),
-        // //     singleton!(: [u32; 4] = [0; 4]).unwrap(),
-        // //     singleton!(: [u32; 4] = [0; 4]).unwrap(),
-        // // singleton!(: [u32; 4] = [0; 4]).unwrap(),
-        // // singleton!(: [u32; 4] = [0; 4]).unwrap(),
-        // ),
-        dma: Channels,
+        ch1: Channel<CH1>,
+        ch2: Channel<CH2>,
+        mut timer: Timer,
+        dma_peripheral: &mut DMA,
+        resets: &mut RESETS,
+        spi: SPI1,
     ) {
         let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
+        info!(
+            "Recording for {} is {}",
+            num_seconds, current_recording.total_samples
+        );
         self.enable();
-        // Swap our buffers?
+        self.spi.enable(spi, resets);
 
+        // Swap our buffers?
         // Pull out more samples via dma double_buffering.
         if let Some(pio_rx) = self.pio_rx.take() {
-            // Chain some buffers together for continuous transfers
-            // let mut b_0 = singleton!(: [u32; 64] = [0;64]).unwrap();
-            // let mut b_1 = singleton!(: [u32; 64] =  [0;64]).unwrap();
-            // let mut b_2 = singleton!(: [u32; 64] =  [0;64]).unwrap();
-            let mut b_0 = [0; 64];
-            let mut b_1 = [0; 64];
-            let mut b_2 = [0; 64];
+            let start = timer.get_counter();
 
-            let rx_transfer = double_buffer::Config::new((dma.ch0, dma.ch1), pio_rx, b_0).start();
+            // Chain some buffers together for continuous transfers
+            let b_0 = singleton!(: [u32; 512] = [0;512]).unwrap();
+            let b_1 = singleton!(: [u32; 512] =  [0;512]).unwrap();
+
+            let rx_transfer = double_buffer::Config::new((ch1, ch2), pio_rx, b_0).start();
             let mut rx_transfer = rx_transfer.write_next(b_1);
 
-            let mut cycle = 0;
             loop {
                 // When a transfer is done we immediately enqueue the buffers again.
-                if rx_transfer.is_done() {
-                    let (rx_buf, next_rx_transfer) = rx_transfer.wait();
-                    // Take rx_buf that just finished transferring here, and write it to flash.  Provide another buffer
-                    // for the next initially b0
-                    // let back = *rx_buf;
-                    // let next_buf = match cycle % 3 {
-                    //     0 => b_2,
-                    //     1 => b_1,
-                    //     2 => b_0,
-                    //     _ => {
-                    //         unreachable!("mod 3")
-                    //     }
-                    // };
+                let (rx_buf, next_rx_transfer) = rx_transfer.wait();
 
-                    // next_buf = match cycle % d {}
-                    cycle += 1;
-                    for i in 0..rx_buf.len() {
-                        if rx_buf[i] != 4294967295 {
-                            info!("Got data {}", rx_buf[i]);
-                        }
-                    }
-                    current_recording.samples_taken += rx_buf.len();
-                    rx_transfer = next_rx_transfer.write_next(rx_buf);
+                let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                let transfer = self.spi.send_message(
+                    ExtTransferMessage::AudioRawTransfer,
+                    payload,
+                    10u16,
+                    dma_peripheral,
+                    &mut timer,
+                    resets,
+                );
 
-                    // rx_transfer = next_rx_transfer.write_next(rx_buf);
-                    info!("Read some data {}", current_recording.samples_taken / cycle);
-                    // break;
-                    // let tx_transfer = single_buffer::Config::new(&dma.ch2, back, spi).start();
-                    // tx_transfer.wait();
-                    // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
+                current_recording.samples_taken += rx_buf.len() * 32;
+                info!(
+                    "Got {} samples out of {} samples",
+                    current_recording.samples_taken, current_recording.total_samples
+                );
 
-                    // Transfer back to flash.
-                    // Do we need to double buffer things to flash?
-                    // That would mean we'd want a quadruple buffer?
-                    if current_recording.is_complete() {
-                        break;
-                    }
-                }
+                // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
+
+                // Transfer back to flash.
+                // Do we need to double buffer things to flash?
+                // That would mean we'd want a quadruple buffer?
+                if current_recording.is_complete() {
+                    timer.delay_ms(1);
+
+                    let transfer = self.spi.send_message(
+                        ExtTransferMessage::AudioRawTransferFinished,
+                        &[0u8; 0],
+                        0u16,
+                        dma_peripheral,
+                        &mut timer,
+                        resets,
+                    );
+                    self.spi.disable();
+
+                    return;
+                };
+                rx_transfer = next_rx_transfer.write_next(rx_buf);
+
+                // }
             }
             // TODO: Uninstall pio_rx program etc.
         }
         // Put the pio_rx back?  I guess we can do work while the DMA transfer is happening, assuming we have enough time,
         // Otherwise we may need to transfer the buffer/pointer to another thread for fs work to happen.
     }
-    pub fun spi_transfer(){
-        let pins = Core1Pins {
-                    pi_ping: pins.gpio5.into_pull_down_input(),
-        
-                    pi_miso: pins.gpio15.into_floating_disabled(),
-                    pi_mosi: pins.gpio12.into_floating_disabled(),
-                    pi_cs: pins.gpio13.into_floating_disabled(),
-                    pi_clk: pins.gpio14.into_floating_disabled(),
-        
-                    fs_cs: pins.gpio9.into_push_pull_output(),
-                    fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-                    fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-                    fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-                };
-        let mut pi_spi = ExtSpiTransfers::new(
-            pins.pi_mosi,
-            pins.pi_cs,
-            pins.pi_clk,
-            pins.pi_miso,
-            pins.pi_ping,
-            dma_channels.ch0,
-            payload_buf,
-            crc_buf,
-            pio0,
-            sm0,
-        );
-    }
+
     // pub fn read_next_page(&mut self) -> (Option<PageBufferRef>, Option<DoublePageBuffer>) {
     //     let mut current_recording = self.current_recording.take();
     //     if let Some(mut current_recording) = current_recording {

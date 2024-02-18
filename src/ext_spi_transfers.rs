@@ -2,7 +2,10 @@ use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
 use crate::onboard_flash::extend_lifetime;
+
+use crate::utils::u32_slice_to_u8;
 use crate::utils::u8_slice_to_u32;
+
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
@@ -11,6 +14,7 @@ use defmt::{info, warn, Format};
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
+
 use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, CH0};
@@ -24,7 +28,6 @@ use rp2040_hal::pio::{
 };
 use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
-
 #[repr(u8)]
 #[derive(Copy, Clone, Format, PartialEq)]
 pub enum ExtTransferMessage {
@@ -36,6 +39,8 @@ pub enum ExtTransferMessage {
     BeginAndEndFileTransfer = 0x6,
     GetMotionDetectionMask = 0x7,
     SendLoggerEvent = 0x8,
+    AudioRawTransfer = 0x9,
+    AudioRawTransferFinished = 0xA,
 }
 
 // We can store our ping pin here when we enter the ping-back interrupt
@@ -219,7 +224,6 @@ impl ExtSpiTransfers {
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
         self.ping = Some(ping_pin.into_pull_down_input());
-
         // FIXME - Can we print this when we think the Pi should be awake?
         if finished && pi_is_awake {
             //warn!("Alarm triggered, ping took {}", ping_time);
@@ -295,6 +299,83 @@ impl ExtSpiTransfers {
             None
         }
     }
+
+    // pub fn begin_audio_message(
+    //     &mut self,
+    //     message_type: ExtTransferMessage,
+    //     payload: &mut [u32],
+    //     crc: u16,
+    //     is_recording: bool,
+    //     dma_peripheral: &mut DMA,
+    //     timer: &mut Timer,
+    // ) -> Option<(
+    //     Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
+    //     u32,
+    //     u32,
+    // )> {
+    //     if self.pio_tx.is_some() {
+    //         // The transfer header contains the transfer type (2x)
+    //         // the number of bytes to read for the payload (2x)
+    //         // the 16 bit crc of the payload (twice)
+
+    //         // It is followed by the payload itself
+    //         let length = payload.len() as u32;
+    //         let is_recording = if is_recording { 1 } else { 0 };
+
+    //         let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
+    //         transfer_header[0] = message_type as u8;
+    //         transfer_header[1] = message_type as u8;
+    //         LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32 * 4u32);
+    //         LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32 * 4u32);
+    //         LittleEndian::write_u16(&mut transfer_header[10..12], is_recording);
+    //         LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
+    //         LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.not());
+    //         LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.not());
+
+    //         let mut actual: [u8; 32 * 4 + 18] = [0; 32 * 4 + 18];
+    //         let payload = unsafe { &u32_slice_to_u8(&payload) };
+    //         actual[..transfer_header.len()].copy_from_slice(&transfer_header);
+
+    //         actual[transfer_header.len()..transfer_header.len() + payload.len()]
+    //             .copy_from_slice(payload);
+    //         loop {
+    //             if !dma_peripheral.ch[DMA_CHANNEL_NUM]
+    //                 .ch_ctrl_trig
+    //                 .read()
+    //                 .busy()
+    //                 .bit_is_set()
+    //             {
+    //                 break;
+    //             }
+    //         }
+    //         let p_s = self.ping(timer, false);
+    //         info!("Sending payload {}", actual);
+
+    //         if p_s {
+    //             let mut config = single_buffer::Config::new(
+    //                 self.dma_channel_0.take().unwrap(),
+    //                 // Does this need to be aligned?  Maybe not.
+    //                 unsafe { u8_slice_to_u32(extend_lifetime(&actual[..])) },
+    //                 self.pio_tx.take().unwrap(),
+    //             );
+    //             config.bswap(true); // DMA peripheral does our swizzling for us.
+    //             let transfer = config.start();
+    //             let start_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
+    //                 .ch_read_addr
+    //                 .read()
+    //                 .bits();
+
+    //             Some((transfer, start_read_address + length, start_read_address))
+    //         } else {
+    //             info!("Returning NOne");
+    //             None
+    //         }
+    //     } else {
+    //         info!("Returning NOne 2");
+
+    //         None
+    //     }
+    // }
 
     pub fn end_message(
         &mut self,
@@ -437,10 +518,15 @@ impl ExtSpiTransfers {
         self.payload_buffer.as_mut().unwrap()
             [transfer_header.len()..transfer_header.len() + payload.len()]
             .copy_from_slice(&payload);
-
+        info!(
+            "Sending message type {} buffer {}",
+            transfer_header[0],
+            self.payload_buffer.as_mut().unwrap().len()
+        );
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
+
         while !transmit_success {
             if self.ping(timer, true) {
                 finished_transfer = true;
