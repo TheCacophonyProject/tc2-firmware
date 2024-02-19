@@ -15,7 +15,6 @@ mod core1_task;
 mod cptv_encoder;
 mod device_config;
 mod event_logger;
-mod example;
 mod ext_spi_transfers;
 mod motion_detector;
 mod onboard_flash;
@@ -27,7 +26,6 @@ pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::device_config::{get_naive_datetime, DeviceConfig};
-use crate::example::test_dma;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
@@ -157,115 +155,115 @@ fn main() -> ! {
     );
     let mut delay = Delay::new(core.SYST, system_clock_freq);
     info!("Initing shared i2c");
-    let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
-    info!("Got shared i2c");
+    // let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+    // info!("Got shared i2c");
     // let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     // info!("Woken by RTC alarm? {}", alarm_woke_us);
     // if alarm_woke_us {
     //     shared_i2c.clear_alarm();
     // }
     // shared_i2c.disable_alarm(&mut delay);
-    let i2c1 = shared_i2c.free();
+    // let i2c1 = shared_i2c.free();
     // If we're waking up to make an audio recording, do that.
-    let existing_config = DeviceConfig::load_existing_config_from_flash();
+    // let existing_config = DeviceConfig::load_existing_config_from_flash();
 
-    let i2c1 = if let Some(existing_config) = existing_config {
-        info!(
-            "Got device config {:?}, {}",
-            existing_config,
-            existing_config.device_name()
-        );
-        // Try to work out our wakeup reason.  If we're within a recording window, assume that we want
-        // to record thermal video, otherwise make an audio recording and go to sleep.
+    // let i2c1 = if 1 == 1 {
+    // info!(
+    //     "Got device config {:?}, {}",
+    //     existing_config,
+    //     existing_config.device_name()
+    // );
+    // Try to work out our wakeup reason.  If we're within a recording window, assume that we want
+    // to record thermal video, otherwise make an audio recording and go to sleep.
 
-        // We need a double buffering system of 3 flash pages.
-        // One is the page that is currently being written to by data,
-        // Another is ready to take over when that first buffer is full,
+    // We need a double buffering system of 3 flash pages.
+    // One is the page that is currently being written to by data,
+    // Another is ready to take over when that first buffer is full,
 
-        let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
-        match shared_i2c.get_datetime(&mut delay) {
-            Ok(now) => {
-                info!("Start mic rec");
-                // let date_time_utc = get_naive_datetime(now);
-                // let is_inside_recording_window =
-                //     existing_config.time_is_in_recording_window(&date_time_utc);
-                // if !is_inside_recording_window {
-                // info!("Woke outside recording window, lets make an audio recording and go back to sleep?");
-                // let mut pac = pac::Peripherals::take().unwrap();
-                // let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    // let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+    // match shared_i2c.get_datetime(&mut delay) {
+    // Ok(now) => {
+    info!("Start mic rec");
+    // let date_time_utc = get_naive_datetime(now);
+    // let is_inside_recording_window =
+    //     existing_config.time_is_in_recording_window(&date_time_utc);
+    // if !is_inside_recording_window {
+    // info!("Woke outside recording window, lets make an audio recording and go back to sleep?");
+    // let mut pac = pac::Peripherals::take().unwrap();
+    // let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
-                // let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+    // let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
-                let core1pins = Core1Pins {
-                    pi_ping: pins.gpio5.into_pull_down_input(),
+    let core1pins = Core1Pins {
+        pi_ping: pins.gpio5.into_pull_down_input(),
 
-                    pi_miso: pins.gpio15.into_floating_disabled(),
-                    pi_mosi: pins.gpio12.into_floating_disabled(),
-                    pi_cs: pins.gpio13.into_floating_disabled(),
-                    pi_clk: pins.gpio14.into_floating_disabled(),
+        pi_miso: pins.gpio15.into_floating_disabled(),
+        pi_mosi: pins.gpio12.into_floating_disabled(),
+        pi_cs: pins.gpio13.into_floating_disabled(),
+        pi_clk: pins.gpio14.into_floating_disabled(),
 
-                    fs_cs: pins.gpio9.into_push_pull_output(),
-                    fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-                    fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-                    fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-                };
-                let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-                let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-                let mut crc_buf = [0x42u8; 32 + 104];
-                let mut payload_buf = [0x42u8; 2066];
-                let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-                let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-
-                let mut pi_spi = ExtSpiTransfers::new(
-                    core1pins.pi_mosi,
-                    core1pins.pi_cs,
-                    core1pins.pi_clk,
-                    core1pins.pi_miso,
-                    core1pins.pi_ping,
-                    dma_channels.ch0,
-                    payload_buf,
-                    crc_buf,
-                    pio0,
-                    sm0,
-                );
-
-                let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
-                let mut microphone = PdmMicrophone::new(
-                    pins.gpio0.into_function().into_pull_type(),
-                    pins.gpio1.into_function().into_pull_type(),
-                    system_clock_freq.Hz(),
-                    pio1,
-                    sm1,
-                    pi_spi,
-                );
-                let mut front = [0u8; 2180];
-                let mut back = [0u8; 2180];
-                let mut front_ptr = &mut &mut front;
-                let mut back_ptr = &mut &mut back;
-                let mut peripherals = unsafe { Peripherals::steal() };
-                microphone.enable();
-                // microphone.record_for_n_seconds(
-                //     5,
-                //     dma_channels.ch1,
-                //     dma_channels.ch2,
-                //     timer,
-                //     &mut peripherals.DMA,
-                //     &mut peripherals.RESETS,
-                //     peripherals.SPI1,
-                // );
-                // while let Some(data) = microphone.record_for_n_seconds(60) {
-                // info!("Got mic data {:?}", data)
-                // TODO: Process and stream the data out to flash before we get the next block.
-                // }
-                // }
-            }
-            Err(_) => error!("Unable to get DateTime from RTC"),
-        }
-        shared_i2c.free()
-    } else {
-        i2c1
+        fs_cs: pins.gpio9.into_push_pull_output(),
+        fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+        fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+        fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
     };
+    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let mut payload_buf = [0x42u8; 2066];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+
+    let mut pi_spi = ExtSpiTransfers::new(
+        core1pins.pi_mosi,
+        core1pins.pi_cs,
+        core1pins.pi_clk,
+        core1pins.pi_miso,
+        core1pins.pi_ping,
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
+    );
+
+    let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
+    let mut microphone = PdmMicrophone::new(
+        pins.gpio0.into_function().into_pull_type(),
+        pins.gpio1.into_function().into_pull_type(),
+        system_clock_freq.Hz(),
+        pio1,
+        sm1,
+        pi_spi,
+    );
+    let mut front = [0u8; 2180];
+    let mut back = [0u8; 2180];
+    let mut front_ptr = &mut &mut front;
+    let mut back_ptr = &mut &mut back;
+    let mut peripherals = unsafe { Peripherals::steal() };
+
+    microphone.record_for_n_seconds(
+        5,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        timer,
+        &mut peripherals.DMA,
+        &mut peripherals.RESETS,
+        peripherals.SPI1,
+    );
+    // while let Some(data) = microphone.record_for_n_seconds(60) {
+    // info!("Got mic data {:?}", data)
+    // TODO: Process and stream the data out to flash before we get the next block.
+    // }
+    // }
+    // }
+    // Err(_) => error!("Unable to get DateTime from RTC"),
+    // }
+    // shared_i2c.free()
+    // } else {
+    //     i2c1
+    // };
     loop {
         cortex_m::asm::wfe();
     }

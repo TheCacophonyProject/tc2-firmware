@@ -14,8 +14,10 @@ use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMach
 
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use byteorder::{ByteOrder, LittleEndian};
+use crc::{Crc, CRC_16_XMODEM};
 use embedded_hal::blocking::delay::DelayMs;
 use rp2040_hal::Timer;
+
 const PDM_DECIMATION: usize = 64;
 const SAMPLE_RATE: usize = 18000;
 // actually more like 8125 equates to 800 sr
@@ -184,26 +186,34 @@ impl PdmMicrophone {
 
             let rx_transfer = double_buffer::Config::new((ch1, ch2), pio_rx, b_0).start();
             let mut rx_transfer = rx_transfer.write_next(b_1);
+            let mut cycle = 0;
+            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
 
             loop {
+                if (rx_transfer.is_done()) {
+                    info!("DONE EARLY");
+                    return;
+                }
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
-
-                let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
-                let transfer = self.spi.send_message(
-                    ExtTransferMessage::AudioRawTransfer,
-                    payload,
-                    10u16,
-                    dma_peripheral,
-                    &mut timer,
-                    resets,
-                );
-
-                current_recording.samples_taken += rx_buf.len() * 32;
-                info!(
-                    "Got {} samples out of {} samples",
-                    current_recording.samples_taken, current_recording.total_samples
-                );
+                cycle += 1;
+                if (cycle > 1) {
+                    let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                    let current_crc: u16 = crc_check.checksum(&payload);
+                    let transfer = self.spi.send_message(
+                        ExtTransferMessage::AudioRawTransfer,
+                        payload,
+                        current_crc,
+                        dma_peripheral,
+                        &mut timer,
+                        resets,
+                    );
+                    current_recording.samples_taken += rx_buf.len() * 32;
+                    // info!(
+                    //     "Got {} samples out of {} samples",
+                    //     current_recording.samples_taken, current_recording.total_samples
+                    // );
+                }
 
                 // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
 

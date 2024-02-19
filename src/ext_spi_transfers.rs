@@ -370,7 +370,7 @@ impl ExtSpiTransfers {
     //             info!("Returning NOne");
     //             None
     //         }
-    //     } else {
+    //     } else {dm
     //         info!("Returning NOne 2");
 
     //         None
@@ -518,11 +518,7 @@ impl ExtSpiTransfers {
         self.payload_buffer.as_mut().unwrap()
             [transfer_header.len()..transfer_header.len() + payload.len()]
             .copy_from_slice(&payload);
-        info!(
-            "Sending message type {} buffer {}",
-            transfer_header[0],
-            self.payload_buffer.as_mut().unwrap().len()
-        );
+
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
