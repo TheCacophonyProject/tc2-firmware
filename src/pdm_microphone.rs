@@ -173,7 +173,7 @@ impl PdmMicrophone {
             num_seconds, current_recording.total_samples
         );
         self.enable();
-        self.spi.enable(spi, resets);
+        // self.spi.enable(spi, resets);
 
         // Swap our buffers?
         // Pull out more samples via dma double_buffering.
@@ -190,24 +190,20 @@ impl PdmMicrophone {
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
 
             loop {
-                if (rx_transfer.is_done()) {
-                    info!("DONE EARLY");
-                    return;
-                }
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
                 cycle += 1;
                 if (cycle > 1) {
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
-                    let current_crc: u16 = crc_check.checksum(&payload);
-                    let transfer = self.spi.send_message(
-                        ExtTransferMessage::AudioRawTransfer,
-                        payload,
-                        current_crc,
-                        dma_peripheral,
-                        &mut timer,
-                        resets,
-                    );
+                    // let current_crc: u16 = crc_check.checksum(&payload);
+                    // let transfer = self.spi.send_message(
+                    //     ExtTransferMessage::AudioRawTransfer,
+                    //     payload,
+                    //     current_crc,
+                    //     dma_peripheral,
+                    //     &mut timer,
+                    //     resets,
+                    // );
                     current_recording.samples_taken += rx_buf.len() * 32;
                     // info!(
                     //     "Got {} samples out of {} samples",
@@ -223,15 +219,15 @@ impl PdmMicrophone {
                 if current_recording.is_complete() {
                     timer.delay_ms(1);
 
-                    let transfer = self.spi.send_message(
-                        ExtTransferMessage::AudioRawTransferFinished,
-                        &[0u8; 0],
-                        0u16,
-                        dma_peripheral,
-                        &mut timer,
-                        resets,
-                    );
-                    self.spi.disable();
+                    // let transfer = self.spi.send_message(
+                    //     ExtTransferMessage::AudioRawTransferFinished,
+                    //     &[0u8; 0],
+                    //     0u16,
+                    //     dma_peripheral,
+                    //     &mut timer,
+                    //     resets,
+                    // );
+                    // self.spi.disable();
 
                     return;
                 };
