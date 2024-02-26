@@ -184,9 +184,15 @@ fn find_target_rosc_frequency(
             break;
         }
     }
+    info!(
+        "MEsured rosc loop 1 {} div {}",
+        measured_rosc_frequency.to_MHz(),
+        div
+    );
     loop {
         measured_rosc_frequency = rosc_frequency_count_hz(clocks);
         if measured_rosc_frequency > target_frequency {
+            info!("ABOVE FREQ");
             // And probably want to step it down a notch?
             break;
         }
@@ -198,9 +204,36 @@ fn find_target_rosc_frequency(
             }
         }
     }
+    info!(
+        "MEsured rosc {} div {}",
+        measured_rosc_frequency.to_Hz(),
+        div
+    );
     measured_rosc_frequency
 }
+use defmt::{info, warn};
 
+pub fn normal_clock() -> ClocksManager {
+    let xtal: u32 = 13300_000u32;
+    let mut pac = unsafe { Peripherals::steal() };
+    let mut watchdog = rp2040_hal::Watchdog::new(pac.WATCHDOG);
+    info!("Setting {}", xtal);
+    // Configure the clocks
+    let clocks = rp2040_hal::clocks::init_clocks_and_plls(
+        xtal,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    );
+    let clocks = match clocks {
+        Ok(ck) => ck,
+        Err(..) => panic!("No Clock"),
+    };
+    return clocks;
+}
 pub fn setup_rosc_as_system_clock(
     clocks_peripheral: CLOCKS,
     xosc_peripheral: XOSC,
@@ -208,7 +241,7 @@ pub fn setup_rosc_as_system_clock(
     desired_rosc_freq: HertzU32,
 ) -> (ClocksManager, RingOscillator<bsp::hal::rosc::Enabled>) {
     // Setup the crystal oscillator to do accurate measurements against
-    let peripherals = unsafe { Peripherals::steal() };
+    let peripherals: Peripherals = unsafe { Peripherals::steal() };
     let xosc = setup_xosc_blocking(xosc_peripheral, XOSC_CRYSTAL_FREQ.Hz()).unwrap();
 
     // Find appropriate settings for the desired ring oscillator frequency.
@@ -236,7 +269,8 @@ pub fn setup_rosc_as_system_clock(
         .unwrap();
 
     // Now we can disable the crystal oscillator and run off the ring oscillator, for power savings.
-    let _xosc_disabled = xosc.disable();
+    let _xosc_disabled: rp2040_hal::xosc::CrystalOscillator<rp2040_hal::xosc::Disabled> =
+        xosc.disable();
 
     // NOTE: PLLs are disabled by default.
     // You may also wish to disable other clocks/peripherals that you don't need.

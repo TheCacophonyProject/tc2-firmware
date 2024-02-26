@@ -2,9 +2,6 @@
 #![no_main]
 #![allow(dead_code)]
 #![allow(unused_variables)]
-mod lepton;
-mod utils;
-
 mod attiny_rtc_i2c;
 mod bsp;
 mod byte_slice_cursor;
@@ -17,11 +14,14 @@ mod device_config;
 mod event_logger;
 mod example;
 mod ext_spi_transfers;
+mod lepton;
 mod motion_detector;
 mod onboard_flash;
 mod pdm_microphone;
+mod pdmfilter;
 mod rp2040_flash;
 mod sun_times;
+mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
@@ -59,7 +59,7 @@ use rp2040_hal::I2C;
 pub const FIRMWARE_VERSION: u32 = 9;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
 // static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
-const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 120_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
@@ -95,6 +95,7 @@ use rp2040_hal::dma::DMAExt;
 // use rp2040_hal::pac;
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use rp2040_hal::pio::PIOExt;
+
 #[entry]
 fn main() -> ! {
     // let mut peripherals = pac::Peripherals::take().unwrap();
@@ -111,6 +112,7 @@ fn main() -> ! {
         peripherals.ROSC,
         ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
     );
+    // let clocks = clock_utils::normal_clock();
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
     let system_clock_freq = clocks.system_clock.freq().to_Hz();
@@ -119,6 +121,7 @@ fn main() -> ! {
         "System clock speed {}MHz",
         clocks.system_clock.freq().to_MHz()
     );
+
     // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
 
     // let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
@@ -230,6 +233,25 @@ fn main() -> ! {
                     sm0,
                 );
 
+                let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+                let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+                let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+                let flash_page_buf_2 =
+                    unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
+                let should_record_to_flash = true;
+
+                let mut flash_storage = OnboardFlash::new(
+                    core1pins.fs_cs,
+                    core1pins.fs_mosi,
+                    core1pins.fs_clk,
+                    core1pins.fs_miso,
+                    flash_page_buf,
+                    flash_page_buf_2,
+                    dma_channels.ch1,
+                    dma_channels.ch2,
+                    should_record_to_flash,
+                );
+
                 let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
                 let mut microphone = PdmMicrophone::new(
                     pins.gpio0.into_function().into_pull_type(),
@@ -244,16 +266,25 @@ fn main() -> ! {
                 let mut front_ptr = &mut &mut front;
                 let mut back_ptr = &mut &mut back;
                 let mut peripherals = unsafe { Peripherals::steal() };
-                microphone.enable();
-                // microphone.record_for_n_seconds(
-                //     5,
-                //     dma_channels.ch1,
-                //     dma_channels.ch2,
-                //     timer,
-                //     &mut peripherals.DMA,
-                //     &mut peripherals.RESETS,
-                //     peripherals.SPI1,
-                // );
+                // microphone.enable();
+                let dt = shared_i2c.get_datetime(&mut delay).unwrap();
+                let date_time_utc = get_naive_datetime(dt);
+
+                info!("Started rec {}", date_time_utc.timestamp_millis());
+                microphone.record_for_n_seconds(
+                    5,
+                    dma_channels.ch3,
+                    dma_channels.ch4,
+                    timer,
+                    &mut peripherals.DMA,
+                    &mut peripherals.RESETS,
+                    peripherals.SPI1,
+                    flash_storage,
+                );
+                let dt = shared_i2c.get_datetime(&mut delay).unwrap();
+                let date_time_utc = get_naive_datetime(dt);
+
+                info!("Ended rec {}", date_time_utc.timestamp_millis());
                 // while let Some(data) = microphone.record_for_n_seconds(60) {
                 // info!("Got mic data {:?}", data)
                 // TODO: Process and stream the data out to flash before we get the next block.

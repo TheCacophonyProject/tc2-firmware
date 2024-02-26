@@ -1,7 +1,7 @@
 use crate::bsp;
 use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{DMA, PIO1, SPI1};
-use crate::utils::u32_slice_to_u8;
+use crate::utils::{u16_slice_to_u8, u32_slice_to_u8};
 use bsp::{hal::sio::Sio, pac::Peripherals};
 use cortex_m::singleton;
 use defmt::{info, warn};
@@ -17,12 +17,15 @@ use byteorder::{ByteOrder, LittleEndian};
 use embedded_hal::blocking::delay::DelayMs;
 use rp2040_hal::Timer;
 const PDM_DECIMATION: usize = 64;
-const SAMPLE_RATE: usize = 18000;
+const SAMPLE_RATE: usize = 48000;
 // actually more like 8125 equates to 800 sr
 struct RecordingStatus {
     total_samples: usize,
     samples_taken: usize,
 }
+use crate::onboard_flash::OnboardFlash;
+
+use crc::{Crc, CRC_16_XMODEM};
 
 impl RecordingStatus {
     pub fn is_complete(&self) -> bool {
@@ -32,6 +35,7 @@ impl RecordingStatus {
 pub type PageBufferRef = &'static mut [u8; 4 + 2048 + 128];
 pub type DoublePageBuffer = (Option<PageBufferRef>, Option<PageBufferRef>);
 
+use crate::pdmfilter::PDMFilter;
 pub struct PdmMicrophone {
     data_disabled: Option<Pin<Gpio0, FunctionNull, PullNone>>,
     clk_disabled: Option<Pin<Gpio1, FunctionNull, PullNone>>,
@@ -51,6 +55,7 @@ pub struct PdmMicrophone {
 use rp2040_hal::dma::CH1;
 use rp2040_hal::dma::CH2;
 
+const VOLUME: u8 = 10;
 impl PdmMicrophone {
     pub fn new(
         data: Pin<Gpio0, FunctionNull, PullNone>,
@@ -78,7 +83,7 @@ impl PdmMicrophone {
         }
     }
 
-    pub fn enable(&mut self) {
+    pub fn enable(&mut self, target_speed: f32) {
         let data: Pin<Gpio0, FunctionPio1, PullNone> = self
             .data_disabled
             .take()
@@ -107,15 +112,25 @@ impl PdmMicrophone {
         let installed = self.pio.install(&program_with_defines.program).unwrap();
         // needs to run 4 instructions per evrery clock cycle
         // convert back to origianl sr SR * DECIMATION
-        let clock_divider =
-            self.system_clock_hz.to_Hz() as f32 / (SAMPLE_RATE * PDM_DECIMATION * 4) as f32;
+        let clock_divider = self.system_clock_hz.to_MHz() as f32 / (4.0 * target_speed);
+        //
+        // let clock_divider =
+        // self.system_clock_hz.to_Hz() as f32 / (SAMPLE_RATE * PDM_DECIMATION * 4) as f32;
+
         info!(
             "In {} side {} divider {}",
             data_pin_id, clk_pin_id, clock_divider
         );
         let clock_divider_fractional =
-            (255.0 * clock_divider - (clock_divider as u32) as f32) as u8;
-
+            (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
+        info!(
+            "This becomes {} {}",
+            clock_divider as u16, clock_divider_fractional
+        );
+        info!(
+            " Mic CLock speed {}",
+            self.system_clock_hz.to_MHz() as f32 / clock_divider / 4.0
+        );
         // data_pin is in
         // clk pin is out
         // let data_pin_id = 1;
@@ -129,13 +144,27 @@ impl PdmMicrophone {
             .autopush(true)
             .autopull(true)
             .build(self.state_machine_1_uninit.take().unwrap());
-        sm.set_pindirs([(clk_pin_id, bsp::hal::pio::PinDir::Output)]);
+        sm.set_pindirs([
+            (data_pin_id, bsp::hal::pio::PinDir::Input),
+            (clk_pin_id, bsp::hal::pio::PinDir::Output),
+        ]);
         self.pio_rx = Some(rx);
         self.state_machine_1_running = Some((sm.start(), tx));
         // Start receiving data via DMA double buffer, and start streaming/writing out to disk, so
         // will need to have access to the fs
     }
-
+    pub fn alter_speed(&mut self, target_speed: f32) -> u32 {
+        let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
+        let clock_divider = self.system_clock_hz.to_MHz() as f32 / (4.0 * target_speed);
+        let clock_divider_fractional =
+            (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
+        sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
+        info!(
+            "Altered Mic CLock speed {}",
+            self.system_clock_hz.to_MHz() as f32 / clock_divider / 4.0
+        );
+        return (self.system_clock_hz.to_Hz() as f32 / clock_divider / 4.0 / 64.0) as u32;
+    }
     pub fn disable(&mut self) {
         let (sm, tx) = self.state_machine_1_running.take().unwrap();
         let rx = self.pio_rx.take().unwrap();
@@ -155,12 +184,13 @@ impl PdmMicrophone {
     pub fn record_for_n_seconds(
         &mut self,
         num_seconds: usize,
-        ch1: Channel<CH1>,
-        ch2: Channel<CH2>,
+        ch3: Channel<CH3>,
+        ch4: Channel<CH4>,
         mut timer: Timer,
         dma_peripheral: &mut DMA,
         resets: &mut RESETS,
         spi: SPI1,
+        flash_storage: &mut OnboardFlash,
     ) {
         let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE * PDM_DECIMATION * num_seconds,
@@ -170,61 +200,115 @@ impl PdmMicrophone {
             "Recording for {} is {}",
             num_seconds, current_recording.total_samples
         );
-        self.enable();
+        self.enable(2.0);
+        timer.delay_ms(1000);
+        let sample_rate = self.alter_speed(4.7);
+        info!("SAMple rate now is {}", sample_rate);
+        let mut filter = PDMFilter::new(sample_rate);
+        filter.init();
+        let mut current_recording = RecordingStatus {
+            total_samples: sample_rate as usize * PDM_DECIMATION * num_seconds,
+            samples_taken: 0,
+        };
         self.spi.enable(spi, resets);
-
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         // Swap our buffers?
         // Pull out more samples via dma double_buffering.
         if let Some(pio_rx) = self.pio_rx.take() {
             let start = timer.get_counter();
-
+            info!("Set start {}", start.ticks());
             // Chain some buffers together for continuous transfers
             let b_0 = singleton!(: [u32; 512] = [0;512]).unwrap();
             let b_1 = singleton!(: [u32; 512] =  [0;512]).unwrap();
 
-            let rx_transfer = double_buffer::Config::new((ch1, ch2), pio_rx, b_0).start();
+            let rx_transfer = double_buffer::Config::new((ch3, ch4), pio_rx, b_0).start();
             let mut rx_transfer = rx_transfer.write_next(b_1);
-
+            let mut cycle = 0;
+            let mut audio_buffer = AudioBuffer::new();
+            let block_index = flash_storage.start_file();
             loop {
+                if rx_transfer.is_done() {
+                    info!("DONE EARLY");
+                    // return;
+                }
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
+                cycle += 1;
+                if cycle > 1 {
+                    let mut payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                    filter.filter(payload, VOLUME, audio_buffer.slice_for((payload.len())));
 
-                let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
-                let transfer = self.spi.send_message(
-                    ExtTransferMessage::AudioRawTransfer,
-                    payload,
-                    10u16,
-                    dma_peripheral,
-                    &mut timer,
-                    resets,
-                );
+                    if audio_buffer.is_full() {
+                        let mut payload = audio_buffer.as_u8_slice();
 
-                current_recording.samples_taken += rx_buf.len() * 32;
-                info!(
-                    "Got {} samples out of {} samples",
-                    current_recording.samples_taken, current_recording.total_samples
-                );
+                        flash_storage.append_file_bytes(
+                            payload,
+                            audio_buffer.index * 2,
+                            false,
+                            None,
+                            None,
+                        );
+                        // let payload = audio_buffer.as_u8_slice();
 
-                // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
+                        // let current_crc = crc_check.checksum(payload);
 
-                // Transfer back to flash.
-                // Do we need to double buffer things to flash?
-                // That would mean we'd want a quadruple buffer?
-                if current_recording.is_complete() {
-                    timer.delay_ms(1);
+                        // let transfer = self.spi.send_message(
+                        //     ExtTransferMessage::AudioRawTransfer,
+                        //     payload,
+                        //     current_crc,
+                        //     dma_peripheral,
+                        //     &mut timer,
+                        //     resets,
+                        // );
+                        audio_buffer.reset();
+                    }
 
-                    let transfer = self.spi.send_message(
-                        ExtTransferMessage::AudioRawTransferFinished,
-                        &[0u8; 0],
-                        0u16,
-                        dma_peripheral,
-                        &mut timer,
-                        resets,
-                    );
-                    self.spi.disable();
+                    current_recording.samples_taken += rx_buf.len() * 32;
+                    // info!(
+                    //     "Got {} samples out of {} samples",
+                    //     current_recording.samples_taken, current_recording.total_samples
+                    // );
 
-                    return;
-                };
+                    // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
+
+                    // Transfer back to flash.
+                    // Do we need to double buffer things to flash?
+                    // That would mean we'd want a quadruple buffer?
+                    if current_recording.is_complete() {
+                        info!(
+                            "Recording done counts are {} milis {}  samples {} took {}",
+                            (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
+                            (timer.get_counter() - start).to_millis(),
+                            current_recording.total_samples,
+                            current_recording.samples_taken
+                        );
+                        timer.delay_ms(1);
+
+                        let mut payload = audio_buffer.as_u8_slice();
+
+                        flash_storage.append_file_bytes(
+                            payload,
+                            audio_buffer.index * 2,
+                            true,
+                            None,
+                            None,
+                        );
+
+                        // let current_crc = crc_check.checksum(payload);
+
+                        // let transfer = self.spi.send_message(
+                        //     ExtTransferMessage::AudioRawTransferFinished,
+                        //     payload,
+                        //     current_crc,
+                        //     dma_peripheral,
+                        //     &mut timer,
+                        //     resets,
+                        // );
+                        // self.spi.disable();
+
+                        return;
+                    };
+                }
                 rx_transfer = next_rx_transfer.write_next(rx_buf);
 
                 // }
@@ -270,4 +354,45 @@ impl PdmMicrophone {
     //         (None, None)
     //     }
     // }
+}
+
+// expecting 2066 bytes
+// so for u16 data
+pub struct AudioBuffer {
+    data: [u16; (512 * 2)],
+    index: usize,
+}
+
+impl AudioBuffer {
+    pub const fn new() -> AudioBuffer {
+        AudioBuffer {
+            data: [0u16; (512 * 2)],
+            index: 0,
+        }
+    }
+
+    pub fn slice_for(&mut self, raw_data_length: usize) -> &mut [u16] {
+        let slice = &mut self.data[self.index..self.index + raw_data_length / 8];
+        // info!(
+        //     "FOr input data {} getting slice of length {} from index {}",
+        //     raw_data_length,
+        //     slice.len(),
+        //     self.index,
+        // );
+        self.index += slice.len();
+        // info!("Indexc now is {}", self.index);
+        return slice;
+    }
+
+    pub fn is_full(&mut self) -> bool {
+        return self.index == self.data.len();
+    }
+
+    pub fn reset(&mut self) {
+        self.index = 0;
+    }
+
+    pub fn as_u8_slice(&mut self) -> &mut [u8] {
+        return unsafe { &mut u16_slice_to_u8(&self.data[..]) };
+    }
 }

@@ -518,11 +518,7 @@ impl ExtSpiTransfers {
         self.payload_buffer.as_mut().unwrap()
             [transfer_header.len()..transfer_header.len() + payload.len()]
             .copy_from_slice(&payload);
-        info!(
-            "Sending message type {} buffer {}",
-            transfer_header[0],
-            self.payload_buffer.as_mut().unwrap().len()
-        );
+
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
@@ -531,11 +527,12 @@ impl ExtSpiTransfers {
             if self.ping(timer, true) {
                 finished_transfer = true;
                 let start = timer.get_counter();
-                let transfer = single_buffer::Config::new(
+                let mut transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
                     self.spi.take().unwrap(),
                 );
+                // transfer.bswap(true);
                 let transfer = transfer.start();
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 maybe_abort_dma_transfer(
