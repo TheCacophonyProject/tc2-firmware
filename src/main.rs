@@ -216,8 +216,8 @@ fn main() -> ! {
                 let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
                 let mut crc_buf = [0x42u8; 32 + 104];
-                let mut payload_buf = [0x42u8; 2066];
                 let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+                let mut payload_buf = [0x42u8; 2066];
                 let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
 
                 let mut pi_spi = ExtSpiTransfers::new(
@@ -240,6 +240,10 @@ fn main() -> ! {
                     unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
                 let should_record_to_flash = true;
 
+                let mut flash_payload_buf = [0x42u8; 2115];
+                let flash_payload_buf =
+                    unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
+
                 let mut flash_storage = OnboardFlash::new(
                     core1pins.fs_cs,
                     core1pins.fs_mosi,
@@ -247,10 +251,22 @@ fn main() -> ! {
                     core1pins.fs_miso,
                     flash_page_buf,
                     flash_page_buf_2,
+                    dma_channels.ch5,
                     dma_channels.ch1,
                     dma_channels.ch2,
                     should_record_to_flash,
+                    flash_payload_buf,
                 );
+                // flash_storage.take_spi(
+                //     peripherals.SPI1,
+                //     &mut peripherals.RESETS,
+                //     system_clock_freq.Hz(),
+                // );
+                // flash_storage.init();
+                // if flash_storage.has_files_to_offload() {
+                //     info!("Finished scan, has files to offload");
+                // }
+                // return;
 
                 let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
                 let mut microphone = PdmMicrophone::new(
@@ -279,12 +295,11 @@ fn main() -> ! {
                     &mut peripherals.DMA,
                     &mut peripherals.RESETS,
                     peripherals.SPI1,
-                    flash_storage,
+                    &mut flash_storage,
+                    &mut shared_i2c,
                 );
-                let dt = shared_i2c.get_datetime(&mut delay).unwrap();
-                let date_time_utc = get_naive_datetime(dt);
 
-                info!("Ended rec {}", date_time_utc.timestamp_millis());
+                // info!("Ended rec {}", date_time_utc.timestamp_millis());
                 // while let Some(data) = microphone.record_for_n_seconds(60) {
                 // info!("Got mic data {:?}", data)
                 // TODO: Process and stream the data out to flash before we get the next block.

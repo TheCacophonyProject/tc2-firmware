@@ -161,7 +161,7 @@ fn is_frame_telemetry_is_valid(
         false
     } else if telemetry_revision_stable.1 > 2
         && (telemetry_revision_stable.0[0] != frame_telemetry.revision[0]
-        || telemetry_revision_stable.0[1] != frame_telemetry.revision[1])
+            || telemetry_revision_stable.0[1] != frame_telemetry.revision[1])
     {
         // We have a misaligned/invalid frame.
         warn!("Misaligned header (core 1)");
@@ -190,9 +190,9 @@ impl SyncedDateTime {
     pub fn get_timestamp_micros(&self, timer: &rp2040_hal::Timer) -> u64 {
         (self.date_time_utc
             + chrono::Duration::microseconds(
-            (timer.get_counter() - self.timer_offset).to_micros() as i64
-        ))
-            .timestamp_micros() as u64
+                (timer.get_counter() - self.timer_offset).to_micros() as i64
+            ))
+        .timestamp_micros() as u64
     }
 
     pub fn set(&mut self, date_time: NaiveDateTime, timer: &rp2040_hal::Timer) {
@@ -273,6 +273,10 @@ pub fn core_1_task(
     );
 
     let mut spi_peripheral = Some(peripherals.SPI1);
+
+    let mut flash_payload_buf = [0x42u8; 2115];
+    let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
+
     let mut flash_storage = OnboardFlash::new(
         pins.fs_cs,
         pins.fs_mosi,
@@ -280,9 +284,11 @@ pub fn core_1_task(
         pins.fs_miso,
         flash_page_buf,
         flash_page_buf_2,
+        dma_channels.ch5,
         dma_channels.ch1,
         dma_channels.ch2,
         should_record_to_flash,
+        flash_payload_buf,
     );
     {
         flash_storage.take_spi(
@@ -560,8 +566,8 @@ pub fn core_1_task(
             //  Also consider the case where we have a mask region to ignore or pay attention to.
             let should_end_current_recording = cptv_stream.is_some()
                 && (this_frame_motion_detection.triggering_ended()
-                || frames_written >= max_length_in_frames
-                || flash_storage.is_nearly_full());
+                    || frames_written >= max_length_in_frames
+                    || flash_storage.is_nearly_full());
 
             motion_detection = Some(this_frame_motion_detection);
 
@@ -828,8 +834,8 @@ pub fn core_1_task(
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if flash_storage_nearly_full
                             || (is_outside_recording_window
-                            && (flash_storage.has_files_to_offload()
-                            || event_logger.has_events_to_offload()))
+                                && (flash_storage.has_files_to_offload()
+                                    || event_logger.has_events_to_offload()))
                         {
                             // If flash storage is nearly full, or we're now outside the recording window,
                             //  restart in 2 minutes so we can offload files/events
