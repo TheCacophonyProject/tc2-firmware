@@ -582,15 +582,10 @@ impl OnboardFlash {
     }
     pub fn get_file_part(&mut self) -> Option<((&[u8], u16, isize, isize), bool, SPI1)> {
         // TODO: Could interleave using cache_random_read
-        info!("Attempting to get file part");
         if self
             .read_page(self.current_block_index, self.current_page_index)
             .is_ok()
         {
-            info!(
-                "Getting parts {} p {} ",
-                self.current_block_index, self.current_page_index
-            );
             self.read_page_from_cache(self.current_block_index);
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
@@ -873,10 +868,8 @@ impl OnboardFlash {
     ) {
         let b = block_index.unwrap_or(self.current_block_index);
         let p = page_index.unwrap_or(self.current_page_index);
-        info!("Writing to b {} p {}", b, p);
         if let Some(transfer) = transfer {
             let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
-            info!("Finishing DMA");
             self.cs.set_high().unwrap();
             self.payload_buffer = Some(tx_buf);
             self.dma_channel_1 = Some(r_ch1);
@@ -955,8 +948,6 @@ impl OnboardFlash {
         }
         let mut transfer = None;
         if self.record_to_flash {
-            info!("TRANSFER DATA");
-
             self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);
 
             self.cs.set_low().unwrap();
@@ -978,7 +969,6 @@ impl OnboardFlash {
                 .start(),
             );
             if (is_last) {
-                info!("SETTING END");
                 let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.take().unwrap().wait();
 
                 self.cs.set_high().unwrap();
@@ -1021,7 +1011,6 @@ impl OnboardFlash {
 
         return (transfer, address);
     }
-
     pub fn append_file_bytes(
         &mut self,
         bytes: &mut [u8],
@@ -1030,27 +1019,15 @@ impl OnboardFlash {
         block_index: Option<isize>,
         page_index: Option<isize>,
     ) {
-        if let Some(transfer) = self.transfer.take() {
-            let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
-            info!("DONE DMA");
-            self.cs.set_high().unwrap();
-            self.payload_buffer = Some(tx_buf);
-            self.dma_channel_1 = Some(r_ch1);
-            self.dma_channel_2 = Some(r_ch2);
-            self.spi = Some(spi);
-            // self.spi.as_mut().unwrap().write(bytes).unwrap();
-            // self.spi_write(&bytes[1..]);
-            let address = self.address.take().unwrap();
-            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-        }
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
         assert_eq!(bytes.len(), 2112 + 4); // 2116
-                                           // Skip the first byte in the buffer
+
+        // Skip the first byte in the buffer
         let b = block_index.unwrap_or(self.current_block_index);
         let p = page_index.unwrap_or(self.current_page_index);
-        self.address = Some(OnboardFlash::get_address(b, p));
+        let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&bytes[4..4 + user_bytes_length]);
@@ -1093,73 +1070,37 @@ impl OnboardFlash {
         }
 
         if self.record_to_flash {
-            info!("TRANSFER DATA");
-
-            self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);
-            // self.payload_buffer.as_mut().unwrap()[bytes.len() - 1..bytes.len() - 1 + 4]
-            // .copy_from_slice(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-            // info!("Writing {}", self.payload_buffer.take().unwrap().len());
-            self.cs.set_low().unwrap();
-            let buf = self.payload_buffer.as_mut().unwrap();
-
-            let mut rx_buf = [0x42u8; 2115];
-            let rx_buf = unsafe { extend_lifetime_generic_mut(&mut rx_buf) };
-
-            self.transfer = Some(
-                bidirectional::Config::new(
-                    (
-                        self.dma_channel_1.take().unwrap(),
-                        self.dma_channel_2.take().unwrap(),
-                    ),
-                    self.payload_buffer.take().unwrap(),
-                    self.spi.take().unwrap(),
-                    rx_buf,
-                )
-                .start(),
-            );
-            if (is_last) {
-                info!("SETTING END");
-                let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = self.transfer.take().unwrap().wait();
-
-                self.cs.set_high().unwrap();
-                self.payload_buffer = Some(tx_buf);
-                self.dma_channel_1 = Some(r_ch1);
-                self.dma_channel_2 = Some(r_ch2);
-                self.spi = Some(spi);
-                // // self.spi.as_mut().unwrap().write(bytes).unwrap();
-                // // self.spi_write(&bytes[1..]);
-                let address = self.address.take().unwrap();
-                self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-            }
+            self.spi_write(&bytes[1..]);
+            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         }
 
         // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
-        // let status = self.wait_for_ready();
+        let status = self.wait_for_ready();
 
         // TODO: Check ECC status, mark and relocate block if needed.
         //info!("Status after program {:#010b}", status.inner);
-        // if !status.program_failed() {
-        if self.first_used_block_index.is_none() {
-            self.first_used_block_index = Some(b);
-        }
-        if self.last_used_block_index.is_none() {
-            self.last_used_block_index = Some(b);
-        } else if let Some(last_used_block_index) = self.last_used_block_index {
-            if last_used_block_index < b {
-                self.last_used_block_index = Some(b);
+        if !status.program_failed() {
+            if self.first_used_block_index.is_none() {
+                self.first_used_block_index = Some(b);
             }
+            if self.last_used_block_index.is_none() {
+                self.last_used_block_index = Some(b);
+            } else if let Some(last_used_block_index) = self.last_used_block_index {
+                if last_used_block_index < b {
+                    self.last_used_block_index = Some(b);
+                }
+            }
+            if block_index.is_none() && page_index.is_none() {
+                self.advance_file_cursor(is_last);
+            }
+        } else {
+            error!("Programming failed");
         }
-        if block_index.is_none() && page_index.is_none() {
-            self.advance_file_cursor(is_last);
+        if !status.erase_failed() {
+            // Relocate earlier pages on this block to the next free block
+            // Re-write this page
+            // Erase and mark the earlier block as bad.
         }
-        // } else {
-        // error!("Programming failed");
-        // }
-        // if !status.erase_failed() {
-        // Relocate earlier pages on this block to the next free block
-        // Re-write this page
-        // Erase and mark the earlier block as bad.
-        // }
     }
 
     pub fn write_event(

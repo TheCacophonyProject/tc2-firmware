@@ -126,7 +126,6 @@ pub fn maybe_offload_flash_storage_and_events(
             spi,
         )) = flash_storage.get_file_part()
         {
-            info!("FILE IS LAST? {}", is_last);
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last {
                 ExtTransferMessage::BeginFileTransfer
