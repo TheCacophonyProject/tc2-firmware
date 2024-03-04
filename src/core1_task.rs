@@ -274,9 +274,6 @@ pub fn core_1_task(
 
     let mut spi_peripheral = Some(peripherals.SPI1);
 
-    let mut flash_payload_buf = [0x42u8; 2115];
-    let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
-
     let mut flash_storage = OnboardFlash::new(
         pins.fs_cs,
         pins.fs_mosi,
@@ -284,11 +281,10 @@ pub fn core_1_task(
         pins.fs_miso,
         flash_page_buf,
         flash_page_buf_2,
-        dma_channels.ch5,
         dma_channels.ch1,
         dma_channels.ch2,
         should_record_to_flash,
-        flash_payload_buf,
+        None,
     );
     {
         flash_storage.take_spi(

@@ -1,3 +1,5 @@
+use core::time;
+
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp;
 use crate::bsp::pac;
@@ -8,12 +10,14 @@ use crate::core1_sub_tasks::maybe_offload_flash_storage_and_events;
 use crate::core1_task::SyncedDateTime;
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-use crate::utils::{u16_slice_to_u8_mut, u32_slice_to_u8};
+use crate::utils::{
+    u16_slice_to_u8, u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16, u8_slice_to_u16,
+};
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use cortex_m::singleton;
 use defmt::{info, warn};
-use embedded_hal::blocking::delay::DelayMs;
+use embedded_hal::blocking::delay::{DelayMs, DelayUs};
 use fugit::HertzU32;
 use rp2040_hal::dma::{double_buffer, CH3, CH4};
 use rp2040_hal::dma::{single_buffer, Channel, Channels};
@@ -37,8 +41,6 @@ impl RecordingStatus {
         self.total_samples <= self.samples_taken
     }
 }
-pub type PageBufferRef = &'static mut [u8; 4 + 2048 + 128];
-pub type DoublePageBuffer = (Option<PageBufferRef>, Option<PageBufferRef>);
 
 use crate::pdmfilter::PDMFilter;
 pub struct PdmMicrophone {
@@ -50,15 +52,9 @@ pub struct PdmMicrophone {
     state_machine_1_uninit: Option<UninitStateMachine<(PIO1, SM1)>>,
     pio_rx: Option<Rx<(PIO1, SM1)>>,
     system_clock_hz: HertzU32,
-    buffers: Option<DoublePageBuffer>,
     pio: PIO<PIO1>,
     current_recording: Option<RecordingStatus>,
-    dma_channel_0: Option<Channel<CH3>>,
-    dma_channel_1: Option<Channel<CH4>>,
-    spi: ExtSpiTransfers,
 }
-use rp2040_hal::dma::CH1;
-use rp2040_hal::dma::CH2;
 
 const VOLUME: u8 = 10;
 impl PdmMicrophone {
@@ -68,7 +64,6 @@ impl PdmMicrophone {
         system_clock_hz: HertzU32,
         pio: PIO<PIO1>,
         state_machine_1_uninit: UninitStateMachine<(PIO1, SM1)>,
-        spi: ExtSpiTransfers,
     ) -> PdmMicrophone {
         PdmMicrophone {
             data_disabled: Some(data),
@@ -78,13 +73,9 @@ impl PdmMicrophone {
             state_machine_1_running: None,
             system_clock_hz,
             pio_rx: None,
-            buffers: None,
             pio,
             state_machine_1_uninit: Some(state_machine_1_uninit),
             current_recording: None,
-            dma_channel_0: None,
-            dma_channel_1: None,
-            spi: spi,
         }
     }
 
@@ -114,7 +105,9 @@ impl PdmMicrophone {
         // We may also need to apply a gain step.
 
         let program_with_defines = pio_proc::pio_file!("./src/pdm_microphone.pio");
-        let installed = self.pio.install(&program_with_defines.program).unwrap();
+        let installed_program: rp2040_hal::pio::InstalledProgram<PIO1> =
+            self.pio.install(&program_with_defines.program).unwrap();
+
         // needs to run 4 instructions per evrery clock cycle
         // convert back to origianl sr SR * DECIMATION
         // let clock_divider = self.system_clock_hz.to_MHz() as f32 / (4.0 * target_speed);
@@ -141,7 +134,7 @@ impl PdmMicrophone {
         // clk pin is out
         // let data_pin_id = 1;
         // let clk_pin_id = 0;
-        let (mut sm, rx, tx) = PIOBuilder::from_program(installed)
+        let (mut sm, rx, tx) = PIOBuilder::from_program(installed_program)
             .in_pin_base(data_pin_id)
             .side_set_pin_base(clk_pin_id)
             .pull_threshold(32)
@@ -176,6 +169,7 @@ impl PdmMicrophone {
         let (sm, tx) = self.state_machine_1_running.take().unwrap();
         let rx = self.pio_rx.take().unwrap();
         let (sm, _program) = sm.uninit(rx, tx);
+        self.pio.uninstall(_program);
 
         self.data_disabled = Some(self.data.take().unwrap().into_function().into_pull_type());
         self.clk_disabled = Some(
@@ -194,11 +188,10 @@ impl PdmMicrophone {
         ch3: Channel<CH3>,
         ch4: Channel<CH4>,
         mut timer: Timer,
-        dma_peripheral: &mut DMA,
         resets: &mut RESETS,
         spi: SPI1,
         flash_storage: &mut OnboardFlash,
-        shared_i2c: &mut SharedI2C,
+        timestamp: u64,
     ) {
         let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE * PDM_DECIMATION * num_seconds,
@@ -209,25 +202,20 @@ impl PdmMicrophone {
             num_seconds, current_recording.total_samples
         );
         self.enable();
-        // timer.delay_ms(1000);
-        // let sample_rate = self.alter_speed(4.7);
-        // info!("SAMple rate now is {}", sample_rate);
         let mut filter = PDMFilter::new(SAMPLE_RATE as u32);
         filter.init();
         let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
-        let use_spi = false;
-        if (use_spi) {
-            self.spi.enable(spi, resets);
-        } else {
-            flash_storage.take_spi(spi, resets, self.system_clock_hz);
-            flash_storage.init();
-            flash_storage.erase_all_blocks();
-        }
+
+        flash_storage.take_spi(spi, resets, self.system_clock_hz);
+        flash_storage.init();
+        // flash_storage.erase_all_blocks();
+
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         // Swap our buffers?
+        let use_async: bool = true;
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
@@ -236,81 +224,59 @@ impl PdmMicrophone {
             // Chain some buffers together for continuous transfers
             let b_0 = singleton!(: [u32; 512] = [0;512]).unwrap();
             let b_1 = singleton!(: [u32; 512] =  [0;512]).unwrap();
-
-            let rx_transfer = double_buffer::Config::new((ch3, ch4), pio_rx, b_0).start();
+            let config = double_buffer::Config::new((ch3, ch4), pio_rx, b_0);
+            let rx_transfer = config.start();
+            // double_buffer::Config::new((ch3, ch4), pio_rx, b_0).start();
             let mut rx_transfer = rx_transfer.write_next(b_1);
             let mut cycle = 0;
             let mut audio_buffer = AudioBuffer::new();
-            let block_index = flash_storage.start_file(0);
-            info!("START FILE {}", block_index);
+            audio_buffer.init(timestamp, SAMPLE_RATE as u16);
+            let start_block_index = flash_storage.start_file(0);
             loop {
                 if rx_transfer.is_done() {
-                    info!("DONE EARLY");
-                    return;
+                    //this causes problems
+                    warn!("Couldn't keep up with data discarding recording");
+                    flash_storage.erase_block_range(
+                        start_block_index,
+                        flash_storage.last_used_block_index.unwrap(),
+                    );
+                    break;
                 }
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
                 cycle += 1;
                 if (cycle < 200) {
                     // get the values initialized so the start of the recording is nice
-                    let mut payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                    let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     filter.filter(payload, VOLUME, &mut [0u16; 0], false);
                 } else {
-                    let mut payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
-                    filter.filter(
-                        payload,
-                        VOLUME,
-                        audio_buffer.slice_for((payload.len())),
-                        true,
-                    );
+                    let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                    let out = audio_buffer.slice_for(payload.len());
+                    let (payload, leftover) = payload.split_at(out.len() * 8);
+                    filter.filter(&payload, VOLUME, out, true);
+
                     if audio_buffer.is_full() {
                         let data_size = (audio_buffer.index - 2) * 2;
+                        let data = audio_buffer.as_u8_slice();
 
-                        let mut payload = audio_buffer.as_u8_slice();
-                        // let mut index: i32 = 0;
-                        // if cycle <= 2000 {
-                        //     for i in 0..payload.len() {
-                        //         info!("{} Byte  {} is {}", cycle, i + 4, payload[i + 4]);
-                        //         index += 1;
-                        //         if index == 20 {
-                        //             break;
-                        //         }
-                        //     }
-                        // }
-
-                        if use_spi {
-                            let payload = audio_buffer.as_u8_slice();
-
-                            let current_crc = crc_check.checksum(payload);
-
-                            let transfer = self.spi.send_message(
-                                ExtTransferMessage::AudioRawTransfer,
-                                &payload[..2048],
-                                current_crc,
-                                dma_peripheral,
-                                &mut timer,
-                                resets,
+                        if use_async {
+                            (transfer, address) = flash_storage.append_file_bytes_async(
+                                data, data_size, false, None, None, transfer, address,
                             );
                         } else {
-                            (transfer, address) = flash_storage.append_file_bytes_async(
-                                payload, data_size, false, None, None, transfer, address,
-                            );
+                            flash_storage.append_file_bytes(data, data_size, false, None, None);
                         }
                         audio_buffer.reset();
-                        // current_recording.samples_taken = current_recording.total_samples;
+                        if leftover.len() > 0 {
+                            // only works with this why???? even if i use new variables
+                            timer.delay_us(500);
+                            let out = audio_buffer.slice_for(leftover.len());
+                            filter.filter(leftover, VOLUME, out, true);
+                        }
+                        // break;
                     }
 
                     current_recording.samples_taken += rx_buf.len() * 32;
-                    // info!(
-                    //     "Got {} samples out of {} samples",
-                    //     current_recording.samples_taken, current_recording.total_samples
-                    // );
-
-                    // We can just assume that data is going to transfer to flash much faster, so we do it in bursts.
-
-                    // Transfer back to flash.
-                    // Do we need to double buffer things to flash?
-                    // That would mean we'd want a quadruple buffer?
                     if current_recording.is_complete() {
                         info!(
                             "Recording done counts are {} milis {}  samples {} took {}",
@@ -319,101 +285,26 @@ impl PdmMicrophone {
                             current_recording.total_samples,
                             current_recording.samples_taken
                         );
-                        timer.delay_ms(1);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let mut payload = audio_buffer.as_u8_slice();
-                        if use_spi {
-                            let current_crc = crc_check.checksum(payload);
-
-                            let transfer = self.spi.send_message(
-                                ExtTransferMessage::AudioRawTransferFinished,
-                                &payload[..2048],
-                                current_crc,
-                                dma_peripheral,
-                                &mut timer,
-                                resets,
-                            );
-                            self.spi.disable();
-                        } else {
+                        if use_async {
                             flash_storage.append_file_bytes_async(
                                 payload, data_size, true, None, None, transfer, address,
                             );
-
-                            if flash_storage.has_files_to_offload() {
-                                info!("Finished scan, has files to offload");
-
-                                let core = unsafe { pac::CorePeripherals::steal() };
-                                let mut delay = Delay::new(core.SYST, self.system_clock_hz.to_Hz());
-                                let mut event_logger = EventLogger::new(flash_storage);
-                                let mut synced_date_time = SyncedDateTime::default();
-
-                                if maybe_offload_flash_storage_and_events(
-                                    flash_storage,
-                                    &mut self.spi,
-                                    resets,
-                                    dma_peripheral,
-                                    self.system_clock_hz.to_Hz(),
-                                    shared_i2c,
-                                    &mut delay,
-                                    &mut timer,
-                                    &mut event_logger,
-                                    &synced_date_time,
-                                ) {
-                                    info!("Offloaded succesfuly");
-                                } else {
-                                    info!("FAILED OFFLOAD");
-                                }
-                            }
+                        } else {
+                            flash_storage.append_file_bytes(payload, data_size, true, None, None);
                         }
-                        return;
+                        break;
                     };
                 }
                 rx_transfer = next_rx_transfer.write_next(rx_buf);
-
-                // }
             }
             // TODO: Uninstall pio_rx program etc.
         }
-        // Put the pio_rx back?  I guess we can do work while the DMA transfer is happening, assuming we have enough time,
-        // Otherwise we may need to transfer the buffer/pointer to another thread for fs work to happen.
     }
-
-    // pub fn read_next_page(&mut self) -> (Option<PageBufferRef>, Option<DoublePageBuffer>) {
-    //     let mut current_recording = self.current_recording.take();
-    //     if let Some(mut current_recording) = current_recording {
-    //         if current_recording.is_complete() {
-    //             let buffers = self.buffers.take();
-    //             (None, buffers)
-    //         } else {
-    //             // Pull out more samples via dma double_buffering.
-
-    //             // FIXME: Flow control
-    //             // if let Some(pio_rx) = self.pio_rx.take() {
-    //             //     // Chain some buffers together for continuous transfers
-    //             //     let rx_transfer =
-    //             //         double_buffer::Config::new((dma.ch2, dma.ch3), pio_rx, rx_buf).start();
-    //             //     let mut rx_transfer = rx_transfer.write_next(rx_buf2);
-    //             //     loop {
-    //             //         // When a transfer is done we immediately enqueue the buffers again.
-    //             //         if rx_transfer.is_done() {
-    //             //             let (rx_buf, next_rx_transfer) = rx_transfer.wait();
-    //             //             rx_transfer = next_rx_transfer.write_next(rx_buf);
-    //             //         }
-    //             //     }
-    //             // }
-    //             // Put the pio_rx back?  I guess we can do work while the DMA transfer is happening, assuming we have enough time,
-    //             // Otherwise we may need to transfer the buffer/pointer to another thread for fs work to happen.
-
-    //             current_recording.samples_taken += 1000;
-    //             self.current_recording = Some(current_recording);
-
-    //             (self.buffers.as_ref().1, None)
-    //         }
-    //     } else {
-    //         (None, None)
-    //     }
-    // }
 }
+
+const USER_BUFFER_LENGTH: usize = 1024;
 
 // expecting 2066 bytes
 // so for u16 data
@@ -421,36 +312,48 @@ pub struct AudioBuffer {
     data: [u16; (512 * 2 + 34)],
     index: usize,
 }
-
+const PAGE_COMMAND_ADDRESS: usize = 2;
+const AUDIO_SHEBANG: u16 = 1;
 impl AudioBuffer {
     pub const fn new() -> AudioBuffer {
         AudioBuffer {
             data: [0u16; (512 * 2 + 34)],
-            index: 2,
+            index: PAGE_COMMAND_ADDRESS,
         }
     }
+    pub fn init(&mut self, timestamp: u64, samplerate: u16) {
+        let time_data = unsafe { u64_to_u16(&timestamp) };
+        let mut header: [u16; 4 + 1 + 1] = [0u16; 4 + 1 + 1];
+        let u8_time = unsafe { u16_slice_to_u8(time_data) };
+        for b in u8_time {
+            info!("Dt is {}", b);
+        }
+        header[0] = AUDIO_SHEBANG;
+        header[1..1 + time_data.len()].copy_from_slice(&time_data);
 
+        header[time_data.len() + 1] = samplerate;
+        self.data[PAGE_COMMAND_ADDRESS..header.len() + PAGE_COMMAND_ADDRESS]
+            .copy_from_slice(&header);
+        self.index += header.len();
+    }
     pub fn slice_for(&mut self, raw_data_length: usize) -> &mut [u16] {
-        let slice = &mut self.data[self.index..self.index + raw_data_length / 8];
-        // info!(
-        //     "Getting slice for {} slice len {} from index {} - {}",
-        //     raw_data_length,
-        //     slice.len(),
-        //     self.index,
-        //     self.index + raw_data_length / 8
-        // );
+        let end = self.index + raw_data_length / 8;
+        let slice;
+        if end > (USER_BUFFER_LENGTH + PAGE_COMMAND_ADDRESS) {
+            slice = &mut self.data[self.index..USER_BUFFER_LENGTH + PAGE_COMMAND_ADDRESS];
+        } else {
+            slice = &mut self.data[self.index..self.index + raw_data_length / 8];
+        }
         self.index += slice.len();
         return slice;
     }
 
     pub fn is_full(&mut self) -> bool {
-        return self.index == 512 * 2 + 2;
+        return self.index == (USER_BUFFER_LENGTH + PAGE_COMMAND_ADDRESS);
     }
 
     pub fn reset(&mut self) {
-        self.data[0] = 0;
-        self.data[1] = 0;
-        self.index = 2;
+        self.index = PAGE_COMMAND_ADDRESS;
     }
 
     pub fn as_u8_slice(&mut self) -> &mut [u8] {

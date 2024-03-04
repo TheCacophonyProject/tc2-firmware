@@ -24,20 +24,22 @@ mod sun_times;
 mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
+use crate::core1_sub_tasks::maybe_offload_flash_storage_and_events;
+use crate::core1_task::{core_1_task, Core1Pins, Core1Task, SyncedDateTime};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::device_config::{get_naive_datetime, DeviceConfig};
+use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::example::test_dma;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
 use crate::pdm_microphone::PdmMicrophone;
-
 use bsp::{
     entry,
     hal::{clocks::Clock, pac, sio::Sio},
     pac::Peripherals,
 };
+use chrono::NaiveDateTime;
 
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
@@ -130,7 +132,7 @@ fn main() -> ! {
     // watchdog.enable_tick_generation((sysd cac    tem_clock_freq / 1_000_000) as u8);
 
     info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
+    let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut sio = Sio::new(peripherals.SIO);
@@ -188,50 +190,12 @@ fn main() -> ! {
         let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
         match shared_i2c.get_datetime(&mut delay) {
             Ok(now) => {
-                info!("Start mic rec");
-                // let date_time_utc = get_naive_datetime(now);
-                // let is_inside_recording_window =
-                //     existing_config.time_is_in_recording_window(&date_time_utc);
-                // if !is_inside_recording_window {
-                // info!("Woke outside recording window, lets make an audio recording and go back to sleep?");
-                // let mut pac = pac::Peripherals::take().unwrap();
-                // let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+                let mut synced_date_time = SyncedDateTime::default();
+                synced_date_time.set(get_naive_datetime(now), &timer);
+                info!("Start mic rec {}/{}", now.day, now.month);
 
-                // let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-                let core1pins = Core1Pins {
-                    pi_ping: pins.gpio5.into_pull_down_input(),
-
-                    pi_miso: pins.gpio15.into_floating_disabled(),
-                    pi_mosi: pins.gpio12.into_floating_disabled(),
-                    pi_cs: pins.gpio13.into_floating_disabled(),
-                    pi_clk: pins.gpio14.into_floating_disabled(),
-
-                    fs_cs: pins.gpio9.into_push_pull_output(),
-                    fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-                    fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-                    fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-                };
                 let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
                 let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-                let mut crc_buf = [0x42u8; 32 + 104];
-                let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-                let mut payload_buf = [0x42u8; 2066];
-                let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-
-                let mut pi_spi = ExtSpiTransfers::new(
-                    core1pins.pi_mosi,
-                    core1pins.pi_cs,
-                    core1pins.pi_clk,
-                    core1pins.pi_miso,
-                    core1pins.pi_ping,
-                    dma_channels.ch0,
-                    payload_buf,
-                    crc_buf,
-                    pio0,
-                    sm0,
-                );
 
                 let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
                 let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
@@ -245,28 +209,17 @@ fn main() -> ! {
                     unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
 
                 let mut flash_storage = OnboardFlash::new(
-                    core1pins.fs_cs,
-                    core1pins.fs_mosi,
-                    core1pins.fs_clk,
-                    core1pins.fs_miso,
+                    pins.gpio9.into_push_pull_output(),
+                    pins.gpio11.into_pull_down_disabled().into_pull_type(),
+                    pins.gpio10.into_pull_down_disabled().into_pull_type(),
+                    pins.gpio8.into_pull_down_disabled().into_pull_type(),
                     flash_page_buf,
                     flash_page_buf_2,
-                    dma_channels.ch5,
                     dma_channels.ch1,
                     dma_channels.ch2,
                     should_record_to_flash,
-                    flash_payload_buf,
+                    Some(flash_payload_buf),
                 );
-                // flash_storage.take_spi(
-                //     peripherals.SPI1,
-                //     &mut peripherals.RESETS,
-                //     system_clock_freq.Hz(),
-                // );
-                // flash_storage.init();
-                // if flash_storage.has_files_to_offload() {
-                //     info!("Finished scan, has files to offload");
-                // }
-                // return;
 
                 let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
                 let mut microphone = PdmMicrophone::new(
@@ -275,36 +228,52 @@ fn main() -> ! {
                     system_clock_freq.Hz(),
                     pio1,
                     sm1,
-                    pi_spi,
                 );
-                let mut front = [0u8; 2180];
-                let mut back = [0u8; 2180];
-                let mut front_ptr = &mut &mut front;
-                let mut back_ptr = &mut &mut back;
+                let timestamp = synced_date_time.get_timestamp_micros(&timer);
                 let mut peripherals = unsafe { Peripherals::steal() };
-                // microphone.enable();
-                let dt = shared_i2c.get_datetime(&mut delay).unwrap();
-                let date_time_utc = get_naive_datetime(dt);
-
-                info!("Started rec {}", date_time_utc.timestamp_millis());
                 microphone.record_for_n_seconds(
-                    5,
+                    1,
                     dma_channels.ch3,
                     dma_channels.ch4,
                     timer,
-                    &mut peripherals.DMA,
                     &mut peripherals.RESETS,
                     peripherals.SPI1,
                     &mut flash_storage,
-                    &mut shared_i2c,
+                    timestamp,
                 );
 
-                // info!("Ended rec {}", date_time_utc.timestamp_millis());
-                // while let Some(data) = microphone.record_for_n_seconds(60) {
-                // info!("Got mic data {:?}", data)
-                // TODO: Process and stream the data out to flash before we get the next block.
-                // }
-                // }
+                let mut payload_buf = [0x42u8; 2066];
+                let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+                let mut crc_buf = [0x42u8; 32 + 104];
+                let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+
+                let mut pi_spi = ExtSpiTransfers::new(
+                    pins.gpio12.into_floating_disabled(),
+                    pins.gpio13.into_floating_disabled(),
+                    pins.gpio14.into_floating_disabled(),
+                    pins.gpio15.into_floating_disabled(),
+                    pins.gpio5.into_pull_down_input(),
+                    dma_channels.ch0,
+                    payload_buf,
+                    crc_buf,
+                    pio0,
+                    sm0,
+                );
+                info!("FINISHED MIC");
+                let mut event_logger = EventLogger::new(&mut flash_storage);
+
+                if maybe_offload_flash_storage_and_events(
+                    &mut flash_storage,
+                    &mut pi_spi,
+                    &mut peripherals.RESETS,
+                    &mut peripherals.DMA,
+                    system_clock_freq,
+                    &mut shared_i2c,
+                    &mut delay,
+                    &mut timer,
+                    &mut event_logger,
+                    &synced_date_time,
+                ) {}
             }
             Err(_) => error!("Unable to get DateTime from RTC"),
         }

@@ -285,30 +285,10 @@ pub struct OnboardFlash {
     pub bad_blocks: [i16; 40],
     pub current_page: Page,
     pub prev_page: Page,
-    dma_channel_5: Option<Channel<CH5>>,
-
     dma_channel_1: Option<Channel<CH1>>,
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
     payload_buffer: Option<&'static mut [u8; 2115]>,
-    transfer: Option<
-        bidirectional::Transfer<
-            Channel<CH1>,
-            Channel<CH2>,
-            &'static mut [u8; 2115],
-            Spi<
-                Enabled,
-                SPI1,
-                (
-                    Pin<Gpio11, FunctionSpi, PullDown>,
-                    Pin<Gpio8, FunctionSpi, PullDown>,
-                    Pin<Gpio10, FunctionSpi, PullDown>,
-                ),
-            >,
-            &'static mut [u8; 2115],
-        >,
-    >,
-    address: Option<[u8; 3]>,
 }
 
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
@@ -324,12 +304,11 @@ impl OnboardFlash {
         miso: Pin<Gpio8, FunctionNull, PullNone>,
         flash_page_buf: &'static mut [u8; 4 + 2048 + 128],
         flash_page_buf_2: &'static mut [u8; 4 + 2048 + 128],
-        dma_channel_5: Channel<CH5>,
 
         dma_channel_1: Channel<CH1>,
         dma_channel_2: Channel<CH2>,
         should_record: bool,
-        payload_buffer: &'static mut [u8; 2115],
+        payload_buffer: Option<&'static mut [u8; 2115]>,
     ) -> OnboardFlash {
         OnboardFlash {
             cs,
@@ -344,13 +323,10 @@ impl OnboardFlash {
             current_block_index: 0,
             current_page: Page::new(flash_page_buf),
             prev_page: Page::new(flash_page_buf_2),
-            dma_channel_5: Some(dma_channel_5),
             dma_channel_1: Some(dma_channel_1),
             dma_channel_2: Some(dma_channel_2),
             record_to_flash: should_record,
-            payload_buffer: Some(payload_buffer),
-            transfer: None,
-            address: None,
+            payload_buffer: payload_buffer,
         }
     }
     pub fn init(&mut self) {
@@ -392,7 +368,7 @@ impl OnboardFlash {
                 warn!("Page 1 has data");
             }
         }
-
+        let mut good_block = false;
         for block_index in 0..2048 {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
@@ -404,8 +380,12 @@ impl OnboardFlash {
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
+                    if !good_block && block_index < NUM_RECORDING_BLOCKS - 1 {
+                        self.current_block_index = block_index + 1;
+                    }
                 }
             } else if block_index < NUM_RECORDING_BLOCKS {
+                good_block = true;
                 if !self.current_page.page_is_used() {
                     // This will be the starting block of the next file to be written.
                     if self.last_used_block_index.is_none() && self.first_used_block_index.is_some()
@@ -488,10 +468,10 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_blocks(&mut self) {
-        for block_index in 0..NUM_RECORDING_BLOCKS {
+        'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
-                info!("Skipping erase of bad block {}", block_index);
-                break;
+                // info!("Skipping erase of bad block {}", block_index);
+                continue 'outer;
             }
             if !self.erase_block(block_index).is_ok() {
                 error!("Block erase failed for block {}", block_index);
@@ -501,10 +481,10 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_good_used_blocks(&mut self) {
-        for block_index in 0..NUM_RECORDING_BLOCKS {
+        'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
-                continue;
+                continue 'outer;
             }
             self.read_page(block_index, 0).unwrap();
 
@@ -866,8 +846,8 @@ impl OnboardFlash {
         >,
         Option<[u8; 3]>,
     ) {
-        let b = block_index.unwrap_or(self.current_block_index);
-        let p = page_index.unwrap_or(self.current_page_index);
+        let mut b = block_index.unwrap_or(self.current_block_index);
+        let mut p = page_index.unwrap_or(self.current_page_index);
         if let Some(transfer) = transfer {
             let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
             self.cs.set_high().unwrap();
@@ -892,8 +872,10 @@ impl OnboardFlash {
                     }
                 }
                 if block_index.is_none() && page_index.is_none() {
-                    self.advance_file_cursor(is_last);
+                    self.advance_file_cursor(false);
                 }
+                b = block_index.unwrap_or(self.current_block_index);
+                p = page_index.unwrap_or(self.current_page_index);
             } else {
                 error!("Programming failed");
             }
@@ -949,7 +931,7 @@ impl OnboardFlash {
         let mut transfer = None;
         if self.record_to_flash {
             self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);
-
+            info!("Writing {} to {}:{}", bytes.len() - 1, b, p);
             self.cs.set_low().unwrap();
             let buf = self.payload_buffer.as_mut().unwrap();
 
@@ -1070,6 +1052,8 @@ impl OnboardFlash {
         }
 
         if self.record_to_flash {
+            info!("Writing {} to {}:{}", &bytes[1..].len(), b, p);
+
             self.spi_write(&bytes[1..]);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         }
