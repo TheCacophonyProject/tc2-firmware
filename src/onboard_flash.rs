@@ -361,7 +361,7 @@ impl OnboardFlash {
                 warn!("Page 1 has data");
             }
         }
-
+        let mut good_block = false;
         for block_index in 0..2048 {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
@@ -373,8 +373,12 @@ impl OnboardFlash {
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
+                    if !good_block && block_index < NUM_RECORDING_BLOCKS - 1 {
+                        self.current_block_index = block_index + 1;
+                    }
                 }
             } else if block_index < NUM_RECORDING_BLOCKS {
+                good_block = true;
                 if !self.current_page.page_is_used() {
                     // This will be the starting block of the next file to be written.
                     if self.last_used_block_index.is_none() && self.first_used_block_index.is_some()
@@ -457,10 +461,10 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_blocks(&mut self) {
-        for block_index in 0..NUM_RECORDING_BLOCKS {
+        'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
-                continue;
+                continue 'outer;
             }
             if !self.erase_block(block_index).is_ok() {
                 error!("Block erase failed for block {}", block_index);
@@ -470,10 +474,10 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_good_used_blocks(&mut self) {
-        for block_index in 0..NUM_RECORDING_BLOCKS {
+        'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
-                continue;
+                continue 'outer;
             }
             self.read_page(block_index, 0).unwrap();
 
