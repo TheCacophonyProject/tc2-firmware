@@ -194,6 +194,20 @@ pub fn maybe_offload_flash_storage_and_events(
             }
         }
         if success {
+            if file_count > 0 {
+                pi_spi.enable(flash_storage.free_spi().unwrap(), resets);
+                pi_spi.send_message(
+                    ExtTransferMessage::FinishedFileTransfer,
+                    &[0u8; 0],
+                    0,
+                    dma,
+                    timer,
+                    resets,
+                );
+                if let Some(spi) = pi_spi.disable() {
+                    flash_storage.take_spi(spi, resets, clock_freq.Hz());
+                }
+            }
             info!("Completed file offload, transferred {} files", file_count);
             // TODO: Some validation from the raspberry pi that the transfer completed
             //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.

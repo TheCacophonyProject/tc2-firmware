@@ -163,7 +163,7 @@ fn rosc_frequency_count_hz(clocks: &CLOCKS) -> HertzU32 {
 /// Resets ROSC frequency range and stages drive strength, then increases the frequency range,
 /// drive strength bits, and finally divider in order to try to come close to the desired target
 /// frequency, returning the final measured ROSC frequency attained.
-fn find_target_rosc_frequency(
+pub fn find_target_rosc_frequency(
     rosc: &ROSC,
     clocks: &CLOCKS,
     target_frequency: HertzU32,
@@ -250,7 +250,8 @@ pub fn setup_rosc_as_system_clock(
     let rosc = RingOscillator::new(rosc_peripheral);
 
     // Now initialise the ROSC with the reached frequency and set it as the system clock.
-    let rosc = rosc.initialize_with_freq(measured_rosc_frequency);
+    let rosc: RingOscillator<rp2040_hal::rosc::Enabled> =
+        rosc.initialize_with_freq(measured_rosc_frequency);
 
     let mut clocks = ClocksManager::new(clocks_peripheral);
     clocks
@@ -274,6 +275,7 @@ pub fn setup_rosc_as_system_clock(
 
     // NOTE: PLLs are disabled by default.
     // You may also wish to disable other clocks/peripherals that you don't need.
+
     clocks.usb_clock.disable();
     clocks.gpio_output0_clock.disable();
     clocks.gpio_output1_clock.disable();
@@ -283,4 +285,20 @@ pub fn setup_rosc_as_system_clock(
     clocks.rtc_clock.disable();
 
     (clocks, rosc)
+}
+
+pub fn get_random_number(bits: u16, clock: &RingOscillator<bsp::hal::rosc::Enabled>) -> u64 {
+    let mut out: u64 = 0;
+    for shift in 0..bits {
+        let bit = clock.get_random_bit();
+        info!(
+            "Bit is {} with shift {} makes {}",
+            bit,
+            shift,
+            (bit as u64) << shift
+        );
+        out = out | (bit as u64) << shift;
+        info!("OUt is {}", out);
+    }
+    return out;
 }

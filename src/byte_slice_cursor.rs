@@ -55,6 +55,12 @@ impl<'a> Cursor<'a> {
         self.pos += 8;
         result
     }
+
+    pub fn read_i64(&mut self) -> i64 {
+        let result = LittleEndian::read_i64(&self.inner[self.pos..self.pos + 8]);
+        self.pos += 8;
+        result
+    }
 }
 
 impl<'a> CursorMut<'a> {

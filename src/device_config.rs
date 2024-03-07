@@ -19,6 +19,8 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
+    pub is_audio_device: bool,
+    pub last_offload: i64,
 }
 
 #[derive(PartialEq)]
@@ -48,6 +50,8 @@ impl Default for DeviceConfig {
                 end_recording_time: (false, 0),
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
+                is_audio_device: false,
+                last_offload: 0,
             },
             motion_detection_mask: DetectionMask::new(None),
         }
@@ -93,6 +97,10 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
+
+        let is_audio_device = cursor.read_bool();
+
+        let last_offload = cursor.read_i64();
         let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
         let len_before_mask = cursor.position();
         let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
@@ -115,6 +123,8 @@ impl DeviceConfig {
                     end_recording_time,
                     is_continuous_recorder,
                     use_low_power_mode,
+                    is_audio_device,
+                    last_offload,
                 },
                 motion_detection_mask,
             }),

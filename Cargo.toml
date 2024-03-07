@@ -34,6 +34,7 @@ pcf8563 = "0.1.2"
 
 pio = "0.2.1"
 pio-proc = "0.2.1"
+picorand = "0.1.2"
 
 [features]
 # This is the set of features we enable by default

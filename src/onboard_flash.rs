@@ -931,7 +931,6 @@ impl OnboardFlash {
         let mut transfer = None;
         if self.record_to_flash {
             self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);
-            info!("Writing {} to {}:{}", bytes.len() - 1, b, p);
             self.cs.set_low().unwrap();
             let buf = self.payload_buffer.as_mut().unwrap();
 
@@ -1052,8 +1051,6 @@ impl OnboardFlash {
         }
 
         if self.record_to_flash {
-            info!("Writing {} to {}:{}", &bytes[1..].len(), b, p);
-
             self.spi_write(&bytes[1..]);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         }

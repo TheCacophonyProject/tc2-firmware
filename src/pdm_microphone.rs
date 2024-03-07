@@ -211,7 +211,6 @@ impl PdmMicrophone {
 
         flash_storage.take_spi(spi, resets, self.system_clock_hz);
         flash_storage.init();
-        // flash_storage.erase_all_blocks();
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         // Swap our buffers?
@@ -269,7 +268,8 @@ impl PdmMicrophone {
                         audio_buffer.reset();
                         if leftover.len() > 0 {
                             // only works with this why???? even if i use new variables
-                            timer.delay_us(500);
+                            timer.delay_us(700);
+                            // info!("ANOTHER");
                             let out = audio_buffer.slice_for(leftover.len());
                             filter.filter(leftover, VOLUME, out, true);
                         }
@@ -325,9 +325,7 @@ impl AudioBuffer {
         let time_data = unsafe { u64_to_u16(&timestamp) };
         let mut header: [u16; 4 + 1 + 1] = [0u16; 4 + 1 + 1];
         let u8_time = unsafe { u16_slice_to_u8(time_data) };
-        for b in u8_time {
-            info!("Dt is {}", b);
-        }
+
         header[0] = AUDIO_SHEBANG;
         header[1..1 + time_data.len()].copy_from_slice(&time_data);
 
