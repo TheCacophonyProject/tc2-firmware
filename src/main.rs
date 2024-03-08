@@ -1,3 +1,4 @@
+#![allow(warnings)]
 #![no_std]
 #![no_main]
 #![allow(dead_code)]
@@ -6,6 +7,7 @@ mod attiny_rtc_i2c;
 mod bsp;
 mod byte_slice_cursor;
 mod clock_utils;
+mod core0_audio;
 mod core0_task;
 mod core1_sub_tasks;
 mod core1_task;
@@ -23,13 +25,16 @@ mod rp2040_flash;
 mod sun_times;
 mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
+use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_sub_tasks::maybe_offload_flash_storage_and_events;
+use crate::core1_sub_tasks::{
+    get_existing_device_config_or_config_from_pi_on_initial_handshake,
+    maybe_offload_flash_storage_and_events,
+};
 use crate::core1_task::{core_1_task, wake_raspberry_pi, Core1Pins, Core1Task, SyncedDateTime};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::device_config::{get_naive_datetime, DeviceConfig};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
-use crate::example::test_dma;
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
@@ -40,6 +45,7 @@ use bsp::{
     pac::Peripherals,
 };
 use chrono::{NaiveDate, NaiveDateTime, Timelike};
+use cortex_m::asm::wfe;
 
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
@@ -99,95 +105,6 @@ use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use rp2040_hal::pio::PIOExt;
 use rp2040_hal::rosc::RingOscillator;
 
-use picorand::{PicoRandGenerate, WyRand, RNG};
-use rp2040_hal::Timer;
-
-fn schedule_audio_rec(
-    delay: &mut Delay,
-    synced_date_time: &SyncedDateTime,
-    i2c: &mut SharedI2C,
-    flash_storage: &mut OnboardFlash,
-    mut timer: Timer,
-) {
-    i2c.enable_alarm(delay);
-
-    let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
-    let mut r = rng.generate();
-    let r_max: u16 = 65535u16;
-    let short_chance: u16 = r_max / 4;
-    let short_pause: u64 = 2 * 60;
-    let short_window: u64 = 5 * 60;
-    let long_pause: u64 = 40 * 60;
-    let long_window: u64 = 20 * 60;
-    let mut wake_in = 0u64;
-    if r <= short_chance {
-        wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
-    } else {
-        wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
-    }
-    info!("Scheduling to wake up in {} random was {}", wake_in, r);
-
-    let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
-    i2c.set_wakeup_alarm(&wakeup, delay);
-    let alarm_enabled = i2c.alarm_interrupt_enabled();
-    info!("Wake up alarm interrupt enabled {}", alarm_enabled);
-    let mut event_logger: EventLogger = EventLogger::new(flash_storage);
-
-    if alarm_enabled {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            flash_storage,
-        );
-
-        info!("Ask Attiny to power down rp2040");
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::Rp2040Sleep,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            flash_storage,
-        );
-
-        if let Ok(_) = i2c.tell_attiny_to_power_down_rp2040(delay) {
-            info!("Sleeping");
-        } else {
-            error!("Failed sending sleep request to attiny");
-        }
-    }
-}
-
-fn should_offload_audio_recordings(
-    flash_storage: &mut OnboardFlash,
-    delay: &mut Delay,
-    i2c: &mut SharedI2C,
-    now: NaiveDateTime,
-    last_offload: i64,
-) -> bool {
-    let offload_hour = 10;
-
-    // not woken from alarm
-    let alarm_enabled = i2c.alarm_interrupt_enabled();
-    if !alarm_enabled {
-        return true;
-    }
-    // offloaded in last hour
-    NaiveDateTime::from_timestamp_opt(last_offload, 0);
-    let has_offloaded = (now.timestamp_micros() - last_offload) < 60 * 60 * 1000;
-    if (now.hour() >= offload_hour) && !has_offloaded {
-        return true;
-    }
-
-    // if pi is on
-    if let Ok(pi_is_awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
-        return true;
-    }
-
-    // flash getting full
-    return flash_storage.is_nearly_full();
-}
 #[entry]
 fn main() -> ! {
     // let mut peripherals = pac::Peripherals::take().unwrap();
@@ -276,178 +193,103 @@ fn main() -> ! {
         ),
     > = shared_i2c.free();
     // If we're waking up to make an audio recording, do that.
-    let existing_config = DeviceConfig::load_existing_config_from_flash();
+    let mut existing_config = DeviceConfig::load_existing_config_from_flash();
 
-    let i2c1 = if let Some(existing_config) = existing_config {
-        info!(
-            "Got device config {:?}, {}",
+    if let Some(existing_config) = &existing_config {
+        info!("Existing config {:#?}", existing_config.config());
+    }
+
+    if existing_config.is_none() {
+        // We need to wake up the rpi and get a config
+        if !(wake_raspberry_pi(&mut shared_i2c, &mut delay)) {
+            crate::panic!("Could not wake rpi to get config");
+        }
+    }
+
+    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+
+    // init flash
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
+
+    let mut flash_payload_buf = [0x42u8; 2115];
+    let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
+    let mut flash_storage = OnboardFlash::new(
+        pins.gpio9.into_push_pull_output(),
+        pins.gpio11.into_pull_down_disabled().into_pull_type(),
+        pins.gpio10.into_pull_down_disabled().into_pull_type(),
+        pins.gpio8.into_pull_down_disabled().into_pull_type(),
+        flash_page_buf,
+        flash_page_buf_2,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        true,
+        Some(flash_payload_buf),
+    );
+
+    let mut payload_buf = [0x42u8; 2066];
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+    let mut pi_spi = ExtSpiTransfers::new(
+        pins.gpio12.into_floating_disabled(),
+        pins.gpio13.into_floating_disabled(),
+        pins.gpio14.into_floating_disabled(),
+        pins.gpio15.into_floating_disabled(),
+        pins.gpio5.into_pull_down_input(),
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
+    );
+    let mut peripherals = unsafe { Peripherals::steal() };
+
+    // let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+
+    flash_storage.take_spi(
+        peripherals.SPI1,
+        &mut peripherals.RESETS,
+        system_clock_freq.Hz(),
+    );
+    flash_storage.init();
+    flash_storage.erase_all_blocks();
+    let (device_config, device_config_was_updated) =
+        get_existing_device_config_or_config_from_pi_on_initial_handshake(
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            system_clock_freq.Hz(),
+            1u32, //need to get radiometry and leton serial
+            0,
+            &mut timer,
             existing_config,
-            existing_config.device_name()
         );
-        let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
-        let mut synced_date_time: SyncedDateTime = SyncedDateTime::default();
-        match shared_i2c.get_datetime(&mut delay) {
-            Ok(now) => {
-                synced_date_time.set(get_naive_datetime(now), &timer);
-            }
-            Err(_) => error!("Unable to get DateTime from RTC"),
-        }
+    existing_config = device_config;
+    // flash_storage.free_spi();
 
-        let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-        let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
-        let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
-        let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
-        let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-        let should_record_to_flash = true;
-
-        let mut flash_payload_buf = [0x42u8; 2115];
-        let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
-
-        let mut flash_storage = OnboardFlash::new(
-            pins.gpio9.into_push_pull_output(),
-            pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            pins.gpio10.into_pull_down_disabled().into_pull_type(),
-            pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            flash_page_buf,
-            flash_page_buf_2,
-            dma_channels.ch1,
-            dma_channels.ch2,
-            should_record_to_flash,
-            Some(flash_payload_buf),
-        );
-        let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
-        let mut payload_buf = [0x42u8; 2066];
-        let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-        let mut crc_buf = [0x42u8; 32 + 104];
-        let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-        let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-
-        let mut pi_spi = ExtSpiTransfers::new(
-            pins.gpio12.into_floating_disabled(),
-            pins.gpio13.into_floating_disabled(),
-            pins.gpio14.into_floating_disabled(),
-            pins.gpio15.into_floating_disabled(),
-            pins.gpio5.into_pull_down_input(),
-            dma_channels.ch0,
-            payload_buf,
-            crc_buf,
-            pio0,
-            sm0,
-        );
-        flash_storage.take_spi(
-            peripherals.SPI1,
-            &mut peripherals.RESETS,
-            system_clock_freq.Hz(),
-        );
-        flash_storage.init();
-        if (flash_storage.has_files_to_offload()
-            && should_offload_audio_recordings(
-                &mut flash_storage,
-                &mut delay,
-                &mut shared_i2c,
-                synced_date_time.date_time_utc,
-                existing_config.config().last_offload,
-            ))
-        {
-            if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
-                let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-                if maybe_offload_flash_storage_and_events(
-                    &mut flash_storage,
-                    &mut pi_spi,
-                    &mut peripherals.RESETS,
-                    &mut peripherals.DMA,
-                    system_clock_freq,
-                    &mut shared_i2c,
-                    &mut delay,
-                    &mut timer,
-                    &mut event_logger,
-                    &synced_date_time,
-                ) {
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::OffloadedRecording,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        &mut flash_storage,
-                    );
-                }
-            }
-        }
-        // Try to work out our wakeup reason.  If we're within a recording window, assume that we want
-        // to record thermal video, otherwise make an audio recording and go to sleep.
-
-        // We need a double buffering system of 3 flash pages.
-        // One is the page that is currently being written to by data,
-        // Another is ready to take over when that first buffer is full,
-
-        let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
-        let mut microphone = PdmMicrophone::new(
-            pins.gpio0.into_function().into_pull_type(),
-            pins.gpio1.into_function().into_pull_type(),
-            system_clock_freq.Hz(),
-            pio1,
-            sm1,
-        );
-        let timestamp = synced_date_time.get_timestamp_micros(&timer);
-        let mut peripherals = unsafe { Peripherals::steal() };
-        microphone.record_for_n_seconds(
-            1,
-            dma_channels.ch3,
-            dma_channels.ch4,
-            timer,
-            &mut peripherals.RESETS,
-            peripherals.SPI1,
+    let mut existing_config = existing_config.unwrap();
+    info!(
+        "Existing is audio {}",
+        existing_config.config().is_audio_device
+    );
+    if existing_config.config().is_audio_device {
+        audio_task(
+            i2c1,
             &mut flash_storage,
-            timestamp,
-        );
-
-        let mut payload_buf = [0x42u8; 2066];
-        let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-        let mut crc_buf = [0x42u8; 32 + 104];
-        let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-
-        let pi_spi = ExtSpiTransfers::new(
-            pins.gpio12.into_floating_disabled(),
-            pins.gpio13.into_floating_disabled(),
-            pins.gpio14.into_floating_disabled(),
-            pins.gpio15.into_floating_disabled(),
-            pins.gpio5.into_pull_down_input(),
-            dma_channels.ch0,
-            payload_buf,
-            crc_buf,
-            pio0,
-            sm0,
-        );
-
-        schedule_audio_rec(
+            &mut pi_spi,
+            system_clock_freq,
+            &mut existing_config,
             &mut delay,
-            &synced_date_time,
-            &mut shared_i2c,
-            &mut flash_storage,
-            timer,
+            &mut timer,
         );
-
-        // if maybe_offload_flash_storage_and_events(
-        //     &mut flash_storage,
-        //     &mut pi_spi,
-        //     &mut peripherals.RESETS,
-        //     &mut peripherals.DMA,
-        //     system_clock_freq,
-        //     &mut shared_i2c,
-        //     &mut delay,
-        //     &mut timer,
-        //     &mut event_logger,
-        //     &synced_date_time,
-        // ) {}
-
-        shared_i2c.free()
-    } else {
-        i2c1
-    };
+    }
     loop {
-        cortex_m::asm::wfe();
+        wfe();
     }
     // thermal stuff
     // let lepton_pins = LeptonPins {

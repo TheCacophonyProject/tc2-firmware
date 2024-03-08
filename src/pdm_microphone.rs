@@ -187,7 +187,7 @@ impl PdmMicrophone {
         num_seconds: usize,
         ch3: Channel<CH3>,
         ch4: Channel<CH4>,
-        mut timer: Timer,
+        timer: &mut Timer,
         resets: &mut RESETS,
         spi: SPI1,
         flash_storage: &mut OnboardFlash,

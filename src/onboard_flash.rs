@@ -410,6 +410,10 @@ impl OnboardFlash {
                 }
             }
         }
+        info!(
+            "After scan starting is {}:{}",
+            self.current_block_index, self.current_page_index
+        );
         self.bad_blocks = bad_blocks;
     }
 

@@ -135,7 +135,9 @@ impl DeviceConfig {
             },
         )
     }
-
+    pub fn set_last_offload(&mut self, offload: i64) {
+        self.config_inner.last_offload = offload;
+    }
     pub fn config(&self) -> &DeviceConfigInner {
         &self.config_inner
     }

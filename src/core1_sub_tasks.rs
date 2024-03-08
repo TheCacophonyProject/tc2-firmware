@@ -251,7 +251,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
-        info!("Sending camera connect info {:?}", payload);
         if pi_spi.send_message(
             ExtTransferMessage::CameraConnectInfo,
             &payload,
@@ -264,6 +263,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 // Skip 4 bytes of CRC checking
 
                 let (mut new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
+                info!("Loaded config");
                 let mut new_config_bytes = [0u8; 2400 + 104];
                 new_config_bytes[0..length_used]
                     .copy_from_slice(&device_config[4..4 + length_used]);
@@ -316,6 +316,8 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let slice_to_write = &new_config_bytes[0..length_used + 2400];
+                        info!("Writing {} bytes", slice_to_write.len());
+
                         write_device_config_to_rp2040_flash(slice_to_write);
                         config_was_updated = true;
                     }
