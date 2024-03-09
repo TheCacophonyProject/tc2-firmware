@@ -446,7 +446,6 @@ impl SharedI2C {
                     if num_attempts == 100 {
                         return Err("I2C error to RTC");
                     }
-                    info!("COuldnt get trying again");
                     num_attempts += 1;
                     delay.delay_us(500);
                 }
