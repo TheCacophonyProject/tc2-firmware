@@ -126,7 +126,6 @@ impl SharedI2C {
                 }
             };
         }
-
         shared_i2c
     }
 
@@ -431,7 +430,6 @@ impl SharedI2C {
         loop {
             match self.rtc().get_datetime() {
                 Ok(datetime) => {
-                    info!("Ook checking time");
                     if num_attempts != 0 {
                         info!("Getting datetime took {} attempts", num_attempts);
                     }
@@ -442,7 +440,6 @@ impl SharedI2C {
                     {
                         return Err("Invalid datetime input from RTC");
                     }
-                    info!("Date time gotten is {}", datetime.hours);
                     return Ok(datetime);
                 }
                 Err(pcf8563::Error::I2C(e)) => {

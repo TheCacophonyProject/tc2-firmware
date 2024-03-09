@@ -377,6 +377,7 @@ impl OnboardFlash {
             self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
+                info!("Bad {}", block_index);
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
@@ -411,7 +412,7 @@ impl OnboardFlash {
             }
         }
         info!(
-            "After scan starting is {}:{}",
+            "Page is {}:{}",
             self.current_block_index, self.current_page_index
         );
         self.bad_blocks = bad_blocks;
@@ -472,6 +473,7 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_blocks(&mut self) {
+        info!("Erasing all blocks");
         'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 // info!("Skipping erase of bad block {}", block_index);
@@ -570,6 +572,7 @@ impl OnboardFlash {
             .read_page(self.current_block_index, self.current_page_index)
             .is_ok()
         {
+            info!("Getting file part {}", self.current_block_index);
             self.read_page_from_cache(self.current_block_index);
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
@@ -772,8 +775,7 @@ impl OnboardFlash {
     }
     pub fn spi_write(&mut self, bytes: &[u8]) {
         self.cs.set_low().unwrap();
-        let res = self.spi.as_mut().unwrap().write(bytes).unwrap();
-
+        self.spi.as_mut().unwrap().write(bytes).unwrap();
         self.cs.set_high().unwrap();
     }
 
@@ -865,6 +867,8 @@ impl OnboardFlash {
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
             let status = self.wait_for_ready();
             if !status.program_failed() {
+                self.read_page(b, p);
+                info!("Finishing {}:{}", b, p);
                 if self.first_used_block_index.is_none() {
                     self.first_used_block_index = Some(b);
                 }
@@ -1012,6 +1016,8 @@ impl OnboardFlash {
         // Skip the first byte in the buffer
         let b = block_index.unwrap_or(self.current_block_index);
         let p = page_index.unwrap_or(self.current_page_index);
+        info!("Writing to {}:{}", b, p);
+
         let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);

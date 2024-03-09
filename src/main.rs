@@ -1,4 +1,4 @@
-#![allow(warnings)]
+// #![allow(warnings)]
 #![no_std]
 #![no_main]
 #![allow(dead_code)]
@@ -177,21 +177,7 @@ fn main() -> ! {
         shared_i2c.clear_alarm();
     }
     // shared_i2c.disable_alarm(&mut delay);
-    let i2c1: I2C<
-        pac::I2C1,
-        (
-            rp2040_hal::gpio::Pin<
-                rp2040_hal::gpio::bank0::Gpio6,
-                rp2040_hal::gpio::FunctionI2c,
-                rp2040_hal::gpio::PullDown,
-            >,
-            rp2040_hal::gpio::Pin<
-                rp2040_hal::gpio::bank0::Gpio7,
-                rp2040_hal::gpio::FunctionI2c,
-                rp2040_hal::gpio::PullDown,
-            >,
-        ),
-    > = shared_i2c.free();
+
     // If we're waking up to make an audio recording, do that.
     let mut existing_config = DeviceConfig::load_existing_config_from_flash();
 
@@ -248,15 +234,12 @@ fn main() -> ! {
     );
     let mut peripherals = unsafe { Peripherals::steal() };
 
-    // let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
     flash_storage.take_spi(
         peripherals.SPI1,
         &mut peripherals.RESETS,
         system_clock_freq.Hz(),
     );
     flash_storage.init();
-    flash_storage.erase_all_blocks();
     let (device_config, device_config_was_updated) =
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             &mut flash_storage,
@@ -277,6 +260,22 @@ fn main() -> ! {
         "Existing is audio {}",
         existing_config.config().is_audio_device
     );
+
+    let i2c1: I2C<
+        pac::I2C1,
+        (
+            rp2040_hal::gpio::Pin<
+                rp2040_hal::gpio::bank0::Gpio6,
+                rp2040_hal::gpio::FunctionI2c,
+                rp2040_hal::gpio::PullDown,
+            >,
+            rp2040_hal::gpio::Pin<
+                rp2040_hal::gpio::bank0::Gpio7,
+                rp2040_hal::gpio::FunctionI2c,
+                rp2040_hal::gpio::PullDown,
+            >,
+        ),
+    > = shared_i2c.free();
     if existing_config.config().is_audio_device {
         audio_task(
             i2c1,
@@ -284,8 +283,9 @@ fn main() -> ! {
             &mut pi_spi,
             system_clock_freq,
             &mut existing_config,
-            &mut delay,
             &mut timer,
+            pins.gpio0,
+            pins.gpio1,
         );
     }
     loop {

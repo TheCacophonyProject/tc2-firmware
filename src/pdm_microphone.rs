@@ -208,11 +208,10 @@ impl PdmMicrophone {
             total_samples: SAMPLE_RATE as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
-
-        flash_storage.take_spi(spi, resets, self.system_clock_hz);
-        flash_storage.init();
-
-        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        // f
+        // flash_storage.take_spi(spi, resets, self.system_clock_hz);
+        // flash_storage.init();
+        let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
         // Swap our buffers?
         let use_async: bool = true;
         // Pull out more samples via dma double_buffering.

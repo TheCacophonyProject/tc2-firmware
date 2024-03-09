@@ -1,4 +1,5 @@
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
+use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::device_config::{get_naive_datetime, DeviceConfig};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
@@ -25,110 +26,52 @@ pub fn audio_task(
     pi_spi: &mut ExtSpiTransfers,
     clock_freq: u32,
     existing_config: &mut DeviceConfig,
-    delay: &mut Delay,
     timer: &mut Timer,
+    gpio0: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio0,
+        rp2040_hal::gpio::FunctionNull,
+        rp2040_hal::gpio::PullDown,
+    >,
+    gpio1: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio1,
+        rp2040_hal::gpio::FunctionNull,
+        rp2040_hal::gpio::PullDown,
+    >,
 ) {
-    let mut shared_i2c = SharedI2C::new(i2c_config, delay);
-
+    let core = unsafe { pac::CorePeripherals::steal() };
+    let mut delay = Delay::new(core.SYST, clock_freq);
+    let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
     info!(
         "Got device config {:?}, {}",
         existing_config,
         existing_config.device_name()
     );
 
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-    let sio = Sio::new(peripherals.SIO);
-
-    let mut pins = rp2040_hal::gpio::Pins::new(
-        peripherals.IO_BANK0,
-        peripherals.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut peripherals.RESETS,
-    );
-    // init flash
-    // let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
-    // let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
-    // let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
-    // let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-
-    // let mut flash_payload_buf = [0x42u8; 2115];
-    // let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
-    // let mut flash_storage = OnboardFlash::new(
-    //     pins.gpio9.into_push_pull_output(),
-    //     pins.gpio11.into_pull_down_disabled().into_pull_type(),
-    //     pins.gpio10.into_pull_down_disabled().into_pull_type(),
-    //     pins.gpio8.into_pull_down_disabled().into_pull_type(),
-    //     flash_page_buf,
-    //     flash_page_buf_2,
-    //     dma_channels.ch1,
-    //     dma_channels.ch2,
-    //     true,
-    //     Some(flash_payload_buf),
-    // );
-
-    let mut event_logger: EventLogger = EventLogger::new(flash_storage);
-    event_logger.clear(flash_storage);
-    info!("Made event");
-    // // init spi
-    // let mut payload_buf = [0x42u8; 2066];
-    // let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-    // let mut crc_buf = [0x42u8; 32 + 104];
-    // let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-    // let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-    // let mut pi_spi = ExtSpiTransfers::new(
-    //     pins.gpio12.into_floating_disabled(),
-    //     pins.gpio13.into_floating_disabled(),
-    //     pins.gpio14.into_floating_disabled(),
-    //     pins.gpio15.into_floating_disabled(),
-    //     pins.gpio5.into_pull_down_input(),
-    //     dma_channels.ch0,
-    //     payload_buf,
-    //     crc_buf,
-    //     pio0,
-    //     sm0,
-    // );
-    // flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
-    // flash_storage.init();
-
     let mut synced_date_time: SyncedDateTime = SyncedDateTime::default();
-    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-    if maybe_offload_flash_storage_and_events(
-        flash_storage,
-        pi_spi,
-        &mut peripherals.RESETS,
-        &mut peripherals.DMA,
-        clock_freq,
-        &mut shared_i2c,
-        delay,
-        timer,
-        &mut event_logger,
-        &synced_date_time,
-    ) {
-        info!("Offloaded");
-    }
-    info!("Getting date time");
-    match shared_i2c.get_datetime(delay) {
+    match shared_i2c.get_datetime(&mut delay) {
         Ok(now) => {
             synced_date_time.set(get_naive_datetime(now), &timer);
         }
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
-    info!("Checking to offload");
-    if (flash_storage.has_files_to_offload()
+    // flash_storage.scan();
+    let has_files = flash_storage.has_files_to_offload();
+    info!("Has files?? {}", has_files);
+    let mut event_logger: EventLogger = EventLogger::new(flash_storage);
+    return;
+    if (has_files
         && should_offload_audio_recordings(
             flash_storage,
-            delay,
+            &mut delay,
             &mut shared_i2c,
             synced_date_time.date_time_utc,
             existing_config.config().last_offload,
         ))
     {
-        if wake_raspberry_pi(&mut shared_i2c, delay) {
-            // let dma_channels: rp2040_hal::dma::Channels = peripherals.DMA.split(&mut peripherals.RESETS);
+        info!("WAKING PI");
+        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
+            info!("MAYB OFF");
             if maybe_offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
@@ -136,7 +79,7 @@ pub fn audio_task(
                 &mut peripherals.DMA,
                 clock_freq,
                 &mut shared_i2c,
-                delay,
+                &mut delay,
                 timer,
                 &mut event_logger,
                 &synced_date_time,
@@ -153,15 +96,48 @@ pub fn audio_task(
             }
         }
     }
+    return;
 
-    take_recording(clock_freq, &synced_date_time, flash_storage, timer);
-    schedule_audio_rec(
-        delay,
+    take_recording(
+        clock_freq,
         &synced_date_time,
-        &mut shared_i2c,
         flash_storage,
         timer,
+        gpio0,
+        gpio1,
     );
+    flash_storage.free_spi();
+    // let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+    // if maybe_offload_flash_storage_and_events(
+    //     flash_storage,
+    //     pi_spi,
+    //     &mut peripherals.RESETS,
+    //     &mut peripherals.DMA,
+    //     clock_freq,
+    //     &mut shared_i2c,
+    //     &mut delay,
+    //     timer,
+    //     &mut event_logger,
+    //     &synced_date_time,
+    // ) {
+    //     event_logger.log_event(
+    //         LoggerEvent::new(
+    //             LoggerEventKind::OffloadedRecording,
+    //             synced_date_time.get_timestamp_micros(&timer),
+    //         ),
+    //         flash_storage,
+    //     );
+    //     existing_config.set_last_offload(synced_date_time.date_time_utc.timestamp_millis());
+    //     // flash_storage.write_
+    // }
+    // schedule_audio_rec(
+    //     &mut delay,
+    //     &synced_date_time,
+    //     &mut shared_i2c,
+    //     flash_storage,
+    //     timer,
+    // );
 }
 
 fn take_recording(
@@ -169,22 +145,26 @@ fn take_recording(
     synced_date_time: &SyncedDateTime,
     flash_storage: &mut OnboardFlash,
     timer: &mut Timer,
+    gpio0: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio0,
+        rp2040_hal::gpio::FunctionNull,
+        rp2040_hal::gpio::PullDown,
+    >,
+    gpio1: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio1,
+        rp2040_hal::gpio::FunctionNull,
+        rp2040_hal::gpio::PullDown,
+    >,
 ) {
-    let mut peripherals = unsafe { Peripherals::steal() };
+    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
     let sio = Sio::new(peripherals.SIO);
 
-    let mut pins = rp2040_hal::gpio::Pins::new(
-        peripherals.IO_BANK0,
-        peripherals.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut peripherals.RESETS,
-    );
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut microphone = PdmMicrophone::new(
-        pins.gpio0.into_function().into_pull_type(),
-        pins.gpio1.into_function().into_pull_type(),
+        gpio0.into_function().into_pull_type(),
+        gpio1.into_function().into_pull_type(),
         system_clock_freq.Hz(),
         pio1,
         sm1,
@@ -200,6 +180,9 @@ fn take_recording(
         flash_storage,
         timestamp,
     );
+    // flash_storage.scan();
+    let has_files = flash_storage.has_files_to_offload();
+    info!("Has files?? {}", has_files);
 }
 
 fn schedule_audio_rec(
@@ -225,37 +208,52 @@ fn schedule_audio_rec(
     } else {
         wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
     }
-    info!("Scheduling to wake up in {} random was {}", wake_in, r);
-
+    info!(
+        "Scheduling to wake up in {} seconds random was {}",
+        wake_in, r
+    );
+    info!(
+        "Current time is {}:{}",
+        synced_date_time.date_time_utc.time().hour(),
+        synced_date_time.date_time_utc.time().minute()
+    );
     let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
-    i2c.set_wakeup_alarm(&wakeup, delay);
-    let alarm_enabled = i2c.alarm_interrupt_enabled();
-    info!("Wake up alarm interrupt enabled {}", alarm_enabled);
-    let mut event_logger: EventLogger = EventLogger::new(flash_storage);
+    info!(
+        "Wake up is set to be {}:{}",
+        wakeup.time().hour(),
+        wakeup.time().minute()
+    );
+    if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
+        let alarm_enabled = i2c.alarm_interrupt_enabled();
+        info!("Wake up alarm interrupt enabled {}", alarm_enabled);
+        let mut event_logger: EventLogger = EventLogger::new(flash_storage);
 
-    if alarm_enabled {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            flash_storage,
-        );
+        if alarm_enabled {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
 
-        info!("Ask Attiny to power down rp2040");
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::Rp2040Sleep,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            flash_storage,
-        );
+            info!("Ask Attiny to power down rp2040");
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::Rp2040Sleep,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
 
-        if let Ok(_) = i2c.tell_attiny_to_power_down_rp2040(delay) {
-            info!("Sleeping");
-        } else {
-            error!("Failed sending sleep request to attiny");
+            if let Ok(_) = i2c.tell_attiny_to_power_down_rp2040(delay) {
+                info!("Sleeping");
+            } else {
+                error!("Failed sending sleep request to attiny");
+            }
         }
+    } else {
+        error!("Failed setting wake alarm, can't go to sleep");
     }
 }
 
