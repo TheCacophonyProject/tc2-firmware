@@ -112,7 +112,9 @@ fn main() -> ! {
     // loop {}
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-
+    // loop {
+    // wfe();
+    // }
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
 
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
@@ -121,6 +123,7 @@ fn main() -> ! {
         peripherals.ROSC,
         ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
     );
+
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
     let system_clock_freq = clocks.system_clock.freq().to_Hz();
@@ -173,9 +176,9 @@ fn main() -> ! {
     info!("Got shared i2c");
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
-    if alarm_woke_us {
-        shared_i2c.clear_alarm();
-    }
+    // if alarm_woke_us {
+    //     shared_i2c.clear_alarm();
+    // }
     // shared_i2c.disable_alarm(&mut delay);
 
     // If we're waking up to make an audio recording, do that.
@@ -253,6 +256,13 @@ fn main() -> ! {
             existing_config,
         );
     existing_config = device_config;
+    flash_storage.erase_all_blocks();
+
+    let has_files = flash_storage.has_files_to_offload();
+    info!("Has files?? {}", has_files);
+    loop {
+        wfe();
+    }
     // flash_storage.free_spi();
 
     let mut existing_config = existing_config.unwrap();

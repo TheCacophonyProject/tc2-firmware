@@ -149,7 +149,10 @@ impl SharedI2C {
     }
     fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
         if let Some(config) = self.i2c.take() {
-            self.rtc = Some(PCF8563::new(config))
+            let mut rtc = PCF8563::new(config);
+            // rtc.rtc_init().unwrap();
+            self.rtc = Some(rtc);
+            info!("CREATING RTC");
         }
         self.rtc.as_mut().unwrap()
     }
@@ -470,6 +473,7 @@ impl SharedI2C {
     }
 
     pub fn enable_alarm(&mut self, delay: &mut Delay) {
+        info!("Enable clearing flag");
         self.rtc().clear_alarm_flag().unwrap_or(());
         self.rtc()
             .control_alarm_interrupt(Control::On)
@@ -481,6 +485,7 @@ impl SharedI2C {
     }
 
     pub fn disable_alarm(&mut self, delay: &mut Delay) {
+        info!("Disbale clearinig");
         self.rtc().clear_alarm_flag().unwrap_or(());
         self.rtc()
             .control_alarm_interrupt(Control::Off)
@@ -492,6 +497,14 @@ impl SharedI2C {
     }
 
     pub fn print_alarm_status(&mut self, delay: &mut Delay) {
+        info!(
+            "CLock running: {}",
+            self.rtc().is_clock_running().unwrap_or(false)
+        );
+        info!(
+            "CLock output: {}",
+            self.rtc().is_clkout_enabled().unwrap_or(false)
+        );
         info!(
             "Alarm interrupt enabled: {}",
             self.rtc().is_alarm_interrupt_enabled().unwrap_or(false)
@@ -555,7 +568,36 @@ impl SharedI2C {
             }
         }
     }
-
+    pub fn set_minutes(&mut self, minutes: u8, delay: &mut Delay) -> Result<(), Error> {
+        let mut num_attempts = 0;
+        loop {
+            match self.rtc().set_alarm_minutes(minutes) {
+                Ok(_) => return Ok(()),
+                Err(pcf8563::Error::I2C(e)) => {
+                    if num_attempts == 100 {
+                        return Err(e);
+                    }
+                    num_attempts += 1;
+                    delay.delay_us(500);
+                }
+                Err(pcf8563::Error::InvalidInputData) => {
+                    unreachable!("Should never get here")
+                }
+            }
+        }
+    }
+    pub fn is_alarm_set(&mut self) -> bool {
+        match self.rtc().get_alarm_minutes() {
+            Ok(val) => {
+                info!("Alarm minutes are {}", val);
+                return val > 0;
+            }
+            Err(e) => {
+                info!("Couldn't get alarm minutes, alarm not set?");
+                return false;
+            }
+        }
+    }
     pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
         let mut num_attempts = 0;
         loop {
@@ -576,6 +618,7 @@ impl SharedI2C {
     }
 
     pub fn clear_alarm(&mut self) -> () {
+        info!("Clearing");
         self.rtc().clear_alarm_flag().unwrap_or(())
     }
 

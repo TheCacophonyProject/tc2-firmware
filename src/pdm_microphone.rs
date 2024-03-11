@@ -267,8 +267,7 @@ impl PdmMicrophone {
                         audio_buffer.reset();
                         if leftover.len() > 0 {
                             // only works with this why???? even if i use new variables
-                            timer.delay_us(700);
-                            // info!("ANOTHER");
+                            timer.delay_us(900);
                             let out = audio_buffer.slice_for(leftover.len());
                             filter.filter(leftover, VOLUME, out, true);
                         }

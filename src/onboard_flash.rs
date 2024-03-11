@@ -12,6 +12,7 @@
 // in blocks of a certain size.
 
 use crate::bsp::pac::SPI1;
+use crate::rp2040_flash::PAGE_SIZE;
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
 use cortex_m::singleton;
@@ -282,7 +283,7 @@ pub struct OnboardFlash {
     pub current_block_index: isize,
     pub last_used_block_index: Option<isize>,
     pub first_used_block_index: Option<isize>,
-    pub bad_blocks: [i16; 40],
+    pub bad_blocks: [i16; NUM_RECORDING_BLOCKS as usize],
     pub current_page: Page,
     pub prev_page: Page,
     dma_channel_1: Option<Channel<CH1>>,
@@ -318,7 +319,7 @@ impl OnboardFlash {
             spi: None,
             first_used_block_index: None,
             last_used_block_index: None,
-            bad_blocks: [i16::MAX; 40],
+            bad_blocks: [i16::MAX; NUM_RECORDING_BLOCKS as usize],
             current_page_index: 0,
             current_block_index: 0,
             current_page: Page::new(flash_page_buf),
@@ -354,7 +355,7 @@ impl OnboardFlash {
         self.wait_for_ready();
     }
     pub fn scan(&mut self) {
-        let mut bad_blocks = [i16::MAX; 40];
+        let mut bad_blocks = [i16::MAX; NUM_RECORDING_BLOCKS as usize];
         self.first_used_block_index = None;
         self.last_used_block_index = None;
         self.current_page_index = 0;
@@ -377,7 +378,14 @@ impl OnboardFlash {
             self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
-                info!("Bad {}", block_index);
+                info!("Is bad {}", block_index);
+                // for p in 0..64 {
+                //     info!("Overwriting bad {} {}", block_index, p);
+                //     let address = OnboardFlash::get_address(block_index, p as isize);
+
+                //     self.spi_write(&[255u8; 2051]);
+                //     self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+                // }
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
@@ -397,6 +405,7 @@ impl OnboardFlash {
                         println!("Setting next starting block index {}", block_index);
                     }
                 } else {
+                    info!("Page used ");
                     let address = OnboardFlash::get_address(block_index, 0);
                     if self.first_used_block_index.is_none() {
                         // This is the starting block of the first file stored.
@@ -435,6 +444,7 @@ impl OnboardFlash {
     }
 
     pub fn has_files_to_offload(&self) -> bool {
+        info!("CHecking for files at {}", self.first_used_block_index);
         // When we did our initial scan, did we encounter any used blocks?
         let has_files = self.first_used_block_index.is_some();
         if has_files {
@@ -477,7 +487,8 @@ impl OnboardFlash {
         'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 // info!("Skipping erase of bad block {}", block_index);
-                continue 'outer;
+                // continue 'outer;
+                break;
             }
             if !self.erase_block(block_index).is_ok() {
                 error!("Block erase failed for block {}", block_index);
@@ -572,7 +583,6 @@ impl OnboardFlash {
             .read_page(self.current_block_index, self.current_page_index)
             .is_ok()
         {
-            info!("Getting file part {}", self.current_block_index);
             self.read_page_from_cache(self.current_block_index);
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
@@ -867,8 +877,6 @@ impl OnboardFlash {
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
             let status = self.wait_for_ready();
             if !status.program_failed() {
-                self.read_page(b, p);
-                info!("Finishing {}:{}", b, p);
                 if self.first_used_block_index.is_none() {
                     self.first_used_block_index = Some(b);
                 }

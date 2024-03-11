@@ -7,7 +7,7 @@ use cortex_m::delay::Delay;
 use defmt::{error, info, warn, Format};
 use rp2040_hal::{Sio, Timer};
 
-use crate::core1_sub_tasks::maybe_offload_flash_storage_and_events;
+use crate::core1_sub_tasks::{maybe_offload_events, maybe_offload_flash_storage_and_events};
 use crate::core1_task::{wake_raspberry_pi, SyncedDateTime};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
@@ -46,10 +46,12 @@ pub fn audio_task(
         existing_config,
         existing_config.device_name()
     );
+    shared_i2c.print_alarm_status(&mut delay);
 
     let mut synced_date_time: SyncedDateTime = SyncedDateTime::default();
     match shared_i2c.get_datetime(&mut delay) {
         Ok(now) => {
+            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
             synced_date_time.set(get_naive_datetime(now), &timer);
         }
         Err(_) => error!("Unable to get DateTime from RTC"),
@@ -58,7 +60,19 @@ pub fn audio_task(
     let has_files = flash_storage.has_files_to_offload();
     info!("Has files?? {}", has_files);
     let mut event_logger: EventLogger = EventLogger::new(flash_storage);
-    return;
+    // return;
+    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+    maybe_offload_events(
+        pi_spi,
+        &mut peripherals.RESETS,
+        &mut peripherals.DMA,
+        &mut delay,
+        timer,
+        &mut event_logger,
+        flash_storage,
+        clock_freq,
+    );
     if (has_files
         && should_offload_audio_recordings(
             flash_storage,
@@ -68,7 +82,6 @@ pub fn audio_task(
             existing_config.config().last_offload,
         ))
     {
-        info!("WAKING PI");
         if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
             info!("MAYB OFF");
@@ -96,48 +109,39 @@ pub fn audio_task(
             }
         }
     }
-    return;
+    // return;
+    let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
+    let mut scheduled = shared_i2c.is_alarm_set();
 
-    take_recording(
-        clock_freq,
-        &synced_date_time,
-        flash_storage,
-        timer,
-        gpio0,
-        gpio1,
-    );
-    flash_storage.free_spi();
-    // let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-    // if maybe_offload_flash_storage_and_events(
-    //     flash_storage,
-    //     pi_spi,
-    //     &mut peripherals.RESETS,
-    //     &mut peripherals.DMA,
-    //     clock_freq,
-    //     &mut shared_i2c,
-    //     &mut delay,
-    //     timer,
-    //     &mut event_logger,
-    //     &synced_date_time,
-    // ) {
-    //     event_logger.log_event(
-    //         LoggerEvent::new(
-    //             LoggerEventKind::OffloadedRecording,
-    //             synced_date_time.get_timestamp_micros(&timer),
-    //         ),
-    //         flash_storage,
-    //     );
-    //     existing_config.set_last_offload(synced_date_time.date_time_utc.timestamp_millis());
-    //     // flash_storage.write_
-    // }
-    // schedule_audio_rec(
-    //     &mut delay,
-    //     &synced_date_time,
-    //     &mut shared_i2c,
-    //     flash_storage,
-    //     timer,
-    // );
+    if alarm_triggered || 1 == 1 {
+        info!("Woken by alarm so taking recording");
+        take_recording(
+            clock_freq,
+            &synced_date_time,
+            flash_storage,
+            timer,
+            gpio0,
+            gpio1,
+        );
+        info!("Finished recording");
+        let has_files = flash_storage.has_files_to_offload();
+        info!("Has files?? {}", has_files);
+        shared_i2c.clear_alarm();
+        scheduled = false;
+    }
+    // shared_i2c.set_minutes(0, &mut delay);
+    info!("Alarm is scheduled {}", scheduled);
+    if alarm_triggered || !scheduled {
+        info!("Scheduling new recording");
+        schedule_audio_rec(
+            &mut delay,
+            &synced_date_time,
+            &mut shared_i2c,
+            flash_storage,
+            timer,
+            &mut event_logger,
+        );
+    }
 }
 
 fn take_recording(
@@ -171,7 +175,7 @@ fn take_recording(
     );
     let timestamp = synced_date_time.get_timestamp_micros(&timer);
     microphone.record_for_n_seconds(
-        1,
+        5,
         dma_channels.ch3,
         dma_channels.ch4,
         timer,
@@ -191,6 +195,7 @@ fn schedule_audio_rec(
     i2c: &mut SharedI2C,
     flash_storage: &mut OnboardFlash,
     timer: &mut Timer,
+    event_logger: &mut EventLogger,
 ) {
     i2c.enable_alarm(delay);
 
@@ -212,6 +217,7 @@ fn schedule_audio_rec(
         "Scheduling to wake up in {} seconds random was {}",
         wake_in, r
     );
+    wake_in = 60;
     info!(
         "Current time is {}:{}",
         synced_date_time.date_time_utc.time().hour(),
@@ -226,7 +232,6 @@ fn schedule_audio_rec(
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
         let alarm_enabled = i2c.alarm_interrupt_enabled();
         info!("Wake up alarm interrupt enabled {}", alarm_enabled);
-        let mut event_logger: EventLogger = EventLogger::new(flash_storage);
 
         if alarm_enabled {
             event_logger.log_event(
@@ -267,7 +272,7 @@ fn should_offload_audio_recordings(
     let offload_hour = 10;
 
     // not woken from alarm
-    let alarm_enabled = i2c.alarm_interrupt_enabled();
+    let alarm_enabled: bool = i2c.alarm_interrupt_enabled();
     if !alarm_enabled {
         info!("Offloading because not woken by alarm");
         return true;
