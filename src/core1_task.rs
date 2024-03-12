@@ -90,7 +90,8 @@ pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool 
                         shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true)
                     {
                         if pi_is_awake {
-                            break;
+                            info!("AWAKE AND READY");
+                            return true;
                         } else {
                             // Try to wake it again, just in case it was shutdown behind our backs.
                             let _ = shared_i2c.tell_pi_to_wakeup(delay);

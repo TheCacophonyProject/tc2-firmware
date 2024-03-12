@@ -25,6 +25,9 @@ pub const FLASH_EVENT_LOG_SIZE: u32 = 256 * 4096; // Amount dedicated to user ev
 
 #[inline(never)]
 #[link_section = ".data.ram_func"]
+
+// 2460 bytes
+
 pub fn write_device_config_to_rp2040_flash(data: &[u8]) {
     let addr = FLASH_END - FLASH_USER_SIZE;
     unsafe {
@@ -42,26 +45,3 @@ pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }
 }
-
-// #[inline(never)]
-// #[link_section = ".data.ram_func"]
-// pub fn write_offload_time(offload: i64) {
-//     let addr = FLASH_END - FLASH_USER_SIZE;
-//     unsafe {
-//         cortex_m::interrupt::free(|_cs| {
-//             rom_data::connect_internal_flash();
-//             rom_data::flash_exit_xip();
-//             rom_data::flash_range_erase(addr, SECTOR_SIZE, BLOCK_SIZE, SECTOR_ERASE);
-//             rom_data::flash_range_program(addr, data.as_ptr(), data.len());
-//             rom_data::flash_flush_cache(); // Get the XIP working again
-//             rom_data::flash_enter_cmd_xip(); // Start XIP back up
-//         });
-//     }
-// }
-// pub fn read_offload_rtime() -> i64 {
-//     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
-//     let last_offload = unsafe { core::slice::from_raw_parts(addr as *const i64, 1) };
-//     return last_offload[0];
-// }
-
-// add last offload write and read

@@ -149,10 +149,17 @@ impl SharedI2C {
     }
     fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
         if let Some(config) = self.i2c.take() {
-            let mut rtc = PCF8563::new(config);
+            let mut rtc: PCF8563<
+                I2C<
+                    I2C1,
+                    (
+                        Pin<Gpio6, rp2040_hal::gpio::FunctionI2c, PullDown>,
+                        Pin<Gpio7, rp2040_hal::gpio::FunctionI2c, PullDown>,
+                    ),
+                >,
+            > = PCF8563::new(config);
             // rtc.rtc_init().unwrap();
             self.rtc = Some(rtc);
-            info!("CREATING RTC");
         }
         self.rtc.as_mut().unwrap()
     }
@@ -583,6 +590,17 @@ impl SharedI2C {
                 Err(pcf8563::Error::InvalidInputData) => {
                     unreachable!("Should never get here")
                 }
+            }
+        }
+    }
+    pub fn get_alarm_hours(&mut self) -> u8 {
+        match self.rtc().get_alarm_hours() {
+            Ok(val) => {
+                return val;
+            }
+            Err(e) => {
+                info!("Couldn't get alarm hour, alarm not set?");
+                return 0;
             }
         }
     }

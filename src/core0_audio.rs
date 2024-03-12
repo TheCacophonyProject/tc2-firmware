@@ -48,7 +48,7 @@ pub fn audio_task(
     );
     shared_i2c.print_alarm_status(&mut delay);
 
-    let mut synced_date_time: SyncedDateTime = SyncedDateTime::default();
+    let mut synced_date_time = SyncedDateTime::default();
     match shared_i2c.get_datetime(&mut delay) {
         Ok(now) => {
             info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
@@ -57,22 +57,18 @@ pub fn audio_task(
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
     // flash_storage.scan();
-    let has_files = flash_storage.has_files_to_offload();
-    info!("Has files?? {}", has_files);
     let mut event_logger: EventLogger = EventLogger::new(flash_storage);
-    // return;
-    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-    maybe_offload_events(
-        pi_spi,
-        &mut peripherals.RESETS,
-        &mut peripherals.DMA,
-        &mut delay,
-        timer,
-        &mut event_logger,
+    event_logger.log_event(
+        LoggerEvent::new(
+            LoggerEventKind::Rp2040Woken,
+            synced_date_time.get_timestamp_micros(&timer),
+        ),
         flash_storage,
-        clock_freq,
     );
+
+    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+    let has_files = flash_storage.has_files_to_offload();
+
     if (has_files
         && should_offload_audio_recordings(
             flash_storage,
@@ -109,12 +105,11 @@ pub fn audio_task(
             }
         }
     }
-    // return;
     let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
     let mut scheduled = shared_i2c.is_alarm_set();
 
     if alarm_triggered || 1 == 1 {
-        info!("Woken by alarm so taking recording");
+        info!("Taking rec");
         take_recording(
             clock_freq,
             &synced_date_time,
@@ -123,14 +118,24 @@ pub fn audio_task(
             gpio0,
             gpio1,
         );
-        info!("Finished recording");
-        let has_files = flash_storage.has_files_to_offload();
-        info!("Has files?? {}", has_files);
         shared_i2c.clear_alarm();
         scheduled = false;
+        shared_i2c.set_minutes(0, &mut delay);
     }
+    maybe_offload_events(
+        pi_spi,
+        &mut peripherals.RESETS,
+        &mut peripherals.DMA,
+        &mut delay,
+        timer,
+        &mut event_logger,
+        flash_storage,
+        clock_freq,
+    );
     // shared_i2c.set_minutes(0, &mut delay);
+
     info!("Alarm is scheduled {}", scheduled);
+    info!("Alarm hours is {}", shared_i2c.get_alarm_hours());
     if alarm_triggered || !scheduled {
         info!("Scheduling new recording");
         schedule_audio_rec(
@@ -141,6 +146,21 @@ pub fn audio_task(
             timer,
             &mut event_logger,
         );
+    } else {
+        info!("Ask Attiny to power down rp2040");
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::Rp2040Sleep,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            flash_storage,
+        );
+
+        if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
+            info!("Sleeping");
+        } else {
+            error!("Failed sending sleep request to attiny");
+        }
     }
 }
 
@@ -175,7 +195,7 @@ fn take_recording(
     );
     let timestamp = synced_date_time.get_timestamp_micros(&timer);
     microphone.record_for_n_seconds(
-        5,
+        60,
         dma_channels.ch3,
         dma_channels.ch4,
         timer,
@@ -217,7 +237,6 @@ fn schedule_audio_rec(
         "Scheduling to wake up in {} seconds random was {}",
         wake_in, r
     );
-    wake_in = 60;
     info!(
         "Current time is {}:{}",
         synced_date_time.date_time_utc.time().hour(),

@@ -283,7 +283,7 @@ pub struct OnboardFlash {
     pub current_block_index: isize,
     pub last_used_block_index: Option<isize>,
     pub first_used_block_index: Option<isize>,
-    pub bad_blocks: [i16; NUM_RECORDING_BLOCKS as usize],
+    pub bad_blocks: [i16; 40],
     pub current_page: Page,
     pub prev_page: Page,
     dma_channel_1: Option<Channel<CH1>>,
@@ -319,7 +319,7 @@ impl OnboardFlash {
             spi: None,
             first_used_block_index: None,
             last_used_block_index: None,
-            bad_blocks: [i16::MAX; NUM_RECORDING_BLOCKS as usize],
+            bad_blocks: [i16::MAX; 40],
             current_page_index: 0,
             current_block_index: 0,
             current_page: Page::new(flash_page_buf),
@@ -355,7 +355,7 @@ impl OnboardFlash {
         self.wait_for_ready();
     }
     pub fn scan(&mut self) {
-        let mut bad_blocks = [i16::MAX; NUM_RECORDING_BLOCKS as usize];
+        let mut bad_blocks = [i16::MAX; 40];
         self.first_used_block_index = None;
         self.last_used_block_index = None;
         self.current_page_index = 0;
@@ -378,14 +378,6 @@ impl OnboardFlash {
             self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
-                info!("Is bad {}", block_index);
-                // for p in 0..64 {
-                //     info!("Overwriting bad {} {}", block_index, p);
-                //     let address = OnboardFlash::get_address(block_index, p as isize);
-
-                //     self.spi_write(&[255u8; 2051]);
-                //     self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-                // }
                 if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == i16::MAX) {
                     // Add the bad block to our runtime table.
                     *slot = block_index as i16;
@@ -405,7 +397,6 @@ impl OnboardFlash {
                         println!("Setting next starting block index {}", block_index);
                     }
                 } else {
-                    info!("Page used ");
                     let address = OnboardFlash::get_address(block_index, 0);
                     if self.first_used_block_index.is_none() {
                         // This is the starting block of the first file stored.

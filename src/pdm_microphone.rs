@@ -251,6 +251,7 @@ impl PdmMicrophone {
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
+
                     filter.filter(&payload, VOLUME, out, true);
 
                     if audio_buffer.is_full() {
@@ -258,6 +259,9 @@ impl PdmMicrophone {
                         let data = audio_buffer.as_u8_slice();
 
                         if use_async {
+                            info!("Writing {} size {}", data.len(), data_size);
+                            timer.delay_us(700);
+
                             (transfer, address) = flash_storage.append_file_bytes_async(
                                 data, data_size, false, None, None, transfer, address,
                             );
@@ -267,7 +271,7 @@ impl PdmMicrophone {
                         audio_buffer.reset();
                         if leftover.len() > 0 {
                             // only works with this why???? even if i use new variables
-                            timer.delay_us(900);
+                            timer.delay_us(700);
                             let out = audio_buffer.slice_for(leftover.len());
                             filter.filter(leftover, VOLUME, out, true);
                         }
@@ -286,7 +290,7 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let mut payload = audio_buffer.as_u8_slice();
                         if use_async {
-                            flash_storage.append_file_bytes_async(
+                            (transfer, address) = flash_storage.append_file_bytes_async(
                                 payload, data_size, true, None, None, transfer, address,
                             );
                         } else {
@@ -315,7 +319,7 @@ const AUDIO_SHEBANG: u16 = 1;
 impl AudioBuffer {
     pub const fn new() -> AudioBuffer {
         AudioBuffer {
-            data: [0u16; (512 * 2 + 34)],
+            data: [0xffffu16; (512 * 2 + 34)],
             index: PAGE_COMMAND_ADDRESS,
         }
     }
@@ -335,8 +339,8 @@ impl AudioBuffer {
     pub fn slice_for(&mut self, raw_data_length: usize) -> &mut [u16] {
         let end = self.index + raw_data_length / 8;
         let slice;
-        if end > (USER_BUFFER_LENGTH + PAGE_COMMAND_ADDRESS) {
-            slice = &mut self.data[self.index..USER_BUFFER_LENGTH + PAGE_COMMAND_ADDRESS];
+        if end > USER_BUFFER_LENGTH {
+            slice = &mut self.data[self.index..USER_BUFFER_LENGTH];
         } else {
             slice = &mut self.data[self.index..self.index + raw_data_length / 8];
         }
@@ -345,7 +349,7 @@ impl AudioBuffer {
     }
 
     pub fn is_full(&mut self) -> bool {
-        return self.index == (USER_BUFFER_LENGTH + PAGE_COMMAND_ADDRESS);
+        return self.index == USER_BUFFER_LENGTH;
     }
 
     pub fn reset(&mut self) {

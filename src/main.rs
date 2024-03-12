@@ -250,26 +250,14 @@ fn main() -> ! {
             &mut peripherals.RESETS,
             &mut peripherals.DMA,
             system_clock_freq.Hz(),
-            1u32, //need to get radiometry and leton serial
-            0,
+            23u32, //need to get radiometry and leton serial
+            1,
             &mut timer,
             existing_config,
         );
     existing_config = device_config;
-    flash_storage.erase_all_blocks();
-
-    let has_files = flash_storage.has_files_to_offload();
-    info!("Has files?? {}", has_files);
-    loop {
-        wfe();
-    }
-    // flash_storage.free_spi();
 
     let mut existing_config = existing_config.unwrap();
-    info!(
-        "Existing is audio {}",
-        existing_config.config().is_audio_device
-    );
 
     let i2c1: I2C<
         pac::I2C1,
@@ -298,9 +286,11 @@ fn main() -> ! {
             pins.gpio1,
         );
     }
+
     loop {
         wfe();
     }
+
     // thermal stuff
     // let lepton_pins = LeptonPins {
     //     tx: pins.gpio23.into_function(),
