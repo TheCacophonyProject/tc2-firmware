@@ -145,6 +145,7 @@ fn main() -> ! {
     let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
+    let mut delay = Delay::new(core.SYST, system_clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
 
     // let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
@@ -170,7 +171,7 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
-    let mut delay = Delay::new(core.SYST, system_clock_freq);
+
     info!("Initing shared i2c");
     let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
     info!("Got shared i2c");
@@ -243,21 +244,24 @@ fn main() -> ! {
         system_clock_freq.Hz(),
     );
     flash_storage.init();
-    let (device_config, device_config_was_updated) =
-        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-            &mut flash_storage,
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            system_clock_freq.Hz(),
-            23u32, //need to get radiometry and leton serial
-            1,
-            &mut timer,
-            existing_config,
-        );
-    existing_config = device_config;
+    if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
+        let (device_config, device_config_was_updated) =
+            get_existing_device_config_or_config_from_pi_on_initial_handshake(
+                &mut flash_storage,
+                &mut pi_spi,
+                &mut peripherals.RESETS,
+                &mut peripherals.DMA,
+                system_clock_freq.Hz(),
+                2u32,
+                1,
+                None,
+                &mut timer,
+                existing_config,
+            );
+        existing_config = device_config;
+    }
 
-    let mut existing_config = existing_config.unwrap();
+    let existing_config = existing_config.unwrap();
 
     let i2c1: I2C<
         pac::I2C1,
@@ -274,20 +278,24 @@ fn main() -> ! {
             >,
         ),
     > = shared_i2c.free();
+    watchdog.feed();
     if existing_config.config().is_audio_device {
         audio_task(
             i2c1,
             &mut flash_storage,
             &mut pi_spi,
             system_clock_freq,
-            &mut existing_config,
+            existing_config,
             &mut timer,
             pins.gpio0,
             pins.gpio1,
+            &mut watchdog,
         );
     }
 
     loop {
+        info!("Looping");
+        watchdog.feed();
         wfe();
     }
 

@@ -1,4 +1,7 @@
+use core::ops::DerefMut;
+
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
+use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::device_config::{get_naive_datetime, DeviceConfig};
@@ -7,16 +10,23 @@ use cortex_m::delay::Delay;
 use defmt::{error, info, warn, Format};
 use rp2040_hal::{Sio, Timer};
 
-use crate::core1_sub_tasks::{maybe_offload_events, maybe_offload_flash_storage_and_events};
+use crate::core1_sub_tasks::{
+    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
+    maybe_offload_flash_storage_and_events,
+};
 use crate::core1_task::{wake_raspberry_pi, SyncedDateTime};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::pdm_microphone::PdmMicrophone;
-use fugit::RateExtU32;
-use picorand::{PicoRandGenerate, WyRand, RNG};
-
 use crate::rp2040_flash::write_device_config_to_rp2040_flash;
 use chrono::{NaiveDateTime, Timelike};
+use embedded_hal::prelude::{
+    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
+    _embedded_hal_watchdog_WatchdogEnable,
+};
+use fugit::{ExtU32, RateExtU32};
+
+use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::pio::PIOExt;
 
@@ -25,7 +35,7 @@ pub fn audio_task(
     flash_storage: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
     clock_freq: u32,
-    existing_config: &mut DeviceConfig,
+    device_config: DeviceConfig,
     timer: &mut Timer,
     gpio0: rp2040_hal::gpio::Pin<
         rp2040_hal::gpio::bank0::Gpio0,
@@ -37,14 +47,15 @@ pub fn audio_task(
         rp2040_hal::gpio::FunctionNull,
         rp2040_hal::gpio::PullDown,
     >,
+    watchdog: &mut bsp::hal::Watchdog,
 ) {
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
     info!(
         "Got device config {:?}, {}",
-        existing_config,
-        existing_config.device_name()
+        device_config,
+        device_config.device_name()
     );
     shared_i2c.print_alarm_status(&mut delay);
 
@@ -75,12 +86,13 @@ pub fn audio_task(
             &mut delay,
             &mut shared_i2c,
             synced_date_time.date_time_utc,
-            existing_config.config().last_offload,
+            device_config.config().last_offload,
         ))
     {
+        watchdog.feed();
         if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-            info!("MAYB OFF");
+            watchdog.disable(); //should watch dog go into offload
             if maybe_offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
@@ -100,16 +112,29 @@ pub fn audio_task(
                     ),
                     flash_storage,
                 );
-                existing_config.set_last_offload(synced_date_time.date_time_utc.timestamp_millis());
-                // flash_storage.write_
+
+                let (update_config, device_config_was_updated) =
+                    get_existing_device_config_or_config_from_pi_on_initial_handshake(
+                        flash_storage,
+                        pi_spi,
+                        &mut peripherals.RESETS,
+                        &mut peripherals.DMA,
+                        clock_freq.Hz(),
+                        2u32, //need to get radiometry and leton serial
+                        1,
+                        Some(synced_date_time.date_time_utc.timestamp_millis()),
+                        timer,
+                        Some(device_config),
+                    );
             }
+            watchdog.pause_on_debug(true);
+            watchdog.start(8388607.micros());
         }
     }
     let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
     let mut scheduled = shared_i2c.is_alarm_set();
 
-    if alarm_triggered || 1 == 1 {
-        info!("Taking rec");
+    if alarm_triggered {
         take_recording(
             clock_freq,
             &synced_date_time,
@@ -117,24 +142,16 @@ pub fn audio_task(
             timer,
             gpio0,
             gpio1,
+            watchdog,
         );
         shared_i2c.clear_alarm();
         scheduled = false;
-        shared_i2c.set_minutes(0, &mut delay);
+        if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
+            warn!("Could not clear alarm {}", err);
+        }
     }
-    maybe_offload_events(
-        pi_spi,
-        &mut peripherals.RESETS,
-        &mut peripherals.DMA,
-        &mut delay,
-        timer,
-        &mut event_logger,
-        flash_storage,
-        clock_freq,
-    );
-    // shared_i2c.set_minutes(0, &mut delay);
 
-    info!("Alarm is scheduled {}", scheduled);
+    info!("Alarm scheduled? {}", scheduled);
     info!("Alarm hours is {}", shared_i2c.get_alarm_hours());
     if alarm_triggered || !scheduled {
         info!("Scheduling new recording");
@@ -179,6 +196,7 @@ fn take_recording(
         rp2040_hal::gpio::FunctionNull,
         rp2040_hal::gpio::PullDown,
     >,
+    watchdog: &mut bsp::hal::Watchdog,
 ) {
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
     let sio = Sio::new(peripherals.SIO);
@@ -203,10 +221,8 @@ fn take_recording(
         peripherals.SPI1,
         flash_storage,
         timestamp,
+        watchdog,
     );
-    // flash_storage.scan();
-    let has_files = flash_storage.has_files_to_offload();
-    info!("Has files?? {}", has_files);
 }
 
 fn schedule_audio_rec(

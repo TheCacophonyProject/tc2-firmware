@@ -25,8 +25,13 @@ use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMachine, PIO, SM1};
 use rp2040_hal::Timer;
+
+use embedded_hal::prelude::_embedded_hal_watchdog_Watchdog;
+
 const PDM_DECIMATION: usize = 64;
 const SAMPLE_RATE: usize = 48000;
+
+const WARMUP_CYCLES: usize = 200;
 // actually more like 8125 equates to 800 sr
 struct RecordingStatus {
     total_samples: usize,
@@ -192,15 +197,13 @@ impl PdmMicrophone {
         spi: SPI1,
         flash_storage: &mut OnboardFlash,
         timestamp: u64,
+        watchdog: &mut bsp::hal::Watchdog,
     ) {
         let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
-        info!(
-            "Recording for {} is {}",
-            num_seconds, current_recording.total_samples
-        );
+        info!("Recording for {} seconds ", num_seconds);
         self.enable();
         let mut filter = PDMFilter::new(SAMPLE_RATE as u32);
         filter.init();
@@ -243,10 +246,15 @@ impl PdmMicrophone {
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
                 cycle += 1;
-                if (cycle < 200) {
+                if (cycle < WARMUP_CYCLES) {
                     // get the values initialized so the start of the recording is nice
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     filter.filter(payload, VOLUME, &mut [0u16; 0], false);
+
+                    if cycle % 200 == 0 {
+                        // shouldn't be needed but just incase we increase warmup cycles
+                        watchdog.feed();
+                    }
                 } else {
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     let out = audio_buffer.slice_for(payload.len());
@@ -257,11 +265,9 @@ impl PdmMicrophone {
                     if audio_buffer.is_full() {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
+                        watchdog.feed();
 
                         if use_async {
-                            info!("Writing {} size {}", data.len(), data_size);
-                            timer.delay_us(700);
-
                             (transfer, address) = flash_storage.append_file_bytes_async(
                                 data, data_size, false, None, None, transfer, address,
                             );
@@ -271,7 +277,7 @@ impl PdmMicrophone {
                         audio_buffer.reset();
                         if leftover.len() > 0 {
                             // only works with this why???? even if i use new variables
-                            timer.delay_us(700);
+                            timer.delay_us(500);
                             let out = audio_buffer.slice_for(leftover.len());
                             filter.filter(leftover, VOLUME, out, true);
                         }
@@ -280,6 +286,7 @@ impl PdmMicrophone {
 
                     current_recording.samples_taken += rx_buf.len() * 32;
                     if current_recording.is_complete() {
+                        watchdog.feed();
                         info!(
                             "Recording done counts are {} milis {}  samples {} took {}",
                             (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
@@ -288,7 +295,7 @@ impl PdmMicrophone {
                             current_recording.samples_taken
                         );
                         let data_size = (audio_buffer.index - 2) * 2;
-                        let mut payload = audio_buffer.as_u8_slice();
+                        let payload = audio_buffer.as_u8_slice();
                         if use_async {
                             (transfer, address) = flash_storage.append_file_bytes_async(
                                 payload, data_size, true, None, None, transfer, address,

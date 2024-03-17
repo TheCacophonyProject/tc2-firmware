@@ -1015,7 +1015,6 @@ impl OnboardFlash {
         // Skip the first byte in the buffer
         let b = block_index.unwrap_or(self.current_block_index);
         let p = page_index.unwrap_or(self.current_page_index);
-        info!("Writing to {}:{}", b, p);
 
         let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;

@@ -237,10 +237,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     clock_freq: HertzU32,
     radiometry_enabled: u32,
     camera_serial_number: u32,
+    last_offload: Option<i64>,
     timer: &mut Timer,
     existing_config: Option<DeviceConfig>,
 ) -> (Option<DeviceConfig>, bool) {
-    let mut payload = [0u8; 12];
+    let mut payload = [0u8; 20];
     let mut config_was_updated = false;
     if let Some(free_spi) = flash_storage.free_spi() {
         pi_spi.enable(free_spi, resets);
@@ -248,6 +249,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
         LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
         LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
         LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
+        LittleEndian::write_i64(&mut payload[12..20], last_offload.unwrap_or_default());
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
@@ -316,7 +318,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let slice_to_write = &new_config_bytes[0..length_used + 2400];
-                        info!("Writing {} bytes", slice_to_write.len());
 
                         write_device_config_to_rp2040_flash(slice_to_write);
                         config_was_updated = true;
