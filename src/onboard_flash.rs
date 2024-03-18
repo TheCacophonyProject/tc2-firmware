@@ -265,7 +265,7 @@ pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
 pub struct OnboardFlash {
     pub spi: Option<
         Spi<
-            rp2040_hal::spi::Enabled,
+            Enabled,
             SPI1,
             (
                 Pin<Gpio11, FunctionSpi, PullDown>,
@@ -411,10 +411,6 @@ impl OnboardFlash {
                 }
             }
         }
-        info!(
-            "Page is {}:{}",
-            self.current_block_index, self.current_page_index
-        );
         self.bad_blocks = bad_blocks;
     }
 
@@ -435,7 +431,6 @@ impl OnboardFlash {
     }
 
     pub fn has_files_to_offload(&self) -> bool {
-        info!("CHecking for files at {}", self.first_used_block_index);
         // When we did our initial scan, did we encounter any used blocks?
         let has_files = self.first_used_block_index.is_some();
         if has_files {
@@ -475,11 +470,9 @@ impl OnboardFlash {
 
     pub fn erase_all_blocks(&mut self) {
         'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
-            while self.bad_blocks.contains(&(block_index as i16)) {
+            if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
-                continue 'outer;
-            }
-            if !self.erase_block(block_index).is_ok() {
+            } else if !self.erase_block(block_index).is_ok() {
                 error!("Block erase failed for block {}", block_index);
             }
         }
@@ -488,7 +481,7 @@ impl OnboardFlash {
 
     pub fn erase_all_good_used_blocks(&mut self) {
         'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
-            while self.bad_blocks.contains(&(block_index as i16)) {
+            if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
                 continue 'outer;
             }

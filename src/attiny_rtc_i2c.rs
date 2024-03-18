@@ -149,15 +149,7 @@ impl SharedI2C {
     }
     fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
         if let Some(config) = self.i2c.take() {
-            let mut rtc: PCF8563<
-                I2C<
-                    I2C1,
-                    (
-                        Pin<Gpio6, rp2040_hal::gpio::FunctionI2c, PullDown>,
-                        Pin<Gpio7, rp2040_hal::gpio::FunctionI2c, PullDown>,
-                    ),
-                >,
-            > = PCF8563::new(config);
+            let mut rtc = PCF8563::new(config);
             // rtc.rtc_init().unwrap();
             self.rtc = Some(rtc);
         }
@@ -492,7 +484,6 @@ impl SharedI2C {
     }
 
     pub fn disable_alarm(&mut self, delay: &mut Delay) {
-        info!("Disbale clearinig");
         self.rtc().clear_alarm_flag().unwrap_or(());
         self.rtc()
             .control_alarm_interrupt(Control::Off)
@@ -646,7 +637,6 @@ impl SharedI2C {
     }
 
     pub fn clear_alarm(&mut self) -> () {
-        info!("Clearing");
         self.rtc().clear_alarm_flag().unwrap_or(())
     }
 

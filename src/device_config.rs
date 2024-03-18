@@ -99,7 +99,6 @@ impl DeviceConfig {
         };
 
         let is_audio_device = cursor.read_bool();
-
         let last_offload = cursor.read_i64();
         let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
         let len_before_mask = cursor.position();

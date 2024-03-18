@@ -39,7 +39,6 @@ pub enum ExtTransferMessage {
     BeginAndEndFileTransfer = 0x6,
     GetMotionDetectionMask = 0x7,
     SendLoggerEvent = 0x8,
-    FinishedFileTransfer = 0x9,
 }
 
 // We can store our ping pin here when we enter the ping-back interrupt
@@ -299,83 +298,6 @@ impl ExtSpiTransfers {
         }
     }
 
-    // pub fn begin_audio_message(
-    //     &mut self,
-    //     message_type: ExtTransferMessage,
-    //     payload: &mut [u32],
-    //     crc: u16,
-    //     is_recording: bool,
-    //     dma_peripheral: &mut DMA,
-    //     timer: &mut Timer,
-    // ) -> Option<(
-    //     Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
-    //     u32,
-    //     u32,
-    // )> {
-    //     if self.pio_tx.is_some() {
-    //         // The transfer header contains the transfer type (2x)
-    //         // the number of bytes to read for the payload (2x)
-    //         // the 16 bit crc of the payload (twice)
-
-    //         // It is followed by the payload itself
-    //         let length = payload.len() as u32;
-    //         let is_recording = if is_recording { 1 } else { 0 };
-
-    //         let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
-    //         transfer_header[0] = message_type as u8;
-    //         transfer_header[1] = message_type as u8;
-    //         LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32 * 4u32);
-    //         LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32 * 4u32);
-    //         LittleEndian::write_u16(&mut transfer_header[10..12], is_recording);
-    //         LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
-    //         LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.not());
-    //         LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.not());
-
-    //         let mut actual: [u8; 32 * 4 + 18] = [0; 32 * 4 + 18];
-    //         let payload = unsafe { &u32_slice_to_u8(&payload) };
-    //         actual[..transfer_header.len()].copy_from_slice(&transfer_header);
-
-    //         actual[transfer_header.len()..transfer_header.len() + payload.len()]
-    //             .copy_from_slice(payload);
-    //         loop {
-    //             if !dma_peripheral.ch[DMA_CHANNEL_NUM]
-    //                 .ch_ctrl_trig
-    //                 .read()
-    //                 .busy()
-    //                 .bit_is_set()
-    //             {
-    //                 break;
-    //             }
-    //         }
-    //         let p_s = self.ping(timer, false);
-    //         info!("Sending payload {}", actual);
-
-    //         if p_s {
-    //             let mut config = single_buffer::Config::new(
-    //                 self.dma_channel_0.take().unwrap(),
-    //                 // Does this need to be aligned?  Maybe not.
-    //                 unsafe { u8_slice_to_u32(extend_lifetime(&actual[..])) },
-    //                 self.pio_tx.take().unwrap(),
-    //             );
-    //             config.bswap(true); // DMA peripheral does our swizzling for us.
-    //             let transfer = config.start();
-    //             let start_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
-    //                 .ch_read_addr
-    //                 .read()
-    //                 .bits();
-
-    //             Some((transfer, start_read_address + length, start_read_address))
-    //         } else {
-    //             info!("Returning NOne");
-    //             None
-    //         }
-    //     } else {
-    //         info!("Returning NOne 2");
-
-    //         None
-    //     }
-    // }
-
     pub fn end_message(
         &mut self,
         dma_peripheral: &mut DMA,
@@ -521,17 +443,15 @@ impl ExtSpiTransfers {
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
-
         while !transmit_success {
             if self.ping(timer, true) {
                 finished_transfer = true;
                 let start = timer.get_counter();
-                let mut transfer = single_buffer::Config::new(
+                let transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
                     self.spi.take().unwrap(),
                 );
-                // transfer.bswap(true);
                 let transfer = transfer.start();
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 maybe_abort_dma_transfer(

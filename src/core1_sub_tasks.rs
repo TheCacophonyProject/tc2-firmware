@@ -194,20 +194,6 @@ pub fn maybe_offload_flash_storage_and_events(
             }
         }
         if success {
-            if file_count > 0 {
-                pi_spi.enable(flash_storage.free_spi().unwrap(), resets);
-                pi_spi.send_message(
-                    ExtTransferMessage::FinishedFileTransfer,
-                    &[0u8; 0],
-                    0,
-                    dma,
-                    timer,
-                    resets,
-                );
-                if let Some(spi) = pi_spi.disable() {
-                    flash_storage.take_spi(spi, resets, clock_freq.Hz());
-                }
-            }
             info!("Completed file offload, transferred {} files", file_count);
             // TODO: Some validation from the raspberry pi that the transfer completed
             //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
@@ -265,7 +251,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 // Skip 4 bytes of CRC checking
 
                 let (mut new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
-                info!("Loaded config");
                 let mut new_config_bytes = [0u8; 2400 + 104];
                 new_config_bytes[0..length_used]
                     .copy_from_slice(&device_config[4..4 + length_used]);
@@ -318,7 +303,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let slice_to_write = &new_config_bytes[0..length_used + 2400];
-
                         write_device_config_to_rp2040_flash(slice_to_write);
                         config_was_updated = true;
                     }
