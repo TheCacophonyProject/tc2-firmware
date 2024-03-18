@@ -22,6 +22,7 @@ use crate::FrameBuffer;
 use chrono::NaiveDateTime;
 use core::cell::RefCell;
 use core::ops::Add;
+use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
@@ -47,6 +48,7 @@ pub enum Core1Task {
     StartFileOffload = 0xfa,
     EndFileOffload = 0xfb,
     ReadyToSleep = 0xef,
+    RequestReset = 0xea,
 }
 
 impl Into<u32> for Core1Task {
@@ -305,15 +307,6 @@ pub fn core_1_task(
         info!("There are {} event(s) to offload", event_logger.count());
     }
 
-    if woken_by_alarm {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::Rp2040WokenByAlarm,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-    }
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
     //let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
@@ -353,6 +346,15 @@ pub fn core_1_task(
             &mut timer,
             existing_config,
         );
+    if woken_by_alarm {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::Rp2040WokenByAlarm,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
     if device_config_was_updated {
         event_logger.log_event(
             LoggerEvent::new(
@@ -802,6 +804,19 @@ pub fn core_1_task(
                 logged_flash_storage_nearly_full = true;
             }
             if is_outside_recording_window || flash_storage_nearly_full {
+                if flash_storage_nearly_full
+                    || (is_outside_recording_window && flash_storage.has_files_to_offload())
+                {
+                    // If flash storage is nearly full, or we're now outside the recording window,
+                    // Trigger a restart now via the watchdog timer, so that flash storage will
+                    // be offloaded during the startup sequence.
+                    sio.fifo.write(Core1Task::RequestReset.into());
+                    loop {
+                        // Wait to be reset
+                        nop();
+                    }
+                }
+
                 if !device_config.use_low_power_mode() {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
                     advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
@@ -829,25 +844,15 @@ pub fn core_1_task(
                             );
                             logged_pi_powered_down = true;
                         }
+
                         // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
                         //  and ask for the rp2040 to be put to sleep.
-                        let next_recording_window_start = if flash_storage_nearly_full
-                            || (is_outside_recording_window
-                                && (flash_storage.has_files_to_offload()
-                                    || event_logger.has_events_to_offload()))
-                        {
-                            // If flash storage is nearly full, or we're now outside the recording window,
-                            //  restart in 2 minutes so we can offload files/events
-                            synced_date_time.date_time_utc + chrono::Duration::minutes(2)
+                        let next_recording_window_start = if !dev_mode {
+                            device_config
+                                .next_recording_window_start(&synced_date_time.date_time_utc)
                         } else {
-                            // Otherwise, restart at the start of the next recording window.
-                            if !dev_mode {
-                                device_config
-                                    .next_recording_window_start(&synced_date_time.date_time_utc)
-                            } else {
-                                // In dev mode, we always set the restart alarm for 2 minutes time.
-                                synced_date_time.date_time_utc + chrono::Duration::minutes(2)
-                            }
+                            // In dev mode, we always set the restart alarm for 2 minutes time.
+                            synced_date_time.date_time_utc + chrono::Duration::minutes(2)
                         };
                         shared_i2c.enable_alarm(&mut delay);
                         if let Ok(_) =

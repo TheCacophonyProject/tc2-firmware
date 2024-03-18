@@ -8,6 +8,7 @@ use bsp::hal::rosc::RingOscillator;
 use bsp::hal::sio::SioFifo;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
+use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
@@ -220,7 +221,7 @@ pub fn frame_acquisition_loop(
                                 }
                                 if times_telemetry_revision_stable > 2
                                     && (seen_telemetry_revision[0] != telemetry.revision[0]
-                                    || seen_telemetry_revision[1] != telemetry.revision[1])
+                                        || seen_telemetry_revision[1] != telemetry.revision[1])
                                 {
                                     // We have a misaligned/invalid frame.
                                     warn!("Got misaligned frame header");
@@ -486,6 +487,12 @@ pub fn frame_acquisition_loop(
                         } else if message == Core1Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
+                        } else if message == Core1Task::RequestReset.into() {
+                            watchdog.start(100.micros());
+                            loop {
+                                // Wait until the watchdog timer kills us.
+                                nop();
+                            }
                         }
                     }
                     // if !transferring_prev_frame || recording_started {

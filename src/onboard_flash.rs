@@ -474,7 +474,6 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_blocks(&mut self) {
-        info!("Erasing all blocks");
         'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
