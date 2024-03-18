@@ -165,19 +165,12 @@ impl PdmMicrophone {
     pub fn disable(&mut self) {
         let (sm, tx) = self.state_machine_1_running.take().unwrap();
         sm.stop();
-
         // let rx = self.pio_rx.take().unwrap();
         // let (sm, _program) = sm.uninit(rx, tx);
         // self.pio.uninstall(_program);
 
         self.data_disabled = Some(self.data.take().unwrap().into_function().into_pull_type());
-        self.clk_disabled = Some(
-            self.clk_disabled
-                .take()
-                .unwrap()
-                .into_function()
-                .into_pull_type(),
-        );
+        self.clk_disabled = Some(self.clk.take().unwrap().into_function().into_pull_type());
         // self.state_machine_1_uninit = Some(sm);
     }
 

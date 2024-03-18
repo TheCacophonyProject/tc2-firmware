@@ -64,7 +64,7 @@ use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 9;
+pub const FIRMWARE_VERSION: u32 = 10;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
 // static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 120_000_000;
@@ -280,7 +280,7 @@ fn main() -> ! {
     > = shared_i2c.free();
     watchdog.feed();
     if existing_config.config().is_audio_device {
-        audio_task(
+        return audio_task(
             i2c1,
             &mut flash_storage,
             &mut pi_spi,
@@ -294,8 +294,6 @@ fn main() -> ! {
     }
 
     loop {
-        info!("Looping");
-        watchdog.feed();
         wfe();
     }
 

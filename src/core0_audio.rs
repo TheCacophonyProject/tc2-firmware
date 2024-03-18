@@ -16,9 +16,8 @@ use crate::core1_sub_tasks::{
 };
 use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime};
 use crate::ext_spi_transfers::ExtSpiTransfers;
-use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
+use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
-use crate::rp2040_flash::write_device_config_to_rp2040_flash;
 use chrono::{NaiveDateTime, Timelike};
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
@@ -26,6 +25,7 @@ use embedded_hal::prelude::{
 };
 use fugit::{ExtU32, RateExtU32};
 
+use cortex_m::asm::wfe;
 use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::pio::PIOExt;
@@ -48,22 +48,12 @@ pub fn audio_task(
         rp2040_hal::gpio::PullDown,
     >,
     watchdog: &mut bsp::hal::Watchdog,
-) {
-    let mut logged_told_rpi_to_sleep = false;
-
+) -> ! {
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
     let sio = Sio::new(peripherals.SIO);
 
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
-
-    let mut microphone = PdmMicrophone::new(
-        gpio0.into_function().into_pull_type(),
-        gpio1.into_function().into_pull_type(),
-        clock_freq.Hz(),
-        pio1,
-        sm1,
-    );
 
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
@@ -96,139 +86,157 @@ pub fn audio_task(
         flash_storage,
     );
 
-    loop {
-        let has_files = flash_storage.has_files_to_offload();
-        if (has_files
-            && should_offload_audio_recordings(
-                flash_storage,
-                &mut delay,
-                &mut shared_i2c,
-                synced_date_time.date_time_utc,
-                device_config.config().last_offload,
-            ))
-        {
-            watchdog.feed();
-            if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
-                let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-                watchdog.disable(); //should watch dog go into offload
-                if maybe_offload_flash_storage_and_events(
-                    flash_storage,
-                    pi_spi,
-                    &mut peripherals.RESETS,
-                    &mut peripherals.DMA,
-                    clock_freq,
-                    &mut shared_i2c,
-                    &mut delay,
-                    timer,
-                    &mut event_logger,
-                    &synced_date_time,
-                ) {
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::OffloadedRecording,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        flash_storage,
-                    );
-
-                    let (update_config, device_config_was_updated) =
-                        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-                            flash_storage,
-                            pi_spi,
-                            &mut peripherals.RESETS,
-                            &mut peripherals.DMA,
-                            clock_freq.Hz(),
-                            2u32, //need to get radiometry and leton serial
-                            1,
-                            Some(synced_date_time.date_time_utc.timestamp_millis()),
-                            timer,
-                            Some(device_config),
-                        );
-                    device_config = update_config.unwrap();
-                }
-                watchdog.pause_on_debug(true);
-                watchdog.start(8388607.micros());
-            }
-        }
-        let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
-        let mut scheduled = shared_i2c.is_alarm_set();
-
-        if alarm_triggered || 1 == 1 {
-            let _ = shared_i2c
-                .set_recording_flag(&mut delay, true)
-                .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-            let timestamp = synced_date_time.get_timestamp_micros(&timer);
+    let has_files = flash_storage.has_files_to_offload();
+    if (has_files
+        && should_offload_audio_recordings(
+            flash_storage,
+            &mut delay,
+            &mut shared_i2c,
+            synced_date_time.date_time_utc,
+            device_config.config().last_offload,
+        ))
+    {
+        watchdog.feed();
+        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-            let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-            microphone.record_for_n_seconds(
-                5,
-                dma_channels.ch3,
-                dma_channels.ch4,
-                timer,
+            watchdog.disable(); //should watch dog go into offload
+            if maybe_offload_flash_storage_and_events(
+                flash_storage,
+                pi_spi,
                 &mut peripherals.RESETS,
-                peripherals.SPI1,
-                flash_storage,
-                timestamp,
-                watchdog,
-            );
-            let _ = shared_i2c
-                .set_recording_flag(&mut delay, false)
-                .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
-
-            shared_i2c.clear_alarm();
-            scheduled = false;
-            if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
-                warn!("Could not clear alarm {}", err);
-            }
-        }
-
-        info!("Alarm scheduled? {}", scheduled);
-        info!("Alarm hours is {}", shared_i2c.get_alarm_hours());
-        if alarm_triggered || !scheduled {
-            info!("Scheduling new recording");
-            schedule_audio_rec(
-                &mut delay,
-                &synced_date_time,
+                &mut peripherals.DMA,
+                clock_freq,
                 &mut shared_i2c,
-                flash_storage,
+                &mut delay,
                 timer,
                 &mut event_logger,
-            );
-        }
-        advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
-        if !logged_told_rpi_to_sleep {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToSleep,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
-            logged_told_rpi_to_sleep = true;
-        }
-        delay.delay_ms(1000);
-        if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
-            info!("Ask Attiny to power down rp2040");
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::Rp2040Sleep,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
+                &synced_date_time,
+            ) {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::OffloadedRecording,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
 
-            if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
-                info!("Sleeping");
-            } else {
-                error!("Failed sending sleep request to attiny");
+                let (update_config, device_config_was_updated) =
+                    get_existing_device_config_or_config_from_pi_on_initial_handshake(
+                        flash_storage,
+                        pi_spi,
+                        &mut peripherals.RESETS,
+                        &mut peripherals.DMA,
+                        clock_freq.Hz(),
+                        2u32, //need to get radiometry and leton serial
+                        1,
+                        Some(synced_date_time.date_time_utc.timestamp_millis()),
+                        timer,
+                        Some(device_config),
+                    );
+                device_config = update_config.unwrap();
             }
-        } else {
-            watchdog.feed();
-            delay.delay_ms(5 * 1000);
-            watchdog.feed();
+            watchdog.pause_on_debug(true);
+            watchdog.start(8388607.micros());
         }
+    }
+    let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
+    let mut scheduled = shared_i2c.is_alarm_set();
+
+    if alarm_triggered {
+        let _ = shared_i2c
+            .set_recording_flag(&mut delay, true)
+            .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+        let timestamp = synced_date_time.get_timestamp_micros(&timer);
+        let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+        let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+        let mut microphone = PdmMicrophone::new(
+            gpio0.into_function().into_pull_type(),
+            gpio1.into_function().into_pull_type(),
+            clock_freq.Hz(),
+            pio1,
+            sm1,
+        );
+        microphone.record_for_n_seconds(
+            60,
+            dma_channels.ch3,
+            dma_channels.ch4,
+            timer,
+            &mut peripherals.RESETS,
+            peripherals.SPI1,
+            flash_storage,
+            timestamp,
+            watchdog,
+        );
+        let _ = shared_i2c
+            .set_recording_flag(&mut delay, false)
+            .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+
+        shared_i2c.clear_alarm();
+        scheduled = false;
+        if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
+            warn!("Could not clear alarm {}", err);
+        }
+    }
+    if scheduled {
+        info!(
+            "Recording scheduled for {}:{}",
+            shared_i2c.get_alarm_hours(),
+            shared_i2c.get_alarm_minutes(),
+        );
+    }
+    if alarm_triggered || !scheduled {
+        info!("Scheduling new recording");
+        schedule_audio_rec(
+            &mut delay,
+            &synced_date_time,
+            &mut shared_i2c,
+            flash_storage,
+            timer,
+            &mut event_logger,
+        );
+    }
+    advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+    event_logger.log_event(
+        LoggerEvent::new(
+            LoggerEventKind::ToldRpiToSleep,
+            synced_date_time.get_timestamp_micros(&timer),
+        ),
+        flash_storage,
+    );
+
+    loop {
+        watchdog.feed();
+
+        if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
+            if pi_is_powered_down {
+                info!("Ask Attiny to power down rp2040");
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::Rp2040Sleep,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+
+                if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
+                    info!("Sleeping");
+                } else {
+                    error!("Failed sending sleep request to attiny");
+                }
+            } else {
+                let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
+                if alarm_triggered {
+                    info!("Alarm triggered after taking a recording reseeting rp2040");
+                    loop {
+                        // wait for watchdog to reset rp2040
+                        wfe();
+                    }
+                }
+            }
+        }
+        delay.delay_ms(5 * 1000);
+        watchdog.feed();
     }
 }
 

@@ -477,9 +477,8 @@ impl OnboardFlash {
         info!("Erasing all blocks");
         'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
             while self.bad_blocks.contains(&(block_index as i16)) {
-                // info!("Skipping erase of bad block {}", block_index);
-                // continue 'outer;
-                break;
+                info!("Skipping erase of bad block {}", block_index);
+                continue 'outer;
             }
             if !self.erase_block(block_index).is_ok() {
                 error!("Block erase failed for block {}", block_index);
