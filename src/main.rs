@@ -71,7 +71,6 @@ use rp2040_hal::I2C;
 //  for the agent software.
 pub const FIRMWARE_VERSION: u32 = 10;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
-static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 120_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
@@ -357,6 +356,8 @@ fn main() -> ! {
         watchdog.disable();
         let peripheral_clock_freq = clocks.peripheral_clock.freq();
         {
+            static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
+
             let _ = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
                 core_1_task(
                     frame_buffer_local,
