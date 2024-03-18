@@ -120,17 +120,9 @@ impl PdmMicrophone {
         let clock_divider =
             self.system_clock_hz.to_Hz() as f32 / (SAMPLE_RATE * PDM_DECIMATION * 2) as f32;
 
-        info!(
-            "In {} side {} divider {}",
-            data_pin_id, clk_pin_id, clock_divider
-        );
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
-        info!(
-            "This becomes {} {}",
-            clock_divider as u16,
-            clock_divider_fractional / 255
-        );
+
         info!(
             " Mic CLock speed {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0
@@ -172,9 +164,11 @@ impl PdmMicrophone {
     }
     pub fn disable(&mut self) {
         let (sm, tx) = self.state_machine_1_running.take().unwrap();
-        let rx = self.pio_rx.take().unwrap();
-        let (sm, _program) = sm.uninit(rx, tx);
-        self.pio.uninstall(_program);
+        sm.stop();
+
+        // let rx = self.pio_rx.take().unwrap();
+        // let (sm, _program) = sm.uninit(rx, tx);
+        // self.pio.uninstall(_program);
 
         self.data_disabled = Some(self.data.take().unwrap().into_function().into_pull_type());
         self.clk_disabled = Some(
@@ -184,7 +178,7 @@ impl PdmMicrophone {
                 .into_function()
                 .into_pull_type(),
         );
-        self.state_machine_1_uninit = Some(sm);
+        // self.state_machine_1_uninit = Some(sm);
     }
 
     pub fn record_for_n_seconds(
@@ -220,14 +214,15 @@ impl PdmMicrophone {
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
+
         if let Some(pio_rx) = self.pio_rx.take() {
             let start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
             // Chain some buffers together for continuous transfers
             let b_0 = singleton!(: [u32; 512] = [0;512]).unwrap();
             let b_1 = singleton!(: [u32; 512] =  [0;512]).unwrap();
+
             let config = double_buffer::Config::new((ch3, ch4), pio_rx, b_0);
             let rx_transfer = config.start();
-            // double_buffer::Config::new((ch3, ch4), pio_rx, b_0).start();
             let mut rx_transfer = rx_transfer.write_next(b_1);
             let mut cycle = 0;
             let mut audio_buffer = AudioBuffer::new();
@@ -259,10 +254,10 @@ impl PdmMicrophone {
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
-
                     filter.filter(&payload, VOLUME, out, true);
 
                     if audio_buffer.is_full() {
+                        // timer.delay_us(500);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
@@ -277,8 +272,10 @@ impl PdmMicrophone {
                         audio_buffer.reset();
                         if leftover.len() > 0 {
                             // only works with this why???? even if i use new variables
-                            timer.delay_us(500);
+                            timer.delay_us(700);
                             let out = audio_buffer.slice_for(leftover.len());
+                            // info!("Filtering leftover {} into {}", leftover.len(), out.len());
+
                             filter.filter(leftover, VOLUME, out, true);
                         }
                         // break;
@@ -308,7 +305,7 @@ impl PdmMicrophone {
                 }
                 rx_transfer = next_rx_transfer.write_next(rx_buf);
             }
-            // TODO: Uninstall pio_rx program etc.
+            self.disable();
         }
     }
 }

@@ -607,7 +607,6 @@ impl SharedI2C {
     pub fn is_alarm_set(&mut self) -> bool {
         match self.rtc().get_alarm_minutes() {
             Ok(val) => {
-                info!("Alarm minutes are {}", val);
                 return val > 0;
             }
             Err(e) => {
