@@ -181,7 +181,7 @@ impl EventLogger {
     }
 
     pub fn has_events_to_offload(&self) -> bool {
-        self.next_event_index.is_some_and(|index| index != 0)
+        self.count() != 0
     }
 
     pub fn clear(&mut self, flash_storage: &mut OnboardFlash) {

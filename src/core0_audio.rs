@@ -76,30 +76,41 @@ pub fn audio_task(
         }
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
-    // flash_storage.scan();
     let mut event_logger: EventLogger = EventLogger::new(flash_storage);
-    event_logger.log_event(
-        LoggerEvent::new(
-            LoggerEventKind::Rp2040Woken,
-            synced_date_time.get_timestamp_micros(&timer),
-        ),
+    // if event_logger.has_events_to_offload() {
+    //     if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
+    //         if pi_is_awake {
+    //             maybe_offload_events(
+    //                 pi_spi,
+    //                 &mut peripherals.RESETS,
+    //                 &mut peripherals.DMA,
+    //                 &mut delay,
+    //                 timer,
+    //                 &mut event_logger,
+    //                 flash_storage,
+    //                 clock_freq,
+    //             )
+    //         }
+    //     }
+    // }
+    // event_logger.log_event(
+    //     LoggerEvent::new(
+    //         LoggerEventKind::Rp2040Woken,
+    //         synced_date_time.get_timestamp_micros(&timer),
+    //     ),
+    //     flash_storage,
+    // );
+    if (should_offload_audio_recordings(
         flash_storage,
-    );
-
-    let has_files = flash_storage.has_files_to_offload();
-    if (has_files
-        && should_offload_audio_recordings(
-            flash_storage,
-            &mut delay,
-            &mut shared_i2c,
-            synced_date_time.date_time_utc,
-            device_config.config().last_offload,
-        ))
-    {
+        &mut delay,
+        &mut shared_i2c,
+        synced_date_time.date_time_utc,
+        device_config.config().last_offload,
+    )) {
         watchdog.feed();
         if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-            watchdog.disable(); //should watch dog go into offload
+            // watchdog.disable(); //should watch dog go into offload
             if maybe_offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
@@ -135,43 +146,46 @@ pub fn audio_task(
                     );
                 device_config = update_config.unwrap();
             }
-            watchdog.pause_on_debug(true);
-            watchdog.start(8388607.micros());
+            // watchdog.pause_on_debug(true);
+            // watchdog.start(8388607.micros());
         }
     }
     let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
     let mut scheduled = shared_i2c.is_alarm_set();
 
     if alarm_triggered {
-        let _ = shared_i2c
-            .set_recording_flag(&mut delay, true)
-            .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-        let timestamp = synced_date_time.get_timestamp_micros(&timer);
-        let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+        //should of already offloaded but extra safety check
+        if !flash_storage.is_too_full_for_audio() {
+            let _ = shared_i2c
+                .set_recording_flag(&mut delay, true)
+                .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+            let timestamp = synced_date_time.get_timestamp_micros(&timer);
+            let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
-        let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-        let mut microphone = PdmMicrophone::new(
-            gpio0.into_function().into_pull_type(),
-            gpio1.into_function().into_pull_type(),
-            clock_freq.Hz(),
-            pio1,
-            sm1,
-        );
-        microphone.record_for_n_seconds(
-            60,
-            dma_channels.ch3,
-            dma_channels.ch4,
-            timer,
-            &mut peripherals.RESETS,
-            peripherals.SPI1,
-            flash_storage,
-            timestamp,
-            watchdog,
-        );
-        let _ = shared_i2c
-            .set_recording_flag(&mut delay, false)
-            .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+            let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
+            let mut microphone = PdmMicrophone::new(
+                gpio0.into_function().into_pull_type(),
+                gpio1.into_function().into_pull_type(),
+                clock_freq.Hz(),
+                pio1,
+                sm1,
+            );
+            microphone.record_for_n_seconds(
+                5,
+                dma_channels.ch3,
+                dma_channels.ch4,
+                timer,
+                &mut peripherals.RESETS,
+                peripherals.SPI1,
+                flash_storage,
+                timestamp,
+                watchdog,
+            );
+            let _ = shared_i2c
+                .set_recording_flag(&mut delay, false)
+                .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+        }
         shared_i2c.clear_alarm();
         scheduled = false;
         if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
@@ -195,17 +209,25 @@ pub fn audio_task(
             timer,
             &mut event_logger,
         );
+        info!(
+            "Recording scheduled for {}:{}",
+            shared_i2c.get_alarm_hours(),
+            shared_i2c.get_alarm_minutes(),
+        );
     }
-    advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
-    event_logger.log_event(
-        LoggerEvent::new(
-            LoggerEventKind::ToldRpiToSleep,
-            synced_date_time.get_timestamp_micros(&timer),
-        ),
-        flash_storage,
-    );
-
+    let mut logged_power_down = false;
     loop {
+        advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+        if !logged_power_down {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToSleep,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
+            logged_power_down = true;
+        }
         watchdog.feed();
 
         if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
@@ -273,6 +295,7 @@ fn schedule_audio_rec(
         synced_date_time.date_time_utc.time().hour(),
         synced_date_time.date_time_utc.time().minute()
     );
+    // let wake_in = 120;
     let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
     info!(
         "Wake up is set to be {}:{}",
@@ -283,6 +306,11 @@ fn schedule_audio_rec(
         let alarm_enabled = i2c.alarm_interrupt_enabled();
         info!("Wake up alarm interrupt enabled {}", alarm_enabled);
 
+        info!(
+            "Recording scheduled for {}:{}",
+            i2c.get_alarm_hours(),
+            i2c.get_alarm_minutes(),
+        );
         if alarm_enabled {
             event_logger.log_event(
                 LoggerEvent::new(
@@ -326,13 +354,14 @@ fn should_offload_audio_recordings(
 
     // if pi is on
     if let Ok(pi_is_awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
-        info!("Offloading because pi is awake");
-        return true;
+        if pi_is_awake {
+            info!("Offloading because pi is awake");
+            return true;
+        }
     }
 
     // flash getting full
-    let full = flash_storage.is_nearly_full();
-    if full {
+    if flash_storage.is_too_full_for_audio() {
         info!("Offloading as flash is nearly full");
         return true;
     }

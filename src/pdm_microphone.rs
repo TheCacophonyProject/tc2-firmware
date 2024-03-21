@@ -30,6 +30,7 @@ use embedded_hal::prelude::_embedded_hal_watchdog_Watchdog;
 
 const PDM_DECIMATION: usize = 64;
 const SAMPLE_RATE: usize = 48000;
+const WARMUP_RATE: usize = 28000;
 
 const WARMUP_CYCLES: usize = 200;
 // actually more like 8125 equates to 800 sr
@@ -118,7 +119,7 @@ impl PdmMicrophone {
         // let clock_divider = self.system_clock_hz.to_MHz() as f32 / (4.0 * target_speed);
         //
         let clock_divider =
-            self.system_clock_hz.to_Hz() as f32 / (SAMPLE_RATE * PDM_DECIMATION * 2) as f32;
+            self.system_clock_hz.to_Hz() as f32 / (WARMUP_RATE * PDM_DECIMATION * 2) as f32;
 
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
@@ -149,19 +150,24 @@ impl PdmMicrophone {
         // Start receiving data via DMA double buffer, and start streaming/writing out to disk, so
         // will need to have access to the fs
     }
-    pub fn alter_speed(&mut self, target_speed: f32) -> u32 {
+    pub fn alter_samplerate(&mut self, sample_rate: usize) {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
-        let clock_divider = self.system_clock_hz.to_MHz() as f32 / (4.0 * target_speed);
+
+        let clock_divider =
+            self.system_clock_hz.to_Hz() as f32 / (sample_rate * PDM_DECIMATION * 2) as f32;
+
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
+
         sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
         info!(
             "Altered Mic CLock speed {} divider {}",
-            self.system_clock_hz.to_MHz() as f32 / clock_divider / 4.0,
+            self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
             clock_divider
         );
-        return (self.system_clock_hz.to_Hz() as f32 / clock_divider / 4.0 / 64.0) as u32;
+        self.state_machine_1_running = Some((sm, tx));
     }
+
     pub fn disable(&mut self) {
         let (sm, tx) = self.state_machine_1_running.take().unwrap();
         sm.stop();
@@ -194,6 +200,9 @@ impl PdmMicrophone {
         self.enable();
         let mut filter = PDMFilter::new(SAMPLE_RATE as u32);
         filter.init();
+        watchdog.feed();
+        timer.delay_ms(1000); //how long to warm up??
+        self.alter_samplerate(SAMPLE_RATE);
         let mut current_recording = RecordingStatus {
             total_samples: SAMPLE_RATE as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
@@ -256,11 +265,25 @@ impl PdmMicrophone {
                         watchdog.feed();
 
                         if use_async {
-                            (transfer, address) = flash_storage.append_file_bytes_async(
+                            match flash_storage.append_file_bytes_async(
                                 data, data_size, false, None, None, transfer, address,
-                            );
+                            ) {
+                                Ok((new_t, new_a)) => {
+                                    transfer = new_t;
+                                    address = new_a;
+                                }
+                                Err(e) => {
+                                    warn!("Error writing bytes to flash ending rec early {}", e);
+                                    break;
+                                }
+                            }
                         } else {
-                            flash_storage.append_file_bytes(data, data_size, false, None, None);
+                            if let Err(e) =
+                                flash_storage.append_file_bytes(data, data_size, false, None, None)
+                            {
+                                warn!("Error writing bytes to flash ending rec early {}", e);
+                                break;
+                            }
                         }
                         audio_buffer.reset();
                         if leftover.len() > 0 {
@@ -287,11 +310,25 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if use_async {
-                            (transfer, address) = flash_storage.append_file_bytes_async(
+                            match flash_storage.append_file_bytes_async(
                                 payload, data_size, true, None, None, transfer, address,
-                            );
+                            ) {
+                                Ok((new_t, new_a)) => {
+                                    transfer = new_t;
+                                    address = new_a;
+                                }
+                                Err(e) => {
+                                    warn!("Error writing bytes to flash ending rec early {}", e);
+                                    break;
+                                }
+                            }
                         } else {
-                            flash_storage.append_file_bytes(payload, data_size, true, None, None);
+                            if let Err(e) = flash_storage
+                                .append_file_bytes(payload, data_size, true, None, None)
+                            {
+                                warn!("Error writing bytes to flash ending rec early {}", e);
+                                break;
+                            }
                         }
                         break;
                     };

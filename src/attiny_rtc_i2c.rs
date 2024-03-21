@@ -584,6 +584,28 @@ impl SharedI2C {
             }
         }
     }
+    pub fn set_alarm_hours(&mut self, hours: u8) {
+        match self.rtc().set_alarm_hours(hours) {
+            Ok(val) => {
+                return;
+            }
+            Err(e) => {
+                info!("Couldn't get alarm hour, alarm not set?");
+                return;
+            }
+        }
+    }
+    pub fn set_alarm_minutes(&mut self, minutes: u8) {
+        match self.rtc().set_alarm_minutes(minutes) {
+            Ok(val) => {
+                return;
+            }
+            Err(e) => {
+                info!("Couldn't get alarm hour, alarm not set?");
+                return;
+            }
+        }
+    }
     pub fn get_alarm_hours(&mut self) -> u8 {
         match self.rtc().get_alarm_hours() {
             Ok(val) => {

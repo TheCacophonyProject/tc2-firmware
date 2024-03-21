@@ -461,6 +461,11 @@ impl OnboardFlash {
         // Whether or not we should start any new recordings, or should offload.
         self.current_block_index > (NUM_RECORDING_BLOCKS - 256)
     }
+    pub fn is_too_full_for_audio(&self) -> bool {
+        // Lets us know when we should end the current recording.
+        // Need about 43 blocks for a 60 seconds recording at 48khz
+        self.current_block_index > (NUM_RECORDING_BLOCKS - 44)
+    }
 
     pub fn is_nearly_full(&self) -> bool {
         // Lets us know when we should end the current recording.
@@ -824,26 +829,29 @@ impl OnboardFlash {
             >,
         >,
         address: Option<[u8; 3]>,
-    ) -> (
-        Option<
-            bidirectional::Transfer<
-                Channel<CH1>,
-                Channel<CH2>,
-                &'static mut [u8; 2115],
-                Spi<
-                    Enabled,
-                    SPI1,
-                    (
-                        Pin<Gpio11, FunctionSpi, PullDown>,
-                        Pin<Gpio8, FunctionSpi, PullDown>,
-                        Pin<Gpio10, FunctionSpi, PullDown>,
-                    ),
+    ) -> Result<
+        (
+            Option<
+                bidirectional::Transfer<
+                    Channel<CH1>,
+                    Channel<CH2>,
+                    &'static mut [u8; 2115],
+                    Spi<
+                        Enabled,
+                        SPI1,
+                        (
+                            Pin<Gpio11, FunctionSpi, PullDown>,
+                            Pin<Gpio8, FunctionSpi, PullDown>,
+                            Pin<Gpio10, FunctionSpi, PullDown>,
+                        ),
+                    >,
+                    &'static mut [u8; 2115],
                 >,
-                &'static mut [u8; 2115],
             >,
-        >,
-        Option<[u8; 3]>,
-    ) {
+            Option<[u8; 3]>,
+        ),
+        &str,
+    > {
         let mut b = block_index.unwrap_or(self.current_block_index);
         let mut p = page_index.unwrap_or(self.current_page_index);
         if let Some(transfer) = transfer {
@@ -878,6 +886,9 @@ impl OnboardFlash {
                 error!("Programming failed");
             }
             if !status.erase_failed() {}
+        }
+        if b > NUM_RECORDING_BLOCKS {
+            return Err(&"Flash full");
         }
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
@@ -984,11 +995,11 @@ impl OnboardFlash {
                     // Re-write this page
                     // Erase and mark the earlier block as bad.
                 }
-                return (None, None);
+                return Ok((None, None));
             }
         }
 
-        return (transfer, address);
+        return Ok((transfer, address));
     }
     pub fn append_file_bytes(
         &mut self,
@@ -997,7 +1008,7 @@ impl OnboardFlash {
         is_last: bool,
         block_index: Option<isize>,
         page_index: Option<isize>,
-    ) {
+    ) -> Result<(), &str> {
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
@@ -1006,7 +1017,9 @@ impl OnboardFlash {
         // Skip the first byte in the buffer
         let b = block_index.unwrap_or(self.current_block_index);
         let p = page_index.unwrap_or(self.current_page_index);
-
+        if b > NUM_RECORDING_BLOCKS {
+            return Err(&"Flash full");
+        }
         let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
@@ -1081,6 +1094,7 @@ impl OnboardFlash {
             // Re-write this page
             // Erase and mark the earlier block as bad.
         }
+        return Ok(());
     }
 
     pub fn write_event(
