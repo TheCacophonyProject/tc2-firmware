@@ -472,7 +472,6 @@ impl SharedI2C {
     }
 
     pub fn enable_alarm(&mut self, delay: &mut Delay) {
-        info!("Enable clearing flag");
         self.rtc().clear_alarm_flag().unwrap_or(());
         self.rtc()
             .control_alarm_interrupt(Control::On)
@@ -629,6 +628,7 @@ impl SharedI2C {
         }
     }
     pub fn is_alarm_set(&mut self) -> bool {
+        // must be a better way
         match self.rtc().get_alarm_minutes() {
             Ok(val) => {
                 return val > 0;

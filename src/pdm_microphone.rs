@@ -1,7 +1,6 @@
 use core::time;
 
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
-use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::bsp::pac::RESETS;
@@ -13,6 +12,7 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::utils::{
     u16_slice_to_u8, u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16, u8_slice_to_u16,
 };
+use crate::{bsp, onboard_flash};
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use cortex_m::singleton;
@@ -231,13 +231,24 @@ impl PdmMicrophone {
             audio_buffer.init(timestamp, SAMPLE_RATE as u16);
             let start_block_index = flash_storage.start_file(0);
             loop {
-                if rx_transfer.is_done() {
+                if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
                     warn!("Couldn't keep up with data discarding recording");
-                    flash_storage.erase_block_range(
-                        start_block_index,
-                        flash_storage.last_used_block_index.unwrap(),
-                    );
+                    if use_async && transfer.is_some() {
+                        flash_storage.finish_transfer(
+                            None,
+                            None,
+                            transfer.take().unwrap(),
+                            address.take().unwrap(),
+                            true,
+                        );
+                    }
+                    if flash_storage.last_used_block_index.is_some() {
+                        flash_storage.erase_block_range(
+                            start_block_index,
+                            flash_storage.last_used_block_index.unwrap(),
+                        );
+                    }
                     break;
                 }
                 // When a transfer is done we immediately enqueue the buffers again.

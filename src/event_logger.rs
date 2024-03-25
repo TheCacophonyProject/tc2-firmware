@@ -27,7 +27,7 @@ pub enum LoggerEventKind {
     Rp2040WokenByAlarm,
     RtcCommError,
     AttinyCommError,
-    Rp2040Woken,
+    Rp2040MissedAudioAlarm,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -53,7 +53,7 @@ impl Into<u16> for LoggerEventKind {
             Rp2040WokenByAlarm => 17,
             RtcCommError => 18,
             AttinyCommError => 19,
-            Rp2040Woken => 20,
+            Rp2040MissedAudioAlarm => 20,
         }
     }
 }
@@ -83,7 +83,7 @@ impl TryFrom<u16> for LoggerEventKind {
             17 => Ok(Rp2040WokenByAlarm),
             18 => Ok(RtcCommError),
             19 => Ok(AttinyCommError),
-            20 => Ok(Rp2040Woken),
+            20 => Ok(Rp2040MissedAudioAlarm),
             _ => Err(()),
         }
     }
@@ -232,6 +232,10 @@ impl EventLogger {
         flash_storage: &mut OnboardFlash,
     ) -> Option<[u8; 18]> {
         Self::get_event_at_index(index, flash_storage)
+    }
+
+    pub fn is_nearly_full(&self) -> bool {
+        self.count() >= (MAX_EVENTS_IN_LOGGER - 3)
     }
 
     pub fn log_event(&mut self, event: LoggerEvent, flash_storage: &mut OnboardFlash) {

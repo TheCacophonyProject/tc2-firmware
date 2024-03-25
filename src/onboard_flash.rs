@@ -528,11 +528,9 @@ impl OnboardFlash {
         end_block_index: isize,
     ) -> Result<(), &str> {
         for block_index in start_block_index..end_block_index {
-            while self.bad_blocks.contains(&(block_index as i16)) {
+            if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
-                continue;
-            }
-            if !self.erase_block(block_index).is_ok() {
+            } else if !self.erase_block(block_index).is_ok() {
                 error!("Block erase failed for block {}", block_index);
                 return Err("Block erase failed");
             }
@@ -803,6 +801,57 @@ impl OnboardFlash {
         );
         self.current_block_index
     }
+    pub fn finish_transfer(
+        &mut self,
+        block_index: Option<isize>,
+        page_index: Option<isize>,
+        transfer: bidirectional::Transfer<
+            Channel<CH1>,
+            Channel<CH2>,
+            &'static mut [u8; 2115],
+            Spi<
+                Enabled,
+                SPI1,
+                (
+                    Pin<Gpio11, FunctionSpi, PullDown>,
+                    Pin<Gpio8, FunctionSpi, PullDown>,
+                    Pin<Gpio10, FunctionSpi, PullDown>,
+                ),
+            >,
+            &'static mut [u8; 2115],
+        >,
+        address: [u8; 3],
+        is_last: bool,
+    ) -> OnboardFlashStatus {
+        let mut b = block_index.unwrap_or(self.current_block_index);
+        let mut p = page_index.unwrap_or(self.current_page_index);
+        let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
+        self.cs.set_high().unwrap();
+        self.payload_buffer = Some(tx_buf);
+        self.dma_channel_1 = Some(r_ch1);
+        self.dma_channel_2 = Some(r_ch2);
+        self.spi = Some(spi);
+        self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+        let status = self.wait_for_ready();
+        if !status.program_failed() {
+            if self.first_used_block_index.is_none() {
+                self.first_used_block_index = Some(b);
+            }
+            if self.last_used_block_index.is_none() {
+                self.last_used_block_index = Some(b);
+            } else if let Some(last_used_block_index) = self.last_used_block_index {
+                if last_used_block_index < b {
+                    self.last_used_block_index = Some(b);
+                }
+            }
+            if block_index.is_none() && page_index.is_none() {
+                self.advance_file_cursor(is_last);
+            }
+        } else {
+            error!("Programming failed");
+        }
+        return status;
+    }
 
     pub fn append_file_bytes_async(
         &mut self,
@@ -852,41 +901,15 @@ impl OnboardFlash {
         ),
         &str,
     > {
-        let mut b = block_index.unwrap_or(self.current_block_index);
-        let mut p = page_index.unwrap_or(self.current_page_index);
         if let Some(transfer) = transfer {
-            let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
-            self.cs.set_high().unwrap();
-            self.payload_buffer = Some(tx_buf);
-            self.dma_channel_1 = Some(r_ch1);
-            self.dma_channel_2 = Some(r_ch2);
-            self.spi = Some(spi);
-            // self.spi.as_mut().unwrap().write(bytes).unwrap();
-            // self.spi_write(&bytes[1..]);
-            let address = address.unwrap();
-            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-            let status = self.wait_for_ready();
-            if !status.program_failed() {
-                if self.first_used_block_index.is_none() {
-                    self.first_used_block_index = Some(b);
-                }
-                if self.last_used_block_index.is_none() {
-                    self.last_used_block_index = Some(b);
-                } else if let Some(last_used_block_index) = self.last_used_block_index {
-                    if last_used_block_index < b {
-                        self.last_used_block_index = Some(b);
-                    }
-                }
-                if block_index.is_none() && page_index.is_none() {
-                    self.advance_file_cursor(false);
-                }
-                b = block_index.unwrap_or(self.current_block_index);
-                p = page_index.unwrap_or(self.current_page_index);
-            } else {
-                error!("Programming failed");
-            }
+            let status =
+                self.finish_transfer(block_index, page_index, transfer, address.unwrap(), false);
+
             if !status.erase_failed() {}
         }
+        let mut b = block_index.unwrap_or(self.current_block_index);
+        let mut p = page_index.unwrap_or(self.current_page_index);
+
         if b > NUM_RECORDING_BLOCKS {
             return Err(&"Flash full");
         }
@@ -959,48 +982,20 @@ impl OnboardFlash {
                 .start(),
             );
             if (is_last) {
-                let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.take().unwrap().wait();
-
-                self.cs.set_high().unwrap();
-                self.payload_buffer = Some(tx_buf);
-                self.dma_channel_1 = Some(r_ch1);
-                self.dma_channel_2 = Some(r_ch2);
-                self.spi = Some(spi);
-                self.spi_write(&[
-                    PROGRAM_EXECUTE,
-                    address.unwrap()[0],
-                    address.unwrap()[1],
-                    address.unwrap()[2],
-                ]);
-                let status = self.wait_for_ready();
-                if !status.program_failed() {
-                    if self.first_used_block_index.is_none() {
-                        self.first_used_block_index = Some(b);
-                    }
-                    if self.last_used_block_index.is_none() {
-                        self.last_used_block_index = Some(b);
-                    } else if let Some(last_used_block_index) = self.last_used_block_index {
-                        if last_used_block_index < b {
-                            self.last_used_block_index = Some(b);
-                        }
-                    }
-                    if block_index.is_none() && page_index.is_none() {
-                        self.advance_file_cursor(is_last);
-                    }
-                } else {
-                    error!("Programming failed");
-                }
-                if !status.erase_failed() {
-                    // Relocate earlier pages on this block to the next free block
-                    // Re-write this page
-                    // Erase and mark the earlier block as bad.
-                }
+                let status = self.finish_transfer(
+                    block_index,
+                    page_index,
+                    transfer.take().unwrap(),
+                    address.unwrap(),
+                    true,
+                );
                 return Ok((None, None));
             }
         }
 
         return Ok((transfer, address));
     }
+
     pub fn append_file_bytes(
         &mut self,
         bytes: &mut [u8],
