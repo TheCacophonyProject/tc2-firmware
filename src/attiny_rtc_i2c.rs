@@ -627,17 +627,11 @@ impl SharedI2C {
             }
         }
     }
+
+    // could use is_minutes_enabled instead
+
     pub fn is_alarm_set(&mut self) -> bool {
-        // must be a better way
-        match self.rtc().get_alarm_minutes() {
-            Ok(val) => {
-                return val > 0;
-            }
-            Err(e) => {
-                info!("Couldn't get alarm minutes, alarm not set?");
-                return false;
-            }
-        }
+        self.get_alarm_minutes() > 0
     }
     pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
         let mut num_attempts = 0;

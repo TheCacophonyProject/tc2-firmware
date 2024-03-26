@@ -78,7 +78,6 @@ pub fn audio_task(
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
     let mut event_logger: EventLogger = EventLogger::new(flash_storage);
-
     if should_offload_audio_recordings(
         flash_storage,
         &mut event_logger,
@@ -102,6 +101,7 @@ pub fn audio_task(
                 timer,
                 &mut event_logger,
                 &synced_date_time,
+                Some(watchdog),
             ) {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -136,9 +136,7 @@ pub fn audio_task(
     let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
     let mut do_recording = alarm_triggered;
     let scheduled = shared_i2c.is_alarm_set();
-    info!("Alarm set???{}", scheduled);
     let mut reschedule = !scheduled;
-
     let mut alarm_hours = shared_i2c.get_alarm_hours();
     let mut alarm_minutes = shared_i2c.get_alarm_minutes();
     if !alarm_triggered && scheduled {
@@ -170,6 +168,7 @@ pub fn audio_task(
             flash_storage,
         );
     }
+
     if do_recording {
         //should of already offloaded but extra safety check
         if !flash_storage.is_too_full_for_audio() {
@@ -229,10 +228,14 @@ pub fn audio_task(
         "Recording scheduled for {}:{} in {} minutes",
         alarm_hours, alarm_minutes, until_alarm
     );
-
-    let mut logged_power_down = false;
     let mut should_sleep = true;
+    let mut logged_power_down = false;
     loop {
+        info!(
+            "Recording scheduled for {}:{}",
+            shared_i2c.get_alarm_hours(),
+            shared_i2c.get_alarm_minutes(),
+        );
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         if !logged_power_down {
             event_logger.log_event(
@@ -253,6 +256,7 @@ pub fn audio_task(
                     if until_alarm < 1 {
                         // otherwise the alarm could trigger  between here and sleeping
                         should_sleep = false;
+                        info!("Alarm is scheduled in {} so not sleeping", until_alarm);
                         continue;
                     }
                     info!("Ask Attiny to power down rp2040");
@@ -286,19 +290,18 @@ pub fn audio_task(
     }
 }
 
-pub fn get_alarm_dt(datetime: DateTime, alarm_hours: u8, alarm_minutes: u8) -> NaiveDateTime {
+pub fn get_alarm_dt(
+    datetime: DateTime,
+    alarm_hours: u8,
+    alarm_minutes: u8,
+) -> Result<NaiveDateTime, ()> {
     let mut naive_date = chrono::NaiveDate::from_ymd_opt(
         2000 + datetime.year as i32,
         datetime.month as u32,
         datetime.day as u32,
     );
     if naive_date.is_none() {
-        panic!(
-            "Couldn't get date for {}, {}, {}",
-            2000 + datetime.year as i32,
-            datetime.month as u32,
-            datetime.day as u32
-        );
+        return Err(());
     }
     let mut naive_date = naive_date.unwrap();
     if alarm_hours < datetime.hours {
@@ -306,12 +309,9 @@ pub fn get_alarm_dt(datetime: DateTime, alarm_hours: u8, alarm_minutes: u8) -> N
     }
     let naive_time = chrono::NaiveTime::from_hms_opt(alarm_hours as u32, alarm_minutes as u32, 0);
     if naive_time.is_none() {
-        panic!(
-            "Couldn't get time for {}, {}",
-            alarm_hours as u32, alarm_minutes as u32
-        );
+        return Err(());
     }
-    NaiveDateTime::new(naive_date, naive_time.unwrap())
+    Ok(NaiveDateTime::new(naive_date, naive_time.unwrap()))
 }
 
 fn minutes_to_alarm(
@@ -324,10 +324,17 @@ fn minutes_to_alarm(
     match shared_i2c.get_datetime(delay) {
         Ok(now) => {
             let day = now.day;
-            let mut alarm_dt = get_alarm_dt(now, alarm_hours, alarm_minutes);
-            let now = get_naive_datetime(now);
-            let until_alarm = alarm_dt - now;
-            return until_alarm.num_minutes();
+            match get_alarm_dt(now, alarm_hours, alarm_minutes) {
+                Ok(alarm_dt) => {
+                    let now = get_naive_datetime(now);
+                    let until_alarm = alarm_dt - now;
+                    return until_alarm.num_minutes();
+                }
+                Err(_) => error!(
+                    "Could not get alarm dt for {} {}",
+                    alarm_hours, alarm_minutes
+                ),
+            }
         }
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
@@ -351,7 +358,7 @@ fn schedule_audio_rec(
     let short_window: u64 = 5 * 60;
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
-    let mut wake_in = 0u64;
+    let mut wake_in;
     if r <= short_chance {
         wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
     } else {
@@ -366,7 +373,9 @@ fn schedule_audio_rec(
         synced_date_time.date_time_utc.time().hour(),
         synced_date_time.date_time_utc.time().minute()
     );
-    // let wake_in: i32 = 60;
+
+    // GP TESTING
+    let wake_in: i32 = 60 * 5;
     let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
     info!(
         "Wake up is set to be {}:{}",

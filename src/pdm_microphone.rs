@@ -233,7 +233,7 @@ impl PdmMicrophone {
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
-                    warn!("Couldn't keep up with data discarding recording");
+                    warn!("Couldn't keep up with data discarding recording {}", cycle);
                     if use_async && transfer.is_some() {
                         flash_storage.finish_transfer(
                             None,
@@ -298,10 +298,9 @@ impl PdmMicrophone {
                         }
                         audio_buffer.reset();
                         if leftover.len() > 0 {
-                            // only works with this why???? even if i use new variables
-                            timer.delay_us(700);
+                            // shouldn't need to do this
+                            let mut audio_buffer = AudioBuffer::new();
                             let out = audio_buffer.slice_for(leftover.len());
-                            // info!("Filtering leftover {} into {}", leftover.len(), out.len());
 
                             filter.filter(leftover, VOLUME, out, true);
                         }

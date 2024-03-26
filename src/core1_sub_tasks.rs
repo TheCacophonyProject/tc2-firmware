@@ -1,4 +1,5 @@
 use crate::attiny_rtc_i2c::SharedI2C;
+use crate::bsp;
 use crate::bsp::pac::{DMA, RESETS};
 use crate::core1_task::{wake_raspberry_pi, SyncedDateTime};
 use crate::device_config::DeviceConfig;
@@ -13,6 +14,11 @@ use crc::{Crc, CRC_16_XMODEM};
 use defmt::{info, warn};
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::Timer;
+
+use embedded_hal::prelude::{
+    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
+    _embedded_hal_watchdog_WatchdogEnable,
+};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -87,6 +93,7 @@ pub fn maybe_offload_flash_storage_and_events(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
+    watchdog: Option<&mut bsp::hal::Watchdog>,
 ) -> bool {
     if flash_storage.has_files_to_offload() {
         warn!("There are files to offload!");
@@ -116,7 +123,8 @@ pub fn maybe_offload_flash_storage_and_events(
         flash_storage.begin_offload();
         let mut file_start = true;
         let mut part_count = 0;
-
+        let do_watch = watchdog.is_some();
+        let watch = watchdog.unwrap();
         let mut success = true;
         // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
         //  Probably doesn't matter though.
@@ -126,6 +134,9 @@ pub fn maybe_offload_flash_storage_and_events(
             spi,
         )) = flash_storage.get_file_part()
         {
+            if do_watch {
+                watch.feed();
+            }
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last {
                 ExtTransferMessage::BeginFileTransfer

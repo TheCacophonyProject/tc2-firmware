@@ -344,6 +344,7 @@ pub fn core_1_task(
         &mut timer,
         &mut event_logger,
         &synced_date_time,
+        None,
     ) {
         event_logger.log_event(
             LoggerEvent::new(
