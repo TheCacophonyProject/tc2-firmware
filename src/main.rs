@@ -257,7 +257,7 @@ fn main() -> ! {
     if alarm_woke_us {
         event_logger.log_event(
             LoggerEvent::new(
-                LoggerEventKind::AttinyCommError,
+                LoggerEventKind::Rp2040WokenByAlarm,
                 synced_date_time.get_timestamp_micros(&timer),
             ),
             &mut flash_storage,
@@ -265,7 +265,7 @@ fn main() -> ! {
     } else {
         event_logger.log_event(
             LoggerEvent::new(
-                LoggerEventKind::Rp2040WokenByAlarm,
+                LoggerEventKind::AttinyCommError,
                 synced_date_time.get_timestamp_micros(&timer),
             ),
             &mut flash_storage,
