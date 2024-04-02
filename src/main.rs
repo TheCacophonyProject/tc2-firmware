@@ -138,7 +138,7 @@ fn main() -> ! {
     watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
 
     watchdog.pause_on_debug(true);
-    // watchdog.start(8388607.micros());
+    watchdog.start(8388607.micros());
 
     info!("Enabled watchdog timer");
     let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
