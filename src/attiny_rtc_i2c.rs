@@ -487,10 +487,7 @@ impl SharedI2C {
         self.rtc()
             .control_alarm_interrupt(Control::Off)
             .unwrap_or(());
-        self.rtc().control_alarm_day(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_hours(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_minutes(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_weekday(Control::Off).unwrap_or(());
+        self.rtc().disable_all_alarms();
     }
 
     pub fn print_alarm_status(&mut self, delay: &mut Delay) {
@@ -631,8 +628,17 @@ impl SharedI2C {
     // could use is_minutes_enabled instead
 
     pub fn is_alarm_set(&mut self) -> bool {
-        self.get_alarm_minutes() > 0
+        match self.rtc().is_alarm_minutes_enabled() {
+            Ok(val) => {
+                return val;
+            }
+            Err(e) => {
+                info!("Couldn't get alarm minutes enabled, alarm not set?");
+                return false;
+            }
+        }
     }
+
     pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
         let mut num_attempts = 0;
         loop {

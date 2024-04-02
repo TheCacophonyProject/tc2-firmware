@@ -196,6 +196,12 @@ impl SyncedDateTime {
             ))
         .timestamp_micros() as u64
     }
+    pub fn get_adjusted_dt(&self, timer: &rp2040_hal::Timer) -> NaiveDateTime {
+        self.date_time_utc
+            + chrono::Duration::microseconds(
+                (timer.get_counter() - self.timer_offset).to_micros() as i64
+            )
+    }
 
     pub fn set(&mut self, date_time: NaiveDateTime, timer: &rp2040_hal::Timer) {
         self.date_time_utc = date_time;

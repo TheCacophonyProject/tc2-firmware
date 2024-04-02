@@ -19,7 +19,7 @@ use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
 
-use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Datelike, Duration, NaiveDateTime, NaiveTime, Timelike};
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
     _embedded_hal_watchdog_WatchdogEnable,
@@ -50,7 +50,10 @@ pub fn audio_task(
         rp2040_hal::gpio::PullDown,
     >,
     watchdog: &mut bsp::hal::Watchdog,
+    alarm_triggered: bool,
 ) -> ! {
+    watchdog.feed();
+
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
     let sio = Sio::new(peripherals.SIO);
@@ -77,7 +80,12 @@ pub fn audio_task(
         }
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
+
+    let mut alarm_hours = shared_i2c.get_alarm_hours();
+    let mut alarm_minutes = shared_i2c.get_alarm_minutes();
+    info!("Alarm hours {} minutes {}", alarm_hours, alarm_minutes);
     let mut event_logger: EventLogger = EventLogger::new(flash_storage);
+    watchdog.feed();
     if should_offload_audio_recordings(
         flash_storage,
         &mut event_logger,
@@ -86,7 +94,8 @@ pub fn audio_task(
         synced_date_time.date_time_utc,
         device_config.config().last_offload,
     ) {
-        watchdog.feed();
+        info!("SHOULD OFFLOAD");
+        watchdog.disable();
         if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
             // watchdog.disable(); //should watch dog go into offload
@@ -101,7 +110,7 @@ pub fn audio_task(
                 timer,
                 &mut event_logger,
                 &synced_date_time,
-                Some(watchdog),
+                None,
             ) {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -129,34 +138,48 @@ pub fn audio_task(
                 "Updating last off load to {}",
                 device_config.config().last_offload
             );
-            // watchdog.pause_on_debug(true);
-            // watchdog.start(8388607.micros());
         }
+        watchdog.pause_on_debug(true);
+        watchdog.start(8388607.micros());
     }
-    let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
+
+    watchdog.feed();
     let mut do_recording = alarm_triggered;
     let scheduled = shared_i2c.is_alarm_set();
     let mut reschedule = !scheduled;
-    let mut alarm_hours = shared_i2c.get_alarm_hours();
-    let mut alarm_minutes = shared_i2c.get_alarm_minutes();
     if !alarm_triggered && scheduled {
         // check we haven't missed the alarm somehow
-        let until_alarm = minutes_to_alarm(alarm_hours, alarm_minutes, &mut shared_i2c, &mut delay);
-        if until_alarm < 0 || until_alarm > 60 {
-            info!(
-                "Missed alarm was scheduled for {}:{} but its {} minutes away",
-                alarm_hours, alarm_minutes, until_alarm
-            );
+        match get_alarm_dt(
+            synced_date_time.get_adjusted_dt(timer),
+            alarm_hours,
+            alarm_minutes,
+        ) {
+            Ok(alarm_dt) => {
+                let until_alarm =
+                    (alarm_dt - synced_date_time.get_adjusted_dt(timer)).num_minutes();
+                if until_alarm < 0 || until_alarm > 60 {
+                    info!(
+                        "Missed alarm was scheduled for {}:{} but its {} minutes away",
+                        alarm_hours, alarm_minutes, until_alarm
+                    );
 
-            // should take recording now
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::Rp2040MissedAudioAlarm,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
-            do_recording = true;
+                    // should take recording now
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::Rp2040MissedAudioAlarm,
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        flash_storage,
+                    );
+                    do_recording = true;
+                }
+            }
+            Err(_) => {
+                error!(
+                    "Could not get alarm dt for {} {}",
+                    alarm_hours, alarm_minutes
+                )
+            }
         }
     }
     if alarm_triggered {
@@ -170,6 +193,7 @@ pub fn audio_task(
     }
 
     if do_recording {
+        watchdog.feed();
         //should of already offloaded but extra safety check
         if !flash_storage.is_too_full_for_audio() {
             let _ = shared_i2c
@@ -180,24 +204,24 @@ pub fn audio_task(
 
             let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
-            let mut microphone = PdmMicrophone::new(
-                gpio0.into_function().into_pull_type(),
-                gpio1.into_function().into_pull_type(),
-                clock_freq.Hz(),
-                pio1,
-                sm1,
-            );
-            microphone.record_for_n_seconds(
-                5,
-                dma_channels.ch3,
-                dma_channels.ch4,
-                timer,
-                &mut peripherals.RESETS,
-                peripherals.SPI1,
-                flash_storage,
-                timestamp,
-                watchdog,
-            );
+            // let mut microphone = PdmMicrophone::new(
+            //     gpio0.into_function().into_pull_type(),
+            //     gpio1.into_function().into_pull_type(),
+            //     clock_freq.Hz(),
+            //     pio1,
+            //     sm1,
+            // );
+            // microphone.record_for_n_seconds(
+            //     5,
+            //     dma_channels.ch3,
+            //     dma_channels.ch4,
+            //     timer,
+            //     &mut peripherals.RESETS,
+            //     peripherals.SPI1,
+            //     flash_storage,
+            //     timestamp,
+            //     watchdog,
+            // );
             let _ = shared_i2c
                 .set_recording_flag(&mut delay, false)
                 .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
@@ -208,27 +232,45 @@ pub fn audio_task(
             warn!("Could not clear alarm {}", err);
         }
     }
-
+    let mut should_sleep = true;
+    let mut alarm_time: Option<NaiveDateTime>;
     if reschedule {
+        watchdog.feed();
+
         info!("Scheduling new recording");
-        schedule_audio_rec(
+        alarm_time = Some(schedule_audio_rec(
             &mut delay,
             &synced_date_time,
             &mut shared_i2c,
             flash_storage,
             timer,
             &mut event_logger,
-        );
-        alarm_hours = shared_i2c.get_alarm_hours();
-        alarm_minutes = shared_i2c.get_alarm_minutes();
+        ));
+    } else {
+        match get_alarm_dt(
+            synced_date_time.get_adjusted_dt(timer),
+            alarm_hours,
+            alarm_minutes,
+        ) {
+            Ok(alarm_dt) => {
+                alarm_time = Some(alarm_dt);
+            }
+            Err(_) => {
+                alarm_time = None;
+                error!(
+                    "Could not get alarm dt for {} {}",
+                    alarm_hours, alarm_minutes
+                )
+            }
+        }
     }
-    let until_alarm = minutes_to_alarm(alarm_hours, alarm_minutes, &mut shared_i2c, &mut delay);
-
-    info!(
-        "Recording scheduled for {}:{} in {} minutes",
-        alarm_hours, alarm_minutes, until_alarm
-    );
-    let mut should_sleep = true;
+    if alarm_time.is_some() {
+        info!(
+            "Recording scheduled for {}:{} ",
+            alarm_time.as_mut().unwrap().time().hour(),
+            alarm_time.as_mut().unwrap().time().minute()
+        );
+    }
     let mut logged_power_down = false;
     loop {
         info!(
@@ -250,9 +292,11 @@ pub fn audio_task(
         watchdog.feed();
         if should_sleep {
             if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
-                if pi_is_powered_down {
-                    let until_alarm =
-                        minutes_to_alarm(alarm_hours, alarm_minutes, &mut shared_i2c, &mut delay);
+                if pi_is_powered_down && alarm_time.is_some() {
+                    let until_alarm = (alarm_time.unwrap()
+                        - synced_date_time.get_adjusted_dt(timer))
+                    .num_minutes();
+
                     if until_alarm < 1 {
                         // otherwise the alarm could trigger  between here and sleeping
                         should_sleep = false;
@@ -260,6 +304,7 @@ pub fn audio_task(
                         continue;
                     }
                     info!("Ask Attiny to power down rp2040");
+                    delay.delay_ms(1000);
                     event_logger.log_event(
                         LoggerEvent::new(
                             LoggerEventKind::Rp2040Sleep,
@@ -291,20 +336,20 @@ pub fn audio_task(
 }
 
 pub fn get_alarm_dt(
-    datetime: DateTime,
+    datetime: NaiveDateTime,
     alarm_hours: u8,
     alarm_minutes: u8,
 ) -> Result<NaiveDateTime, ()> {
     let mut naive_date = chrono::NaiveDate::from_ymd_opt(
-        2000 + datetime.year as i32,
-        datetime.month as u32,
-        datetime.day as u32,
+        2000 + datetime.year() as i32,
+        datetime.month() as u32,
+        datetime.day() as u32,
     );
     if naive_date.is_none() {
         return Err(());
     }
     let mut naive_date = naive_date.unwrap();
-    if alarm_hours < datetime.hours {
+    if alarm_hours < datetime.time().hour() as u8 {
         naive_date = naive_date + Duration::days(1);
     }
     let naive_time = chrono::NaiveTime::from_hms_opt(alarm_hours as u32, alarm_minutes as u32, 0);
@@ -314,32 +359,42 @@ pub fn get_alarm_dt(
     Ok(NaiveDateTime::new(naive_date, naive_time.unwrap()))
 }
 
-fn minutes_to_alarm(
-    alarm_hours: u8,
-    alarm_minutes: u8,
-    shared_i2c: &mut SharedI2C,
-    delay: &mut Delay,
-) -> i64 {
-    let mut synced_date_time = SyncedDateTime::default();
-    match shared_i2c.get_datetime(delay) {
-        Ok(now) => {
-            let day = now.day;
-            match get_alarm_dt(now, alarm_hours, alarm_minutes) {
-                Ok(alarm_dt) => {
-                    let now = get_naive_datetime(now);
-                    let until_alarm = alarm_dt - now;
-                    return until_alarm.num_minutes();
-                }
-                Err(_) => error!(
-                    "Could not get alarm dt for {} {}",
-                    alarm_hours, alarm_minutes
-                ),
-            }
-        }
-        Err(_) => error!("Unable to get DateTime from RTC"),
-    }
-    return 0;
-}
+// fn minutes_to_alarm(
+//     alarm_hours: u8,
+//     alarm_minutes: u8,
+//     shared_i2c: &mut SharedI2C,
+//     delay: &mut Delay,
+// ) -> i64 {
+//     let mut synced_date_time = SyncedDateTime::default();
+//     match shared_i2c.get_datetime(delay) {
+//         Ok(now) => {
+//             // let day = now.day;
+//             // let mut fixed_hours = alarm_hours;
+//             // if alarm_hours - now.hours > 1 {
+//             //     // some weird rtc thing happening set alarm hours to 2 and it comes back as 42
+//             //     let tens = alarm_hours / 10;
+//             //     fixed_hours = alarm_hours - tens * 10;
+//             //     info!(
+//             //         "Adjusted alarm hours from {} to {}",
+//             //         alarm_hours, fixed_hours
+//             //     )
+//             // }
+//             match get_alarm_dt(now, alarm_hours, alarm_minutes) {
+//                 Ok(alarm_dt) => {
+//                     let now = get_naive_datetime(now);
+//                     let until_alarm = alarm_dt - now;
+//                     return until_alarm.num_minutes();
+//                 }
+//                 Err(_) => error!(
+//                     "Could not get alarm dt for {} {}",
+//                     fixed_hours, alarm_minutes
+//                 ),
+//             }
+//         }
+//         Err(_) => error!("Unable to get DateTime from RTC"),
+//     }
+//     return 0;
+// }
 fn schedule_audio_rec(
     delay: &mut Delay,
     synced_date_time: &SyncedDateTime,
@@ -347,7 +402,8 @@ fn schedule_audio_rec(
     flash_storage: &mut OnboardFlash,
     timer: &mut Timer,
     event_logger: &mut EventLogger,
-) {
+) -> NaiveDateTime {
+    i2c.disable_alarm(delay);
     i2c.enable_alarm(delay);
 
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
@@ -375,7 +431,8 @@ fn schedule_audio_rec(
     );
 
     // GP TESTING
-    let wake_in: i32 = 60 * 5;
+    let wake_in: i32 = 60 * 2;
+
     let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
     info!(
         "Wake up is set to be {}:{}",
@@ -385,7 +442,6 @@ fn schedule_audio_rec(
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
         let alarm_enabled = i2c.alarm_interrupt_enabled();
         info!("Wake up alarm interrupt enabled {}", alarm_enabled);
-
         info!(
             "Recording scheduled for {}:{}",
             i2c.get_alarm_hours(),
@@ -403,6 +459,7 @@ fn schedule_audio_rec(
     } else {
         error!("Failed setting wake alarm, can't go to sleep");
     }
+    return wakeup;
 }
 
 fn should_offload_audio_recordings(
@@ -414,6 +471,11 @@ fn should_offload_audio_recordings(
     last_offload: i64,
 ) -> bool {
     let offload_hour = 10;
+    // if event_logger.has_events_to_offload() {
+    //     info!("Offloading as logger as have events");
+
+    //     return true;
+    // }
     let has_files = flash_storage.has_files_to_offload() || event_logger.is_nearly_full();
     if !has_files {
         return false;
@@ -456,5 +518,6 @@ fn should_offload_audio_recordings(
         info!("Offloading as logger is nearly full");
         return true;
     }
+
     return false;
 }

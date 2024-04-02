@@ -189,10 +189,9 @@ impl EventLogger {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
             let end_block_index = 2048;
             for block_index in start_block_index..end_block_index {
-                // if flash_storage.bad_blocks.contains(&(block_index as i16)) {
-                //     info!("Skipping erase of bad block {}", block_index);
-                // } else if
-                if !flash_storage.erase_block(block_index).is_ok() {
+                if flash_storage.bad_blocks.contains(&(block_index as i16)) {
+                    info!("Skipping erase of bad block {}", block_index);
+                } else if !flash_storage.erase_block(block_index).is_ok() {
                     error!("Block erase failed for block {}", block_index);
                 }
             }

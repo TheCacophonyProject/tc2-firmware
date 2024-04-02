@@ -138,7 +138,7 @@ fn main() -> ! {
     watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
 
     watchdog.pause_on_debug(true);
-    watchdog.start(8388607.micros());
+    // watchdog.start(8388607.micros());
 
     info!("Enabled watchdog timer");
     let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
@@ -176,7 +176,9 @@ fn main() -> ! {
     info!("Got shared i2c");
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
-
+    if alarm_woke_us {
+        shared_i2c.clear_alarm();
+    }
     // If we're waking up to make an audio recording, do that.
     let mut existing_config = DeviceConfig::load_existing_config_from_flash();
 
@@ -233,12 +235,43 @@ fn main() -> ! {
     );
     let mut peripherals = unsafe { Peripherals::steal() };
 
+    watchdog.feed();
+
     flash_storage.take_spi(
         peripherals.SPI1,
         &mut peripherals.RESETS,
         system_clock_freq.Hz(),
     );
     flash_storage.init();
+    let mut synced_date_time = SyncedDateTime::default();
+    match shared_i2c.get_datetime(&mut delay) {
+        Ok(now) => {
+            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
+            synced_date_time.set(get_naive_datetime(now), &timer);
+        }
+        Err(_) => error!("Unable to get DateTime from RTC"),
+    }
+
+    // for testing
+    let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
+    if alarm_woke_us {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::AttinyCommError,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    } else {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::Rp2040WokenByAlarm,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
+
     flash_storage.has_files_to_offload();
     if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
         let (device_config, device_config_was_updated) =
@@ -286,6 +319,7 @@ fn main() -> ! {
             pins.gpio0,
             pins.gpio1,
             &mut watchdog,
+            alarm_woke_us,
         );
     } else {
         loop {

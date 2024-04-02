@@ -93,9 +93,9 @@ pub fn maybe_offload_flash_storage_and_events(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
-    watchdog: Option<&mut bsp::hal::Watchdog>,
+    mut watchdog: Option<&mut bsp::hal::Watchdog>,
 ) -> bool {
-    if flash_storage.has_files_to_offload() {
+    if 1 == 1 || flash_storage.has_files_to_offload() {
         warn!("There are files to offload!");
         if wake_raspberry_pi(shared_i2c, delay) {
             event_logger.log_event(
@@ -123,8 +123,6 @@ pub fn maybe_offload_flash_storage_and_events(
         flash_storage.begin_offload();
         let mut file_start = true;
         let mut part_count = 0;
-        let do_watch = watchdog.is_some();
-        let watch = watchdog.unwrap();
         let mut success = true;
         // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
         //  Probably doesn't matter though.
@@ -134,8 +132,8 @@ pub fn maybe_offload_flash_storage_and_events(
             spi,
         )) = flash_storage.get_file_part()
         {
-            if do_watch {
-                watch.feed();
+            if watchdog.is_some() {
+                watchdog.as_mut().unwrap().feed();
             }
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last {
