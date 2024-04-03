@@ -257,6 +257,7 @@ pub fn audio_task(
             }
             Err(_) => {
                 alarm_time = None;
+                should_sleep = false;
                 error!(
                     "Could not get alarm dt for {} {}",
                     alarm_hours, alarm_minutes

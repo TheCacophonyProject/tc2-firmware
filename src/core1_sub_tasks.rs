@@ -58,7 +58,7 @@ pub fn maybe_offload_events(
                             if attempts > 100 {
                                 warn!("Failed sending logger event to raspberry pi");
                                 success = false;
-                                break 'transfer_all_events;
+                                break 'transfer_event;
                             }
                         } else {
                             break 'transfer_event;
@@ -66,6 +66,9 @@ pub fn maybe_offload_events(
                     }
                     if let Some(spi) = pi_spi.disable() {
                         flash_storage.take_spi(spi, resets, clock_freq.Hz());
+                    }
+                    if !success {
+                        break 'transfer_all_events;
                     }
                 }
             }
