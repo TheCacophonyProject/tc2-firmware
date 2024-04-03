@@ -14,7 +14,6 @@ mod core1_task;
 mod cptv_encoder;
 mod device_config;
 mod event_logger;
-mod example;
 mod ext_spi_transfers;
 mod lepton;
 mod motion_detector;
