@@ -94,8 +94,6 @@ pub fn audio_task(
         synced_date_time.date_time_utc,
         device_config.config().last_offload,
     ) {
-        info!("SHOULD OFFLOAD");
-        watchdog.disable();
         if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
             // watchdog.disable(); //should watch dog go into offload
@@ -110,7 +108,7 @@ pub fn audio_task(
                 timer,
                 &mut event_logger,
                 &synced_date_time,
-                None,
+                Some(watchdog),
             ) {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -139,8 +137,8 @@ pub fn audio_task(
                 device_config.config().last_offload
             );
         }
-        watchdog.pause_on_debug(true);
-        watchdog.start(8388607.micros());
+        // watchdog.pause_on_debug(true);
+        // watchdog.start(8388607.micros());
     }
 
     watchdog.feed();
@@ -204,24 +202,24 @@ pub fn audio_task(
 
             let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
-            // let mut microphone = PdmMicrophone::new(
-            //     gpio0.into_function().into_pull_type(),
-            //     gpio1.into_function().into_pull_type(),
-            //     clock_freq.Hz(),
-            //     pio1,
-            //     sm1,
-            // );
-            // microphone.record_for_n_seconds(
-            //     5,
-            //     dma_channels.ch3,
-            //     dma_channels.ch4,
-            //     timer,
-            //     &mut peripherals.RESETS,
-            //     peripherals.SPI1,
-            //     flash_storage,
-            //     timestamp,
-            //     watchdog,
-            // );
+            let mut microphone = PdmMicrophone::new(
+                gpio0.into_function().into_pull_type(),
+                gpio1.into_function().into_pull_type(),
+                clock_freq.Hz(),
+                pio1,
+                sm1,
+            );
+            microphone.record_for_n_seconds(
+                5,
+                dma_channels.ch3,
+                dma_channels.ch4,
+                timer,
+                &mut peripherals.RESETS,
+                peripherals.SPI1,
+                flash_storage,
+                timestamp,
+                watchdog,
+            );
             let _ = shared_i2c
                 .set_recording_flag(&mut delay, false)
                 .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
@@ -305,7 +303,6 @@ pub fn audio_task(
                         continue;
                     }
                     info!("Ask Attiny to power down rp2040");
-                    delay.delay_ms(1000);
                     event_logger.log_event(
                         LoggerEvent::new(
                             LoggerEventKind::Rp2040Sleep,

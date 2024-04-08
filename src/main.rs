@@ -251,26 +251,6 @@ fn main() -> ! {
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
 
-    // for testing
-    let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
-    if alarm_woke_us {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::Rp2040WokenByAlarm,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-    } else {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::AttinyCommError,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-    }
-
     flash_storage.has_files_to_offload();
     if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
         let (device_config, device_config_was_updated) =

@@ -98,7 +98,7 @@ pub fn maybe_offload_flash_storage_and_events(
     time: &SyncedDateTime,
     mut watchdog: Option<&mut bsp::hal::Watchdog>,
 ) -> bool {
-    if 1 == 1 || flash_storage.has_files_to_offload() {
+    if flash_storage.has_files_to_offload() {
         warn!("There are files to offload!");
         if wake_raspberry_pi(shared_i2c, delay) {
             event_logger.log_event(
