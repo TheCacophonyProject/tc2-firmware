@@ -92,7 +92,7 @@ pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool 
                         shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true)
                     {
                         if pi_is_awake {
-                            return true;
+                            break;
                         } else {
                             // Try to wake it again, just in case it was shutdown behind our backs.
                             let _ = shared_i2c.tell_pi_to_wakeup(delay);
@@ -100,6 +100,7 @@ pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool 
                     }
                     delay.delay_ms(1000);
                 }
+                true
             } else {
                 warn!("Failed to send wake signal to raspberry pi");
                 false
@@ -110,8 +111,7 @@ pub fn wake_raspberry_pi(shared_i2c: &mut SharedI2C, delay: &mut Delay) -> bool 
                 if let Ok(pi_is_awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(delay, false)
                 {
                     if pi_is_awake {
-                        return true;
-                        // break;
+                        break;
                     } else {
                         // Try to wake it again, just in case it was shutdown behind our back.
                         let _ = shared_i2c.tell_pi_to_wakeup(delay);
@@ -196,6 +196,7 @@ impl SyncedDateTime {
             ))
         .timestamp_micros() as u64
     }
+
     pub fn get_adjusted_dt(&self, timer: &rp2040_hal::Timer) -> NaiveDateTime {
         self.date_time_utc
             + chrono::Duration::microseconds(
@@ -220,8 +221,7 @@ pub fn core_1_task(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     clock_freq: u32,
-    mut flash_storage: OnboardFlash,
-    mut pi_spi: ExtSpiTransfers,
+    pins: Core1Pins,
     i2c_config: I2CConfig,
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
@@ -238,6 +238,14 @@ pub fn core_1_task(
 
     let mut synced_date_time = SyncedDateTime::default();
 
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let mut payload_buf = [0x42u8; 2066];
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
     let mut peripherals = unsafe { Peripherals::steal() };
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let mut peripherals = unsafe { Peripherals::steal() };
@@ -260,7 +268,43 @@ pub fn core_1_task(
         }
     }
 
+    let mut pi_spi = ExtSpiTransfers::new(
+        pins.pi_mosi,
+        pins.pi_cs,
+        pins.pi_clk,
+        pins.pi_miso,
+        pins.pi_ping,
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
+    );
+
     let mut spi_peripheral = Some(peripherals.SPI1);
+    let mut flash_storage = OnboardFlash::new(
+        pins.fs_cs,
+        pins.fs_mosi,
+        pins.fs_clk,
+        pins.fs_miso,
+        flash_page_buf,
+        flash_page_buf_2,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        should_record_to_flash,
+        None,
+    );
+    {
+        flash_storage.take_spi(
+            spi_peripheral.take().unwrap(),
+            &mut peripherals.RESETS,
+            clock_freq.Hz(),
+        );
+        flash_storage.init();
+        if flash_storage.has_files_to_offload() {
+            info!("Finished scan, has files to offload");
+        }
+    }
 
     let mut event_logger = EventLogger::new(&mut flash_storage);
     if event_logger.has_events_to_offload() {

@@ -3,21 +3,21 @@ use core::ops::DerefMut;
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
-use crate::device_config::{get_naive_datetime, DeviceConfig};
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
-use crate::{bsp, event_logger};
-use cortex_m::delay::Delay;
-use defmt::{error, info, warn, Format};
-use rp2040_hal::{Sio, Timer};
-
 use crate::core1_sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
     maybe_offload_flash_storage_and_events,
 };
+use crate::core1_task::Core1Pins;
 use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime};
+use crate::device_config::{get_naive_datetime, DeviceConfig};
+use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
+use crate::{bsp, event_logger};
+use cortex_m::delay::Delay;
+use defmt::{error, info, warn, Format};
+use rp2040_hal::{Sio, Timer};
 
 use chrono::{Datelike, Duration, NaiveDateTime, NaiveTime, Timelike};
 use embedded_hal::prelude::{
@@ -32,13 +32,14 @@ use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::pio::PIOExt;
 
+use crate::onboard_flash::extend_lifetime_generic_mut;
+
 pub fn audio_task(
     i2c_config: I2CConfig,
-    flash_storage: &mut OnboardFlash,
-    pi_spi: &mut ExtSpiTransfers,
     clock_freq: u32,
     mut device_config: DeviceConfig,
     timer: &mut Timer,
+    pins: Core1Pins,
     gpio0: rp2040_hal::gpio::Pin<
         rp2040_hal::gpio::bank0::Gpio0,
         rp2040_hal::gpio::FunctionNull,
@@ -56,7 +57,53 @@ pub fn audio_task(
 
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
     let sio = Sio::new(peripherals.SIO);
+    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+
+    // init flash
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
+
+    let mut flash_payload_buf = [0x42u8; 2115];
+    let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
+    let mut flash_storage = OnboardFlash::new(
+        pins.fs_cs,
+        pins.fs_mosi,
+        pins.fs_clk,
+        pins.fs_miso,
+        flash_page_buf,
+        flash_page_buf_2,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        true,
+        Some(flash_payload_buf),
+    );
+
+    let mut payload_buf = [0x42u8; 2066];
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+    let mut pi_spi = ExtSpiTransfers::new(
+        pins.pi_mosi,
+        pins.pi_cs,
+        pins.pi_clk,
+        pins.pi_miso,
+        pins.pi_ping,
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
+    );
+    let mut peripherals = unsafe { Peripherals::steal() };
+
+    watchdog.feed();
+    flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
+    flash_storage.init();
 
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
 
@@ -84,10 +131,10 @@ pub fn audio_task(
     let mut alarm_hours = shared_i2c.get_alarm_hours();
     let mut alarm_minutes = shared_i2c.get_alarm_minutes();
     info!("Alarm hours {} minutes {}", alarm_hours, alarm_minutes);
-    let mut event_logger: EventLogger = EventLogger::new(flash_storage);
+    let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
     watchdog.feed();
     if should_offload_audio_recordings(
-        flash_storage,
+        &mut flash_storage,
         &mut event_logger,
         &mut delay,
         &mut shared_i2c,
@@ -98,8 +145,8 @@ pub fn audio_task(
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
             // watchdog.disable(); //should watch dog go into offload
             if maybe_offload_flash_storage_and_events(
-                flash_storage,
-                pi_spi,
+                &mut flash_storage,
+                &mut pi_spi,
                 &mut peripherals.RESETS,
                 &mut peripherals.DMA,
                 clock_freq,
@@ -115,13 +162,13 @@ pub fn audio_task(
                         LoggerEventKind::OffloadedRecording,
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
-                    flash_storage,
+                    &mut flash_storage,
                 );
             }
             let (update_config, device_config_was_updated) =
                 get_existing_device_config_or_config_from_pi_on_initial_handshake(
-                    flash_storage,
-                    pi_spi,
+                    &mut flash_storage,
+                    &mut pi_spi,
                     &mut peripherals.RESETS,
                     &mut peripherals.DMA,
                     clock_freq.Hz(),
@@ -167,7 +214,7 @@ pub fn audio_task(
                             LoggerEventKind::Rp2040MissedAudioAlarm,
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
-                        flash_storage,
+                        &mut flash_storage,
                     );
                     do_recording = true;
                 }
@@ -186,7 +233,7 @@ pub fn audio_task(
                 LoggerEventKind::Rp2040WokenByAlarm,
                 synced_date_time.get_timestamp_micros(&timer),
             ),
-            flash_storage,
+            &mut flash_storage,
         );
     }
 
@@ -216,7 +263,7 @@ pub fn audio_task(
                 timer,
                 &mut peripherals.RESETS,
                 peripherals.SPI1,
-                flash_storage,
+                &mut flash_storage,
                 timestamp,
                 watchdog,
             );
@@ -240,7 +287,7 @@ pub fn audio_task(
             &mut delay,
             &synced_date_time,
             &mut shared_i2c,
-            flash_storage,
+            &mut flash_storage,
             timer,
             &mut event_logger,
         ));
@@ -284,7 +331,7 @@ pub fn audio_task(
                     LoggerEventKind::ToldRpiToSleep,
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
-                flash_storage,
+                &mut flash_storage,
             );
             logged_power_down = true;
         }
@@ -308,7 +355,7 @@ pub fn audio_task(
                             LoggerEventKind::Rp2040Sleep,
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
-                        flash_storage,
+                        &mut flash_storage,
                     );
 
                     if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
