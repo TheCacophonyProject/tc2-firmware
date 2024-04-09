@@ -27,6 +27,7 @@ use embedded_hal::prelude::{
 use fugit::{ExtU32, RateExtU32};
 use pcf8563::DateTime;
 
+use cortex_m::asm::nop;
 use cortex_m::asm::wfe;
 use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
@@ -37,7 +38,6 @@ use crate::onboard_flash::extend_lifetime_generic_mut;
 pub fn audio_task(
     i2c_config: I2CConfig,
     clock_freq: u32,
-    mut device_config: DeviceConfig,
     timer: &mut Timer,
     pins: Core1Pins,
     gpio0: rp2040_hal::gpio::Pin<
@@ -54,6 +54,7 @@ pub fn audio_task(
     alarm_triggered: bool,
 ) -> ! {
     watchdog.feed();
+    let mut device_config = DeviceConfig::load_existing_config_from_flash().unwrap();
 
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
@@ -133,15 +134,24 @@ pub fn audio_task(
     info!("Alarm hours {} minutes {}", alarm_hours, alarm_minutes);
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
     watchdog.feed();
-    if should_offload_audio_recordings(
-        &mut flash_storage,
-        &mut event_logger,
-        &mut delay,
-        &mut shared_i2c,
-        synced_date_time.date_time_utc,
-        device_config.config().last_offload,
-    ) {
+    let mut pi_is_awake = false;
+    // if pi is on
+
+    if let Ok(awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
+        pi_is_awake = awake;
+    }
+    if pi_is_awake
+        || should_offload_audio_recordings(
+            &mut flash_storage,
+            &mut event_logger,
+            &mut delay,
+            &mut shared_i2c,
+            synced_date_time.date_time_utc,
+            device_config.config().last_offload,
+        )
+    {
         if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+            pi_is_awake = true;
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
             // watchdog.disable(); //should watch dog go into offload
             if maybe_offload_flash_storage_and_events(
@@ -165,27 +175,35 @@ pub fn audio_task(
                     &mut flash_storage,
                 );
             }
-            let (update_config, device_config_was_updated) =
-                get_existing_device_config_or_config_from_pi_on_initial_handshake(
-                    &mut flash_storage,
-                    &mut pi_spi,
-                    &mut peripherals.RESETS,
-                    &mut peripherals.DMA,
-                    clock_freq.Hz(),
-                    2u32, //need to get radiometry and leton serial
-                    1,
-                    Some(synced_date_time.date_time_utc.timestamp_millis()),
-                    timer,
-                    Some(device_config),
-                );
-            device_config = update_config.unwrap();
-            info!(
-                "Updating last off load to {}",
-                device_config.config().last_offload
-            );
         }
-        // watchdog.pause_on_debug(true);
-        // watchdog.start(8388607.micros());
+    }
+    if pi_is_awake {
+        let (update_config, device_config_was_updated) =
+            get_existing_device_config_or_config_from_pi_on_initial_handshake(
+                &mut flash_storage,
+                &mut pi_spi,
+                &mut peripherals.RESETS,
+                &mut peripherals.DMA,
+                clock_freq.Hz(),
+                2u32, //need to get radiometry and leton serial
+                1,
+                Some(synced_date_time.date_time_utc.timestamp_millis()),
+                timer,
+                Some(device_config),
+            );
+        device_config = update_config.unwrap();
+        info!(
+            "Updating last off load to {}",
+            device_config.config().last_offload
+        );
+
+        if !device_config.config().is_audio_device {
+            shared_i2c.disable_alarm(&mut delay);
+            loop {
+                // Wait to be reset and become thermal device
+                nop();
+            }
+        }
     }
 
     watchdog.feed();
@@ -542,14 +560,6 @@ fn should_offload_audio_recordings(
             now.timestamp_millis(),
         );
         return true;
-    }
-
-    // if pi is on
-    if let Ok(pi_is_awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
-        if pi_is_awake {
-            info!("Offloading because pi is awake");
-            return true;
-        }
     }
 
     // flash getting full

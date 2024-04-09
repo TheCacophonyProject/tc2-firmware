@@ -1,6 +1,6 @@
 use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
-use crate::rp2040_flash::read_device_config_from_rp2040_flash;
+use crate::rp2040_flash::{read_device_config_from_rp2040_flash, read_is_audio_from_rp2040_flash};
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
@@ -65,6 +65,11 @@ impl DeviceConfig {
         device_config
     }
 
+    pub fn is_audio_device() -> bool {
+        let audio_byte = read_is_audio_from_rp2040_flash()[0];
+        return audio_byte == 1;
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> (Option<DeviceConfig>, usize) {
         let mut cursor = Cursor::new(bytes);
         let device_id = cursor.read_u32();
@@ -97,7 +102,6 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
-
         let is_audio_device = cursor.read_bool();
         let last_offload = cursor.read_i64();
         let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));

@@ -370,6 +370,14 @@ pub fn core_1_task(
     }
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
+    if device_config.config().is_audio_device {
+        shared_i2c.disable_alarm(&mut delay);
+        sio.fifo.write_blocking(Core1Task::RequestReset.into());
+        loop {
+            // Wait to be reset
+            nop();
+        }
+    }
     if !device_config.use_low_power_mode() {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
         maybe_offload_events(

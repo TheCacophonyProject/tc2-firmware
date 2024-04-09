@@ -45,3 +45,7 @@ pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }
 }
+pub fn read_is_audio_from_rp2040_flash() -> &'static [u8] {
+    let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE + 56) as *const u8;
+    unsafe { slice::from_raw_parts(addr, 1 as usize) }
+}
