@@ -39,6 +39,7 @@ struct RecordingStatus {
     samples_taken: usize,
 }
 use crate::onboard_flash::OnboardFlash;
+use onboard_flash::extend_lifetime_generic_mut;
 
 use crc::{Crc, CRC_16_XMODEM};
 
@@ -216,13 +217,13 @@ impl PdmMicrophone {
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
-
         if let Some(pio_rx) = self.pio_rx.take() {
             let start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
             // Chain some buffers together for continuous transfers
-            let b_0 = singleton!(: [u32; 512] = [0;512]).unwrap();
-            let b_1 = singleton!(: [u32; 512] =  [0;512]).unwrap();
-
+            let mut b_0 = [0u32; 512];
+            let mut b_1 = [0u32; 512];
+            let b_0 = unsafe { extend_lifetime_generic_mut(&mut b_0) };
+            let b_1 = unsafe { extend_lifetime_generic_mut(&mut b_1) };
             let config = double_buffer::Config::new((ch3, ch4), pio_rx, b_0);
             let rx_transfer = config.start();
             let mut rx_transfer = rx_transfer.write_next(b_1);
