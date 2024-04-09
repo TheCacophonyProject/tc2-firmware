@@ -65,7 +65,11 @@ use rp2040_hal::{Watchdog, I2C};
 //  for the agent software.
 pub const FIRMWARE_VERSION: u32 = 10;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
-const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 120_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
+
+// got funny results at 150 for aduio seems to work better at 120
+const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 120_000_000;
+
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
@@ -107,11 +111,19 @@ fn main() -> ! {
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
+
+    let is_audio = DeviceConfig::is_audio_device();
+    let freq;
+    if is_audio {
+        freq = ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz();
+    } else {
+        freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
+    }
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
         peripherals.ROSC,
-        ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
+        freq,
     );
 
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
@@ -195,7 +207,7 @@ fn main() -> ! {
     //     }
     // }
 
-    if DeviceConfig::is_audio_device() {
+    if is_audio {
         let gpio0 = pins.gpio0;
         let gpio1 = pins.gpio1;
         let pins = Core1Pins {
