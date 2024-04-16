@@ -5,12 +5,13 @@ use chrono::{NaiveDateTime, Timelike};
 use cortex_m::delay::Delay;
 use crc::{Algorithm, Crc};
 use defmt::{error, info, warn, Format};
+use embedded_hal::digital::v2::InputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_i2c_WriteRead,
 };
 use pcf8563::{Control, DateTime, PCF8563};
-use rp2040_hal::gpio::bank0::{Gpio6, Gpio7};
-use rp2040_hal::gpio::{FunctionI2C, Pin, PullDown};
+use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput};
 use rp2040_hal::i2c::Error;
 use rp2040_hal::I2C;
 
@@ -22,6 +23,7 @@ pub type I2CConfig = I2C<
     ),
 >;
 pub struct SharedI2C {
+    unlocked_pin: Option<Pin<Gpio3, FunctionSio<SioInput>, PullDown>>,
     i2c: Option<I2CConfig>,
     rtc: Option<PCF8563<I2CConfig>>,
 }
@@ -94,8 +96,13 @@ pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
     residue: 0x0000,
 };
 impl SharedI2C {
-    pub fn new(i2c: I2CConfig, delay: &mut Delay) -> SharedI2C {
+    pub fn new(
+        i2c: I2CConfig,
+        unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
+        delay: &mut Delay,
+    ) -> SharedI2C {
         let mut shared_i2c = SharedI2C {
+            unlocked_pin: Some(unlocked_pin),
             i2c: Some(i2c),
             rtc: None,
         };
@@ -130,12 +137,16 @@ impl SharedI2C {
         shared_i2c
     }
 
-    pub fn free(&mut self) -> I2CConfig {
-        if let Some(device) = self.rtc.take() {
-            let dev = device.destroy();
-            dev
-        } else if let Some(device) = self.i2c.take() {
-            device
+    pub fn free(&mut self) -> (I2CConfig, Pin<Gpio3, FunctionSio<SioInput>, PullDown>) {
+        if let Some(unlocked_pin) = self.unlocked_pin.take() {
+            if let Some(device) = self.rtc.take() {
+                let dev = device.destroy();
+                (dev, unlocked_pin)
+            } else if let Some(device) = self.i2c.take() {
+                (device, unlocked_pin)
+            } else {
+                unreachable!("Can't get here")
+            }
         } else {
             unreachable!("Can't get here")
         }
@@ -156,9 +167,20 @@ impl SharedI2C {
     }
 
     fn attiny_write_command(&mut self, command: u8, value: u8, crc: u16) -> Result<(), Error> {
-        let mut payload = [command, value, 0, 0];
-        BigEndian::write_u16(&mut payload[2..=3], crc);
-        self.i2c().write(ATTINY_ADDRESS, &payload)
+        let lock_pin = self.unlocked_pin.take().unwrap();
+        let is_low = lock_pin.is_low().unwrap_or(false);
+        if is_low {
+            let pin = lock_pin.into_pull_type::<PullUp>();
+
+            let mut payload = [command, value, 0, 0];
+            BigEndian::write_u16(&mut payload[2..=3], crc);
+            let result = self.i2c().write(ATTINY_ADDRESS, &payload);
+            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+            result
+        } else {
+            self.unlocked_pin = Some(lock_pin);
+            Err(Error::Abort(1))
+        }
     }
 
     // fn attiny_read_command(&mut self, command: u8, payload: &mut [u8; 3]) -> Result<(), Error> {
@@ -186,16 +208,26 @@ impl SharedI2C {
         value: Option<u8>,
         payload: &mut [u8; 3],
     ) -> Result<(), Error> {
-        if let Some(v) = value {
-            let mut request = [command, v, 0x00, 0x00];
-            let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..=1]);
-            BigEndian::write_u16(&mut request[2..=3], crc);
-            self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
+        let lock_pin = self.unlocked_pin.take().unwrap();
+        let is_low = lock_pin.is_low().unwrap_or(false);
+        if is_low {
+            let pin = lock_pin.into_pull_type::<PullUp>();
+            let result = if let Some(v) = value {
+                let mut request = [command, v, 0x00, 0x00];
+                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..=1]);
+                BigEndian::write_u16(&mut request[2..=3], crc);
+                self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
+            } else {
+                let mut request = [command, 0x00, 0x00];
+                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
+                BigEndian::write_u16(&mut request[1..=2], crc);
+                self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
+            };
+            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+            result
         } else {
-            let mut request = [command, 0x00, 0x00];
-            let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
-            BigEndian::write_u16(&mut request[1..=2], crc);
-            self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
+            self.unlocked_pin = Some(lock_pin);
+            Err(Error::Abort(1))
         }
     }
 
@@ -429,159 +461,235 @@ impl SharedI2C {
     pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, &str> {
         let mut num_attempts = 0;
         loop {
-            match self.rtc().get_datetime() {
-                Ok(datetime) => {
-                    if num_attempts != 0 {
-                        info!("Getting datetime took {} attempts", num_attempts);
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let result = match self.rtc().get_datetime() {
+                    Ok(datetime) => {
+                        if num_attempts != 0 {
+                            info!("Getting datetime took {} attempts", num_attempts);
+                        }
+                        if datetime.day == 0
+                            || datetime.day > 31
+                            || datetime.month == 0
+                            || datetime.month > 12
+                        {
+                            Err("Invalid datetime input from RTC")
+                        } else {
+                            Ok(datetime)
+                        }
                     }
-                    if datetime.day == 0
-                        || datetime.day > 31
-                        || datetime.month == 0
-                        || datetime.month > 12
-                    {
-                        return Err("Invalid datetime input from RTC");
+                    Err(pcf8563::Error::I2C(e)) => Err("I2C error to RTC"),
+                    Err(pcf8563::Error::InvalidInputData) => {
+                        unreachable!("Should never get here")
                     }
-                    return Ok(datetime);
-                }
-                Err(pcf8563::Error::I2C(e)) => {
+                };
+
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if result.is_err() {
                     if num_attempts == 100 {
-                        return Err("I2C error to RTC");
+                        return result;
+                    } else {
+                        num_attempts += 1;
+                        delay.delay_us(500);
                     }
-                    num_attempts += 1;
-                    delay.delay_us(500);
-                }
-                Err(pcf8563::Error::InvalidInputData) => {
-                    unreachable!("Should never get here")
+                } else {
+                    return result;
+                };
+            } else {
+                num_attempts += 1;
+                delay.delay_us(500);
+                self.unlocked_pin = Some(lock_pin);
+                if num_attempts == 100 {
+                    return Err("I2C in use");
                 }
             }
         }
     }
 
-    pub fn set_current_time(&mut self) {
-        let date_time = DateTime {
-            year: 23,
-            month: 11,
-            weekday: 3,
-            day: 22,
-            hours: 21,
-            minutes: 10,
-            seconds: 0,
-        };
-        self.rtc().set_datetime(&date_time).unwrap();
+    pub fn enable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        let mut attempts = 0;
+        loop {
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let mut success = true;
+                success = success && self.rtc().clear_alarm_flag().is_ok();
+                success = success && self.rtc().control_alarm_interrupt(Control::On).is_ok();
+                success = success && self.rtc().control_alarm_interrupt(Control::On).is_ok();
+                success = success && self.rtc().control_alarm_day(Control::Off).is_ok();
+                success = success && self.rtc().control_alarm_hours(Control::On).is_ok();
+                success = success && self.rtc().control_alarm_minutes(Control::On).is_ok();
+                success = success && self.rtc().control_alarm_weekday(Control::Off).is_ok();
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if success {
+                    return Ok(());
+                } else {
+                    attempts += 1;
+                    if attempts == 100 {
+                        return Err("Failed to enable alarm");
+                    } else {
+                        delay.delay_us(500);
+                    }
+                }
+            } else {
+                attempts += 1;
+                self.unlocked_pin = Some(lock_pin);
+                if attempts == 100 {
+                    return Err("Failed to access I2C to enable alarm");
+                } else {
+                    delay.delay_us(500);
+                }
+            }
+        }
     }
 
-    pub fn enable_alarm(&mut self, delay: &mut Delay) {
-        self.rtc().clear_alarm_flag().unwrap_or(());
-        self.rtc()
-            .control_alarm_interrupt(Control::On)
-            .unwrap_or(());
-        self.rtc().control_alarm_day(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_hours(Control::On).unwrap_or(());
-        self.rtc().control_alarm_minutes(Control::On).unwrap_or(());
-        self.rtc().control_alarm_weekday(Control::Off).unwrap_or(());
-    }
-
-    pub fn disable_alarm(&mut self, delay: &mut Delay) {
-        self.rtc().clear_alarm_flag().unwrap_or(());
-        self.rtc()
-            .control_alarm_interrupt(Control::Off)
-            .unwrap_or(());
-        self.rtc().control_alarm_day(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_hours(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_minutes(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_weekday(Control::Off).unwrap_or(());
-    }
-
-    pub fn print_alarm_status(&mut self, delay: &mut Delay) {
-        info!(
-            "Alarm interrupt enabled: {}",
-            self.rtc().is_alarm_interrupt_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm day enabled: {}",
-            self.rtc().is_alarm_day_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm weekday enabled: {}",
-            self.rtc().is_alarm_weekday_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm hour enabled: {}",
-            self.rtc().is_alarm_hours_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm minute enabled: {}",
-            self.rtc().is_alarm_minutes_enabled().unwrap_or(false)
-        );
+    pub fn disable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        let mut attempts = 0;
+        loop {
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let mut success = true;
+                success = success && self.rtc().clear_alarm_flag().is_ok();
+                success = success && self.rtc().control_alarm_interrupt(Control::Off).is_ok();
+                success = success && self.rtc().control_alarm_day(Control::Off).is_ok();
+                success = success && self.rtc().control_alarm_hours(Control::Off).is_ok();
+                success = success && self.rtc().control_alarm_minutes(Control::Off).is_ok();
+                success = success && self.rtc().control_alarm_weekday(Control::Off).is_ok();
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if success {
+                    return Ok(());
+                } else {
+                    attempts += 1;
+                    if attempts == 100 {
+                        return Err("Failed to enable alarm");
+                    } else {
+                        delay.delay_us(500);
+                    }
+                }
+            } else {
+                attempts += 1;
+                self.unlocked_pin = Some(lock_pin);
+                if attempts == 100 {
+                    return Err("Failed to access I2C to enable alarm");
+                } else {
+                    delay.delay_us(500);
+                }
+            }
+        }
     }
     pub fn set_wakeup_alarm(
         &mut self,
         datetime_utc: &NaiveDateTime,
         delay: &mut Delay,
-    ) -> Result<(), Error> {
+    ) -> Result<(), &str> {
         let wake_hour = datetime_utc.time().hour();
         let wake_min = datetime_utc.time().minute();
         info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
         let mut num_attempts = 0;
         loop {
-            match self.rtc().set_alarm_hours(wake_hour as u8) {
-                Ok(_) => {
-                    num_attempts = 0;
-                    loop {
-                        match self.rtc().set_alarm_minutes(wake_min as u8) {
-                            Ok(_) => return Ok(()),
-                            Err(pcf8563::Error::I2C(e)) => {
-                                if num_attempts == 100 {
-                                    return Err(e);
-                                }
-                                num_attempts += 1;
-                                delay.delay_us(500);
-                            }
-                            Err(pcf8563::Error::InvalidInputData) => {
-                                unreachable!("Should never get here")
-                            }
-                        }
-                    }
-                }
-                Err(pcf8563::Error::I2C(e)) => {
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let mut success = true;
+                success = success && self.rtc().set_alarm_hours(wake_hour as u8).is_ok();
+                success = success && self.rtc().set_alarm_minutes(wake_min as u8).is_ok();
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if success {
+                    return Ok(());
+                } else {
                     if num_attempts == 100 {
-                        return Err(e);
+                        return Err("Failed to set wakeup alarm");
                     }
                     num_attempts += 1;
                     delay.delay_us(500);
                 }
-                Err(pcf8563::Error::InvalidInputData) => {
-                    unreachable!("Should never get here")
+            } else {
+                num_attempts += 1;
+                self.unlocked_pin = Some(lock_pin);
+                if num_attempts == 100 {
+                    return Err("Failed to access I2C to set wakeup alarm");
+                } else {
+                    delay.delay_us(500);
                 }
             }
         }
     }
 
     pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
-        let mut num_attempts = 0;
+        // NOTE: This only returns on success, otherwise it blocks indefinitely.
         loop {
-            match self.rtc().get_alarm_flag() {
-                Ok(val) => {
-                    return val;
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let result = self.rtc().get_alarm_flag();
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if result.is_ok() {
+                    return result.unwrap();
                 }
-                Err(e) => {
-                    if num_attempts == 100 {
-                        error!("Failed reading alarm_triggered from RTC");
-                        return false;
+            } else {
+                self.unlocked_pin = Some(lock_pin);
+            }
+            delay.delay_us(500);
+        }
+    }
+
+    pub fn clear_alarm(&mut self, delay: &mut Delay) {
+        // NOTE: This only returns on success, otherwise it blocks indefinitely.
+        loop {
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let result = self.rtc().clear_alarm_flag();
+                let success = result.is_ok();
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if success {
+                    return;
+                }
+            } else {
+                self.unlocked_pin = Some(lock_pin);
+            }
+            delay.delay_us(500);
+        }
+    }
+
+    pub fn alarm_interrupt_enabled(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        let mut attempts = 0;
+        loop {
+            let lock_pin = self.unlocked_pin.take().unwrap();
+            let is_low = lock_pin.is_low().unwrap_or(false);
+            if is_low {
+                let pin = lock_pin.into_pull_type::<PullUp>();
+                let result = self.rtc().is_alarm_interrupt_enabled();
+                let success = result.is_ok();
+                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+                if success {
+                    return Ok(result.unwrap());
+                } else {
+                    attempts += 1;
+                    if attempts == 100 {
+                        return Err("Failed to enable alarm");
+                    } else {
+                        delay.delay_us(500);
                     }
-                    num_attempts += 1;
+                }
+            } else {
+                attempts += 1;
+                self.unlocked_pin = Some(lock_pin);
+                if attempts == 100 {
+                    return Err("Failed to access I2C to enable alarm");
+                } else {
                     delay.delay_us(500);
                 }
             }
         }
-    }
-
-    pub fn clear_alarm(&mut self) -> () {
-        self.rtc().clear_alarm_flag().unwrap_or(())
-    }
-
-    pub fn alarm_interrupt_enabled(&mut self) -> bool {
-        self.rtc().is_alarm_interrupt_enabled().unwrap_or(false)
     }
 
     pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), Error> {

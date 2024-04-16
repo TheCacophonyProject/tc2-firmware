@@ -28,7 +28,9 @@ pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
-use crate::onboard_flash::{extend_lifetime_generic, extend_lifetime_generic_mut};
+use crate::onboard_flash::{
+    extend_lifetime_generic, extend_lifetime_generic_mut, extend_lifetime_generic_mut_2,
+};
 use bsp::{
     entry,
     hal::{
@@ -51,20 +53,22 @@ use embedded_hal::prelude::{
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
-use rp2040_hal::gpio::FunctionI2C;
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, SioInput};
 use rp2040_hal::I2C;
 
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 10;
+pub const FIRMWARE_VERSION: u32 = 11;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
-static mut CORE1_STACK: Stack<45000> = Stack::new(); // 174,000 bytes
+///static mut CORE1_STACK: Stack<45000> = Stack::new(); // 180,000 bytes
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
+
+#[repr(C, align(32))]
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
@@ -147,15 +151,24 @@ fn main() -> ! {
     );
     let mut delay = Delay::new(core.SYST, system_clock_freq);
     info!("Initing shared i2c");
-    let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+    // We need to get the GPIO pin...
+    let unlocked_pin = pins
+        .gpio3
+        .into_function::<FunctionSio<SioInput>>()
+        .into_pull_type::<PullDown>();
+
+    let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
     info!("Got shared i2c");
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
-        shared_i2c.clear_alarm();
+        shared_i2c.clear_alarm(&mut delay);
     }
-    shared_i2c.disable_alarm(&mut delay);
-    let i2c1 = shared_i2c.free();
+    let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+    if disabled_alarm.is_err() {
+        error!("{}", disabled_alarm.unwrap());
+    }
+    let (i2c1, unlocked_pin) = shared_i2c.free();
     // If we're waking up to make an audio recording, do that.
 
     /*
@@ -247,6 +260,7 @@ fn main() -> ! {
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
+    let mut core1_stack: Stack<45000> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
@@ -276,19 +290,23 @@ fn main() -> ! {
             fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
-        let _ = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
-            core_1_task(
-                frame_buffer_local,
-                frame_buffer_local_2,
-                system_clock_freq,
-                pins,
-                i2c1,
-                lepton_serial,
-                lepton_firmware_version,
-                alarm_woke_us,
-                timer,
-            )
-        });
+        let _ = core1.spawn(
+            unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) },
+            move || {
+                core_1_task(
+                    frame_buffer_local,
+                    frame_buffer_local_2,
+                    system_clock_freq,
+                    pins,
+                    i2c1,
+                    unlocked_pin,
+                    lepton_serial,
+                    lepton_firmware_version,
+                    alarm_woke_us,
+                    timer,
+                )
+            },
+        );
     }
 
     let result = sio.fifo.read_blocking();

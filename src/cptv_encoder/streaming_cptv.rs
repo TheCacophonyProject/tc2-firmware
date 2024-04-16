@@ -415,6 +415,7 @@ impl<'a> CptvStream<'a> {
         flash_storage: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
         crc_table: &'a [u32; 256],
+        is_status_recording: bool,
     ) -> CptvStream<'a> {
         let starting_block_index = flash_storage.start_file();
 
@@ -425,6 +426,7 @@ impl<'a> CptvStream<'a> {
             lepton_serial,
             lepton_firmware_version,
             device_config,
+            is_status_recording,
         );
         CptvStream {
             cursor: BitCursor::new(),
@@ -770,6 +772,10 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
             &header.accuracy,
             FieldType::Accuracy,
         ))
+        .chain(push_optional_field_iterator(
+            &header.status_recording.map_or(None, |x| Some(x)),
+            FieldType::MotionConfig,
+        ))
         .into_iter()
 }
 
@@ -783,6 +789,7 @@ pub struct Cptv2Header {
     pub device_id: u32,
     pub serial_number: Option<u32>,
     pub firmware_version: Option<[u8; 30]>,
+    pub status_recording: Option<[u8; 30]>,
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
     pub loc_timestamp: Option<u64>,
@@ -801,6 +808,7 @@ impl Cptv2Header {
         lepton_serial: Option<u32>,
         lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
         device_config: &DeviceConfig,
+        is_status_recording: bool,
     ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
@@ -818,9 +826,17 @@ impl Cptv2Header {
         } else {
             let _ = write!(&mut cursor, "{}", FIRMWARE_VERSION);
         }
+        let status_recording = if is_status_recording {
+            let mut status = [0u8; 30];
+            status.copy_from_slice("status: true".as_bytes());
+            Some(status)
+        } else {
+            None
+        };
 
         let (lat, lng) = device_config.config().location;
         let mut header = Cptv2Header {
+            status_recording,
             timestamp,
             device_name: [0; 63],
             model: [0; 30],

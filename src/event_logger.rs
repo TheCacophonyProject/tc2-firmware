@@ -3,6 +3,7 @@
 //  be in 32bit seconds past a given epoch (let's say Jan 1 2023).  Is a 1 second granularity enough?
 use crate::onboard_flash::OnboardFlash;
 use byteorder::{ByteOrder, LittleEndian};
+use chrono::NaiveDateTime;
 use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
@@ -95,6 +96,10 @@ pub struct LoggerEvent {
 impl LoggerEvent {
     pub fn new(event: LoggerEventKind, timestamp: u64) -> LoggerEvent {
         LoggerEvent { event, timestamp }
+    }
+
+    pub fn timestamp(&self) -> Option<NaiveDateTime> {
+        NaiveDateTime::from_timestamp_nanos(self.timestamp as i64)
     }
 }
 pub const MAX_EVENTS_IN_LOGGER: usize = 1024;
@@ -223,6 +228,30 @@ impl EventLogger {
         } else {
             0
         }
+    }
+
+    pub fn latest_event_of_kind(
+        &self,
+        event_type: LoggerEventKind,
+        flash_storage: &mut OnboardFlash,
+    ) -> Option<LoggerEvent> {
+        let event_indices = self.event_range();
+        let total_events = event_indices.end;
+        let mut latest_event: Option<LoggerEvent> = None;
+        for event_index in event_indices {
+            let event_bytes = self.event_at_index(event_index, flash_storage);
+            if let Some(event_bytes) = event_bytes {
+                let kind = LittleEndian::read_u16(&event_bytes[0..2]);
+                if let Ok(LoggerEventKind::OffloadedRecording) = LoggerEventKind::try_from(kind) {
+                    let timestamp = LittleEndian::read_u64(&event_bytes[2..10]);
+                    latest_event = Some(LoggerEvent {
+                        timestamp,
+                        event: LoggerEventKind::OffloadedRecording,
+                    });
+                }
+            }
+        }
+        latest_event
     }
 
     pub fn event_at_index(

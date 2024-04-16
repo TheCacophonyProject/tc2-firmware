@@ -142,14 +142,17 @@ impl DeviceConfig {
     }
 
     pub fn next_recording_window_start(&self, now_utc: &NaiveDateTime) -> NaiveDateTime {
-        self.next_recording_window(now_utc).0
+        self.next_or_current_recording_window(now_utc).0
     }
 
     pub fn use_low_power_mode(&self) -> bool {
         self.config_inner.use_low_power_mode
     }
 
-    pub fn next_recording_window(&self, now_utc: &NaiveDateTime) -> (NaiveDateTime, NaiveDateTime) {
+    pub fn next_or_current_recording_window(
+        &self,
+        now_utc: &NaiveDateTime,
+    ) -> (NaiveDateTime, NaiveDateTime) {
         let (is_absolute_start, mut start_offset) = self.config_inner.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.config_inner.end_recording_time;
 
@@ -286,12 +289,17 @@ impl DeviceConfig {
         .unwrap();
         date_time_utc.hour() > sunrise.hour() && date_time_utc.hour() < sunset.hour()
     }
-    pub fn time_is_in_recording_window(&self, date_time_utc: &NaiveDateTime) -> bool {
+    pub fn time_is_in_recording_window(
+        &self,
+        date_time_utc: &NaiveDateTime,
+        window: &Option<(NaiveDateTime, NaiveDateTime)>,
+    ) -> bool {
         if self.is_continuous_recorder() {
             info!("Continuous recording mode enabled");
             return true;
         }
-        let (start_time, end_time) = self.next_recording_window(date_time_utc);
+        let (start_time, end_time) =
+            window.unwrap_or(self.next_or_current_recording_window(date_time_utc));
         let starts_in = start_time - *date_time_utc;
         let starts_in_hours = starts_in.num_hours();
         let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
