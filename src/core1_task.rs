@@ -823,7 +823,7 @@ pub fn core_1_task(
             //  the RPi will shut down when it wants to.
 
             if device_config.use_low_power_mode() {
-                // Once per minute, if we're not currently recording, tell the RPi it can shut-down, as it's not
+                // Once per minute, if we're not currently recording, tell the RPi it can shut down, as it's not
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
                 advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 if !logged_told_rpi_to_sleep {
@@ -852,7 +852,7 @@ pub fn core_1_task(
                 }
             };
 
-            // NOTE: In continuous recording mode, the device will only shutdown briefly when the flash storage
+            // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
             // is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
             // never shut down.
             is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
@@ -928,6 +928,7 @@ pub fn core_1_task(
                         };
                         let enabled_alarm = shared_i2c.enable_alarm(&mut delay);
                         if enabled_alarm.is_err() {
+                            error!("Failed enabling alarm");
                             event_logger.log_event(
                                 LoggerEvent::new(
                                     LoggerEventKind::RtcCommError,
@@ -1020,10 +1021,10 @@ pub fn core_1_task(
             let sync_time = (sync_rtc_end - sync_rtc_start).to_micros() as i32;
             let additional_wait = (expected_rtc_sync_time_us - sync_time).max(0);
             if additional_wait > 0 {
-                // warn!("Additional wait after RTC sync {}µs", additional_wait);
+                warn!("Additional wait after RTC sync {}µs", additional_wait);
                 delay.delay_us(additional_wait as u32);
             } else {
-                // warn!("RTC sync took {}µs", sync_time)
+                warn!("RTC sync took {}µs", sync_time)
             }
         } else {
             // Increment the datetime n frame's worth.
@@ -1037,7 +1038,7 @@ pub fn core_1_task(
                 1
             };
 
-            incremented_datetime += chrono::Duration::milliseconds(115 * frames_elapsed as i64);
+            incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
             if incremented_datetime > synced_date_time.date_time_utc {
                 synced_date_time.set(incremented_datetime, &timer);
             }
@@ -1061,7 +1062,7 @@ pub fn core_1_task(
     }
 }
 
-fn current_time(synced_time: &NaiveDateTime, offset: chrono::Duration) -> NaiveDateTime {
+fn current_time(synced_time: &NaiveDateTime, offset: Duration) -> NaiveDateTime {
     synced_time.add(offset)
 }
 
