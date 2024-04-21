@@ -403,7 +403,7 @@ pub fn core_1_task(
         should_offload
     };
 
-    if should_offload {
+    let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
             &mut pi_spi,
@@ -415,8 +415,10 @@ pub fn core_1_task(
             &mut timer,
             &mut event_logger,
             &synced_date_time,
-        );
-    }
+        )
+    } else {
+        false
+    };
 
     // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
@@ -463,7 +465,9 @@ pub fn core_1_task(
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
     let mut logged_flash_storage_nearly_full = false;
-    let mut made_startup_status_recording = false;
+    // NOTE: If there are already recordings on the flash memory,
+    //  assume we've already made the startup status recording during this recording window.
+    let mut made_startup_status_recording = !has_files_to_offload || did_offload_files;
     let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
     // Enable raw frame transfers to pi – if not already enabled.

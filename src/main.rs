@@ -150,7 +150,7 @@ fn main() -> ! {
     );
     let mut delay = Delay::new(core.SYST, system_clock_freq);
     info!("Initing shared i2c");
-    // We need to get the GPIO pin...
+    // We need to get the GPIO pin for determining who is using the I2C bus.
     let unlocked_pin = pins
         .gpio3
         .into_function::<FunctionSio<SioInput>>()
