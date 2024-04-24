@@ -102,6 +102,8 @@ impl FrameBuffer {
     }
 }
 // use rp2040_hal::pac;
+use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, SyncedDateTime};
+use crate::device_config::get_naive_datetime;
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 
 #[entry]
@@ -149,7 +151,6 @@ fn main() -> ! {
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
-
     let pins = rp2040_hal::gpio::Pins::new(
         peripherals.IO_BANK0,
         peripherals.PADS_BANK0,
@@ -168,6 +169,9 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
+    watchdog.feed();
+    delay.delay_ms(1000);
+    watchdog.feed();
 
     info!("Initing shared i2c");
     let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
@@ -179,234 +183,60 @@ fn main() -> ! {
     }
     shared_i2c.disable_alarm(&mut delay);
 
-    let i2c1: I2C<
-        pac::I2C1,
-        (
-            rp2040_hal::gpio::Pin<
-                rp2040_hal::gpio::bank0::Gpio6,
-                rp2040_hal::gpio::FunctionI2c,
-                rp2040_hal::gpio::PullDown,
-            >,
-            rp2040_hal::gpio::Pin<
-                rp2040_hal::gpio::bank0::Gpio7,
-                rp2040_hal::gpio::FunctionI2c,
-                rp2040_hal::gpio::PullDown,
-            >,
-        ),
-    > = shared_i2c.free();
+    let mut synced_date_time = SyncedDateTime::default();
+    match shared_i2c.get_datetime(&mut delay) {
+        Ok(now) => {
+            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
+            synced_date_time.set(get_naive_datetime(now), &timer);
+        }
+        Err(_) => error!("Unable to get DateTime from RTC"),
+    }
+    shared_i2c.enable_alarm(&mut delay);
 
-    // {
-    // If we're waking up to make an audio recording, do that.
-    // existing_config = None;
-    // if let Some(existing_config) = &existing_config {
-    //     info!("Existing config {:#?}", existing_config.config());
-    // } else {
-    //     // We need to wake up the rpi and get a config
-    //     if !(wake_raspberry_pi(&mut shared_i2c, &mut delay)) {
-    //         crate::panic!("Could not wake rpi to get config");
-    //     }
-    // }
+    let wake_in: i32 = 60 * 2;
 
-    if is_audio {
-        let gpio0 = pins.gpio0;
-        let gpio1 = pins.gpio1;
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
-
-        audio_branch(
-            i2c1,
-            system_clock_freq,
-            timer,
-            pins,
-            gpio0,
-            gpio1,
-            watchdog,
-            alarm_woke_us,
+    let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
+    if let Ok(_) = shared_i2c.set_wakeup_alarm(&wakeup, &mut delay) {
+        let alarm_enabled = shared_i2c.alarm_interrupt_enabled();
+        info!("Wake up alarm interrupt enabled {}", alarm_enabled);
+        info!(
+            "Recording scheduled for {}:{} enabled ??{}",
+            shared_i2c.get_alarm_hours(),
+            shared_i2c.get_alarm_minutes(),
+            alarm_enabled,
         );
     } else {
-        let lepton_pins = LeptonPins {
-            tx: pins.gpio23.into_function(),
-            rx: pins.gpio20.into_function(),
-            clk: pins.gpio22.into_function(),
-            cs: pins.gpio21.into_function(),
-
-            vsync: pins.gpio19.into_function(),
-
-            sda: pins.gpio24.into_function(),
-            scl: pins.gpio25.into_function(),
-
-            power_down: pins.gpio28.into_push_pull_output(),
-            power_enable: pins.gpio18.into_push_pull_output(),
-            reset: pins.gpio29.into_push_pull_output(),
-            clk_disable: pins.gpio27.into_push_pull_output(),
-            master_clk: pins.gpio26.into_floating_input(),
-        };
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
-        thermal_code(
-            lepton_pins,
-            pins,
-            watchdog,
-            system_clock_freq,
-            delay,
-            timer,
-            i2c1,
-            clocks,
-            rosc,
-        );
+        error!("Failed setting wake alarm, can't go to sleep");
     }
-}
-use crate::attiny_rtc_i2c::I2CConfig;
+    loop {
+        advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+        if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
+            if pi_is_powered_down {
+                let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
 
-pub fn audio_branch(
-    i2c_config: I2CConfig,
-    clock_freq: u32,
-    mut timer: bsp::hal::Timer,
-    pins: Core1Pins,
-    gpio0: rp2040_hal::gpio::Pin<
-        rp2040_hal::gpio::bank0::Gpio0,
-        rp2040_hal::gpio::FunctionNull,
-        rp2040_hal::gpio::PullDown,
-    >,
-    gpio1: rp2040_hal::gpio::Pin<
-        rp2040_hal::gpio::bank0::Gpio1,
-        rp2040_hal::gpio::FunctionNull,
-        rp2040_hal::gpio::PullDown,
-    >,
-    mut watchdog: bsp::hal::Watchdog,
-    alarm_triggered: bool,
-) -> ! {
-    audio_task(
-        i2c_config,
-        clock_freq,
-        &mut timer,
-        pins,
-        gpio0,
-        gpio1,
-        &mut watchdog,
-        alarm_triggered,
-    );
-}
-pub fn thermal_code(
-    lepton_pins: LeptonPins,
-    pins: Core1Pins,
-    mut watchdog: Watchdog,
-    system_clock_freq: u32,
-    mut delay: Delay,
-    timer: bsp::hal::Timer,
-    i2c1: I2CConfig,
-    clocks: &ClocksManager,
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
-) -> ! {
-    let mut core1stack: Stack<45000> = Stack::new(); // 180,000 bytes
-    let core1stack = unsafe { extend_lifetime_generic_mut(&mut core1stack) };
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let mut sio = Sio::new(peripherals.SIO);
-    let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
-
-    let cores = mc.cores();
-    let core1 = &mut cores[1];
-    let mut lepton = init_lepton_module(
-        peripherals.SPI0,
-        peripherals.I2C0,
-        system_clock_freq,
-        &mut peripherals.RESETS,
-        &mut delay,
-        lepton_pins,
-    );
-
-    let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
-    let lepton_serial = lepton.get_camera_serial().map_or(None, |x| Some(x));
-    let lepton_firmware_version = lepton.get_firmware_version().map_or(None, |x| Some(x));
-    if let Some(((m_major, m_minor, m_build), (d_major, d_minor, d_build))) =
-        lepton_firmware_version
-    {
-        info!(
-            "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}",
-            m_major, m_minor, m_build, d_major, d_minor, d_build
-        );
-    }
-    info!("Camera serial #{}", lepton_serial);
-    info!("Radiometry enabled? {}", radiometric_mode);
-
-    let mut fb0 = FrameBuffer::new();
-    let mut fb1 = FrameBuffer::new();
-    let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb0)
-    })));
-    let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb1)
-    })));
-    // Shenanigans to convince the second thread that all these values exist for the lifetime of the
-    // program.
-    let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
-        unsafe { extend_lifetime_generic(&frame_buffer) };
-    let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
-        unsafe { extend_lifetime_generic(&frame_buffer_2) };
-    watchdog.feed();
-    watchdog.disable();
-    let peripheral_clock_freq = clocks.peripheral_clock.freq();
-    {
-        let _ = core1.spawn(unsafe { &mut core1stack.mem }, move || {
-            core_1_task(
-                frame_buffer_local,
-                frame_buffer_local_2,
-                system_clock_freq,
-                pins,
-                i2c1,
-                lepton_serial,
-                lepton_firmware_version,
-                true,
-                timer,
-            )
-        });
-    }
-
-    let result = sio.fifo.read_blocking();
-    crate::assert_eq!(result, Core1Task::Ready.into());
-    sio.fifo
-        .write_blocking(if radiometric_mode { 2 } else { 1 });
-
-    let result = sio.fifo.read_blocking();
-    if result == Core1Task::RequestReset.into() {
-        watchdog.start(100.micros());
-        loop {
-            nop();
+                //just incase it triggers here
+                if alarm_triggered {
+                    info!("Alarm triggered after taking a recording reseeting rp2040");
+                    loop {
+                        // wait for watchdog to reset rp2040
+                        wfe();
+                    }
+                }
+                if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
+                } else {
+                    error!("Coudln't sleep")
+                }
+            }
         }
+        let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
+        if alarm_triggered {
+            info!("Alarm triggered after taking a recording reseeting rp2040");
+            loop {
+                // wait for watchdog to reset rp2040
+                wfe();
+            }
+        }
+        delay.delay_ms(5 * 1000);
+        watchdog.feed();
     }
-    crate::assert_eq!(result, Core1Task::Ready.into());
-
-    frame_acquisition_loop(
-        rosc,
-        &mut lepton,
-        &mut sio.fifo,
-        peripheral_clock_freq,
-        &mut delay,
-        &mut peripherals.RESETS,
-        frame_buffer_local,
-        frame_buffer_local_2,
-        watchdog,
-    );
 }
