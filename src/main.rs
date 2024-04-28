@@ -127,6 +127,7 @@ fn main() -> ! {
         peripherals.ROSC,
         freq,
     );
+    // let clocks = clock_utils::normal_clock();
 
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
@@ -208,6 +209,9 @@ fn main() -> ! {
     } else {
         error!("Failed setting wake alarm, can't go to sleep");
     }
+    watchdog.feed();
+    delay.delay_ms(1000);
+    watchdog.feed();
     loop {
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
@@ -222,6 +226,8 @@ fn main() -> ! {
                         wfe();
                     }
                 }
+                info!("SLEEPING");
+
                 if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
                 } else {
                     error!("Coudln't sleep")
