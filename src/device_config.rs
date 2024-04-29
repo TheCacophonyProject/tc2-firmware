@@ -146,6 +146,7 @@ impl DeviceConfig {
     }
 
     pub fn use_low_power_mode(&self) -> bool {
+        return true;
         self.config_inner.use_low_power_mode
     }
 

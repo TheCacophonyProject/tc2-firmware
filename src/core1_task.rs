@@ -222,7 +222,7 @@ pub fn core_1_task(
     woken_by_alarm: bool,
     mut timer: Timer,
 ) {
-    let dev_mode = false;
+    let dev_mode = true;
     info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
@@ -819,7 +819,7 @@ pub fn core_1_task(
         }
 
         let one_min_check_start = timer.get_counter();
-        let expected_rtc_sync_time_us = 2100;
+        let expected_rtc_sync_time_us = 4300;
         if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
