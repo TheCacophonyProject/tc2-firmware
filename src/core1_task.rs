@@ -249,7 +249,7 @@ pub fn core_1_task(
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-    let should_record_to_flash = true;
+    let should_record_to_flash = false;
 
     loop {
         // NOTE: Keep retrying until we get a datetime from RTC.
@@ -829,7 +829,7 @@ pub fn core_1_task(
         }
 
         let one_min_check_start = timer.get_counter();
-        let expected_rtc_sync_time_us = 4300;
+        let expected_rtc_sync_time_us = 3500;
         if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
@@ -850,7 +850,12 @@ pub fn core_1_task(
                     );
                     logged_told_rpi_to_sleep = true;
                 }
+                info!(
+                    "Advise pi to shutdown took {}µs",
+                    (timer.get_counter() - sync_rtc_start).to_micros()
+                );
             }
+            let sync_rtc_start_real = timer.get_counter();
             synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
                 Err(err_str) => {
@@ -865,6 +870,10 @@ pub fn core_1_task(
                     synced_date_time
                 }
             };
+            info!(
+                "RTC Sync time took {}µs",
+                (timer.get_counter() - sync_rtc_start_real).to_micros()
+            );
 
             // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
             // is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
@@ -873,9 +882,12 @@ pub fn core_1_task(
             let is_outside_recording_window = if !dev_mode {
                 !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
             } else {
-                let is_inside_recording_window = synced_date_time.date_time_utc
-                    < startup_date_time_utc + chrono::Duration::minutes(5);
-                !is_inside_recording_window
+                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
+
+                // DEV_MODE
+                // let is_inside_recording_window =
+                //     synced_date_time.date_time_utc < startup_date_time_utc + Duration::minutes(5);
+                // !is_inside_recording_window
             };
 
             let flash_storage_nearly_full = flash_storage.is_too_full_to_start_new_recordings();
@@ -893,6 +905,7 @@ pub fn core_1_task(
                 if flash_storage_nearly_full
                     || (is_outside_recording_window && flash_storage.has_files_to_offload())
                 {
+                    warn!("Recording window ended with files to offload, request restart");
                     // If flash storage is nearly full, or we're now outside the recording window,
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
@@ -917,6 +930,7 @@ pub fn core_1_task(
                         logged_told_rpi_to_sleep = true;
                     }
                 }
+                let check_power_down_state_start = timer.get_counter();
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
                         if !logged_pi_powered_down {
@@ -1026,19 +1040,29 @@ pub fn core_1_task(
                     } else {
                         warn!("Pi is still awake, so rp2040 must stay awake");
                     }
+                } else {
+                    warn!("Failed to get Pi powered down state from Attiny");
                 }
+                warn!(
+                    "Check pi power down state took {}",
+                    (timer.get_counter() - check_power_down_state_start).to_micros()
+                );
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
                 wake_raspberry_pi(&mut shared_i2c, &mut delay);
             }
+
             // Make sure timing is as close as possible to the non-sync case
             let sync_rtc_end = timer.get_counter();
             let sync_time = (sync_rtc_end - sync_rtc_start).to_micros() as i32;
-            let additional_wait = (expected_rtc_sync_time_us - sync_time).max(0);
+            let additional_wait = (expected_rtc_sync_time_us - sync_time).min(0);
             if additional_wait > 0 {
-                warn!("Additional wait after RTC sync {}µs", additional_wait);
+                warn!(
+                    "Additional wait after RTC sync {}µs, total sync time {}",
+                    additional_wait, sync_time
+                );
                 delay.delay_us(additional_wait as u32);
             } else {
-                warn!("RTC sync took {}µs", sync_time)
+                warn!("I2C messages took {}µs", sync_time)
             }
         } else {
             // Increment the datetime n frame's worth.

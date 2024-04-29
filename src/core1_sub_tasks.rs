@@ -192,7 +192,7 @@ pub fn offload_flash_storage_and_events(
         info!("Erasing after successful offload");
         //flash_storage.erase_all_good_used_blocks();
         flash_storage.erase_all_blocks();
-        true
+        file_count != 0
     } else {
         warn!("File transfer to pi failed");
         false

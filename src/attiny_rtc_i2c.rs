@@ -329,6 +329,7 @@ impl SharedI2C {
                         );
                         return Err(e);
                     }
+                    warn!("ATTiny write error, retrying in 500µs");
                     num_attempts += 1;
                     delay.delay_us(500);
                 }
