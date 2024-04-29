@@ -151,22 +151,31 @@ impl PdmMicrophone {
         // Start receiving data via DMA double buffer, and start streaming/writing out to disk, so
         // will need to have access to the fs
     }
-    pub fn alter_samplerate(&mut self, sample_rate: usize) {
+    pub fn alter_samplerate(&mut self, sample_rate: usize) -> f32 {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
-
         let clock_divider =
             self.system_clock_hz.to_Hz() as f32 / (sample_rate * PDM_DECIMATION * 2) as f32;
+        info!(
+            "Altering sample for clock {} divider {}",
+            self.system_clock_hz.to_Hz(),
+            clock_divider
+        );
 
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
         sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
         info!(
-            "Altered Mic CLock speed {} divider {}",
+            "Altered Mic CLock speed {} divider {} fraction {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
-            clock_divider
+            clock_divider as u16,
+            clock_divider_fractional
         );
         self.state_machine_1_running = Some((sm, tx));
+        return self.system_clock_hz.to_Hz() as f32
+            / (PDM_DECIMATION as f32
+                * 2.0
+                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)));
     }
 
     pub fn disable(&mut self) {
@@ -193,19 +202,17 @@ impl PdmMicrophone {
         timestamp: u64,
         watchdog: &mut bsp::hal::Watchdog,
     ) {
-        let mut current_recording = RecordingStatus {
-            total_samples: SAMPLE_RATE * PDM_DECIMATION * num_seconds,
-            samples_taken: 0,
-        };
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
-        let mut filter = PDMFilter::new(SAMPLE_RATE as u32);
-        filter.init();
+
         watchdog.feed();
         timer.delay_ms(1000); //how long to warm up??
-        self.alter_samplerate(SAMPLE_RATE);
+        let adjusted_sr = self.alter_samplerate(SAMPLE_RATE) as u32;
+        info!("Adjusted sr becomes {}", adjusted_sr);
+        let mut filter = PDMFilter::new(adjusted_sr);
+        filter.init();
         let mut current_recording = RecordingStatus {
-            total_samples: SAMPLE_RATE as usize * PDM_DECIMATION * num_seconds,
+            total_samples: adjusted_sr as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
         // f
@@ -229,7 +236,7 @@ impl PdmMicrophone {
             let mut rx_transfer = rx_transfer.write_next(b_1);
             let mut cycle = 0;
             let mut audio_buffer = AudioBuffer::new();
-            audio_buffer.init(timestamp, SAMPLE_RATE as u16);
+            audio_buffer.init(timestamp, adjusted_sr as u16);
             let start_block_index = flash_storage.start_file(0);
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
@@ -265,12 +272,14 @@ impl PdmMicrophone {
                         watchdog.feed();
                     }
                 } else {
+                    current_recording.samples_taken += rx_buf.len() * 32;
+
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
                     filter.filter(&payload, VOLUME, out, true);
 
-                    if audio_buffer.is_full() {
+                    if audio_buffer.is_full() && !current_recording.is_complete() {
                         // timer.delay_us(500);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
@@ -308,16 +317,16 @@ impl PdmMicrophone {
                         // break;
                     }
 
-                    current_recording.samples_taken += rx_buf.len() * 32;
                     if current_recording.is_complete() {
                         watchdog.feed();
-                        info!(
-                            "Recording done counts are {} milis {}  samples {} took {}",
-                            (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
-                            (timer.get_counter() - start).to_millis(),
-                            current_recording.total_samples,
-                            current_recording.samples_taken
-                        );
+                        // info!(
+                        //     "Recording done counts are {} milis {}  samples {} took {}",
+                        //     (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
+                        //     (timer.get_counter() - start).to_millis(),
+                        //     current_recording.total_samples,
+                        //     current_recording.samples_taken
+                        // );
+                        info!("DONE audio rec");
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if use_async {
@@ -327,6 +336,7 @@ impl PdmMicrophone {
                                 Ok((new_t, new_a)) => {
                                     transfer = new_t;
                                     address = new_a;
+                                    info!("WROTE LAST");
                                 }
                                 Err(e) => {
                                     warn!("Error writing bytes to flash ending rec early {}", e);

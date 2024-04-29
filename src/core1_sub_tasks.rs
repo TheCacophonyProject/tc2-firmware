@@ -135,6 +135,10 @@ pub fn maybe_offload_flash_storage_and_events(
             spi,
         )) = flash_storage.get_file_part()
         {
+            info!(
+                "Offloading a file part is  file start?? {} last ? {}",
+                file_start, is_last
+            );
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
             }
@@ -162,6 +166,7 @@ pub fn maybe_offload_flash_storage_and_events(
             //let start = timer.get_counter();
             let mut attempts = 0;
             'transfer_part: loop {
+                info!("Sending {} data len {}", transfer_type, part.len());
                 let did_transfer =
                     pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
                 if !did_transfer {

@@ -3,7 +3,6 @@ const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 16;
 const MAX_VOLUME: u8 = 64;
-use defmt::{info, warn};
 
 pub struct PDMFilter {
     lut: [u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
@@ -41,7 +40,6 @@ impl PDMFilter {
         if hp_hz != 0.0 {
             self.hp_alpha = (self.fs as f32 * 256.0 / (2.0 * PI * hp_hz + self.fs as f32)) as u32;
         }
-        info!("LP IS {} {} ", lp_hz, self.lp_alpha);
         let mut sinc = [1u16; PDM_DECIMATION as usize];
         let mut sinc_out = [0u16; PDM_DECIMATION as usize * 2 - 1];
 

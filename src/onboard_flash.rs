@@ -110,7 +110,7 @@ impl OnboardFlashStatus {
                 }
             }
             2 => {
-                //error!("ECC error - uncorrectable error, data corrupted!");
+                warn!("ECC error - uncorrectable error, data corrupted!");
                 EccStatus {
                     okay: false,
                     should_relocate: true,

@@ -125,7 +125,7 @@ fn main() -> ! {
         peripherals.ROSC,
         freq,
     );
-
+    // let clocks = clock_utils::normal_clock();
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
     let system_clock_freq = clocks.system_clock.freq().to_Hz();
@@ -144,11 +144,11 @@ fn main() -> ! {
     watchdog.start(8388607.micros());
 
     info!("Enabled watchdog timer");
-    let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
+    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
-    let mut sio = Sio::new(peripherals.SIO);
+    let sio = Sio::new(peripherals.SIO);
 
     let pins = rp2040_hal::gpio::Pins::new(
         peripherals.IO_BANK0,

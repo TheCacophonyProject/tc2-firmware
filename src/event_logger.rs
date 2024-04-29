@@ -165,6 +165,7 @@ impl EventLogger {
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index as isize / 256);
         let page = ((event_index % 256) / 4) as isize;
         let page_offset = (event_index % 4) * 64; // Allocate 64 bytes for each event
+
         if block >= 2048 {
             None
         } else if flash_storage.read_page(block, page).is_ok() {

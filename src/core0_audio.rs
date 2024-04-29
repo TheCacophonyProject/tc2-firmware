@@ -136,7 +136,6 @@ pub fn audio_task(
     watchdog.feed();
     let mut pi_is_awake = false;
     // if pi is on
-
     if let Ok(awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
         pi_is_awake = awake;
     }
@@ -199,6 +198,8 @@ pub fn audio_task(
 
         if !device_config.config().is_audio_device {
             shared_i2c.disable_alarm(&mut delay);
+            info!("Not audio device so restarting");
+
             loop {
                 // Wait to be reset and become thermal device
                 nop();
@@ -275,7 +276,7 @@ pub fn audio_task(
                 sm1,
             );
             microphone.record_for_n_seconds(
-                5,
+                10,
                 dma_channels.ch3,
                 dma_channels.ch4,
                 timer,
@@ -295,6 +296,7 @@ pub fn audio_task(
             warn!("Could not clear alarm {}", err);
         }
     }
+
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
     if reschedule {
