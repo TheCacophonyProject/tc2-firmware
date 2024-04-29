@@ -101,31 +101,31 @@ impl SharedI2C {
         };
 
         let mut attempts = 0;
-        loop {
-            let _ = match shared_i2c.get_attiny_firmware_version(delay) {
-                Ok(version) => match version {
-                    EXPECTED_ATTINY_FIRMWARE_VERSION => {
-                        break;
-                    }
-                    version => {
-                        error!(
-                            "Mismatched Attiny firmware version – expected {}, got {}",
-                            EXPECTED_ATTINY_FIRMWARE_VERSION, version
-                        );
-                        break;
-                    }
-                },
-                Err(e) => {
-                    warn!("Error communicating with i2c, attempt #{}", attempts);
-                    attempts += 1;
-                    if attempts > 100 {
-                        crate::panic!("Unable to communicate with Attiny over i2c: {:?}", e);
-                    } else {
-                        delay.delay_us(500);
-                    }
-                }
-            };
-        }
+        // loop {
+        //     let _ = match shared_i2c.get_attiny_firmware_version(delay) {
+        //         Ok(version) => match version {
+        //             EXPECTED_ATTINY_FIRMWARE_VERSION => {
+        //                 break;
+        //             }
+        //             version => {
+        //                 error!(
+        //                     "Mismatched Attiny firmware version – expected {}, got {}",
+        //                     EXPECTED_ATTINY_FIRMWARE_VERSION, version
+        //                 );
+        //                 break;
+        //             }
+        //         },
+        //         Err(e) => {
+        //             warn!("Error communicating with i2c, attempt #{}", attempts);
+        //             attempts += 1;
+        //             if attempts > 100 {
+        //                 crate::panic!("Unable to communicate with Attiny over i2c: {:?}", e);
+        //             } else {
+        //                 delay.delay_us(500);
+        //             }
+        //         }
+        //     };
+        // }
         shared_i2c
     }
 

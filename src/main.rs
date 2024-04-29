@@ -170,9 +170,11 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
-    watchdog.feed();
-    delay.delay_ms(1000);
-    watchdog.feed();
+    for i in 0..30 {
+        info!("Waiting {}", 30 - i);
+        watchdog.feed();
+        delay.delay_ms(1000);
+    }
 
     info!("Initing shared i2c");
     let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
@@ -220,7 +222,7 @@ fn main() -> ! {
 
                 //just incase it triggers here
                 if alarm_triggered {
-                    info!("Alarm triggered after taking a recording reseeting rp2040");
+                    warn!("Alarm triggered after taking a recording resetting rp2040");
                     loop {
                         // wait for watchdog to reset rp2040
                         wfe();
@@ -236,7 +238,7 @@ fn main() -> ! {
         }
         let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
         if alarm_triggered {
-            info!("Alarm triggered after taking a recording reseeting rp2040");
+            warn!("Alarm triggered after taking a recording resetting rp2040");
             loop {
                 // wait for watchdog to reset rp2040
                 wfe();
