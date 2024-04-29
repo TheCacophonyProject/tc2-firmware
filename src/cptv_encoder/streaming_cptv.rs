@@ -829,6 +829,7 @@ impl Cptv2Header {
         }
         let status_recording = if is_status_recording {
             let mut status = [0u8; 30];
+            info!("Creating status recording");
             status[0..12].copy_from_slice("status: true".as_bytes());
             Some(status)
         } else {

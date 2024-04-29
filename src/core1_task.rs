@@ -585,10 +585,34 @@ pub fn core_1_task(
             let motion_detection_triggered_this_frame =
                 this_frame_motion_detection.got_new_trigger();
             should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
-                && (motion_detection_triggered_this_frame
-                    || !made_startup_status_recording
-                    || !made_shutdown_status_recording)
+                && (motion_detection_triggered_this_frame || !made_startup_status_recording)
                 && cptv_stream.is_none(); // wait until lepton stabilises before recording
+
+            if made_startup_status_recording
+                && !made_shutdown_status_recording
+                && !motion_detection_triggered_this_frame
+                && cptv_stream.is_none()
+            {
+                if dev_mode {
+                    if synced_date_time.date_time_utc + Duration::minutes(1)
+                        > startup_date_time_utc + Duration::minutes(4)
+                    {
+                        warn!("Make shutdown status recording");
+                        should_start_new_recording = true;
+                        made_shutdown_status_recording = true;
+                        making_status_recording = true;
+                    }
+                } else {
+                    if let Some((_, window_end)) = &current_recording_window {
+                        if synced_date_time.date_time_utc + Duration::minutes(1) > *window_end {
+                            warn!("Make shutdown status recording");
+                            should_start_new_recording = true;
+                            made_shutdown_status_recording = true;
+                            making_status_recording = true;
+                        }
+                    }
+                }
+            }
 
             // TODO: Do we want to have a max recording length timeout, or just pause recording if a subject stays in the frame
             //  but doesn't move for a while?  Maybe if a subject is stationary for 1 minute, we pause, and only resume
@@ -632,29 +656,11 @@ pub fn core_1_task(
 
                     // Should we make a 2-second status recording at the beginning or end of the window?
                     if !made_startup_status_recording && !motion_detection_triggered_this_frame {
+                        warn!("Make startup status recording");
                         made_startup_status_recording = true;
                         making_status_recording = true;
                     } else {
-                        if !made_shutdown_status_recording && !motion_detection_triggered_this_frame
-                        {
-                            if dev_mode {
-                                if synced_date_time.date_time_utc + Duration::minutes(1)
-                                    > startup_date_time_utc + Duration::minutes(4)
-                                {
-                                    made_shutdown_status_recording = true;
-                                    making_status_recording = true;
-                                }
-                            } else {
-                                if let Some((_, window_end)) = &current_recording_window {
-                                    if synced_date_time.date_time_utc + Duration::minutes(1)
-                                        > *window_end
-                                    {
-                                        made_shutdown_status_recording = true;
-                                        making_status_recording = true;
-                                    }
-                                }
-                            }
-                        }
+                        // We're making a shutdown recording.
                     }
 
                     warn!("Setting recording flag on attiny");
@@ -664,6 +670,10 @@ pub fn core_1_task(
                     let _ = shared_i2c
                         .set_recording_flag(&mut delay, true)
                         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+                    warn!(
+                        "Making a status recording? {}, Triggered motion? {}",
+                        making_status_recording, motion_detection_triggered_this_frame
+                    );
                     error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
                     let mut cptv_streamer = CptvStream::new(
