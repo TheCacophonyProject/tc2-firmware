@@ -255,7 +255,7 @@ pub fn audio_task(
             &mut flash_storage,
         );
     }
-
+    do_recording = true;
     if do_recording {
         watchdog.feed();
         //should of already offloaded but extra safety check
@@ -295,6 +295,11 @@ pub fn audio_task(
         if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
             warn!("Could not clear alarm {}", err);
         }
+    }
+    watchdog.disable();
+    info!("Looping");
+    loop {
+        nop();
     }
 
     let mut should_sleep = true;

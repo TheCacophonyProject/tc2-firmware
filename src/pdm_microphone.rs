@@ -220,7 +220,7 @@ impl PdmMicrophone {
         // flash_storage.init();
         let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
         // Swap our buffers?
-        let use_async: bool = true;
+        let use_async: bool = false;
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
@@ -278,8 +278,9 @@ impl PdmMicrophone {
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
                     filter.filter(&payload, VOLUME, out, true);
-
-                    if audio_buffer.is_full() && !current_recording.is_complete() {
+                    if audio_buffer.is_full()
+                        && (!current_recording.is_complete() || leftover.len() > 0)
+                    {
                         // timer.delay_us(500);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
@@ -309,14 +310,15 @@ impl PdmMicrophone {
                         audio_buffer.reset();
                         if leftover.len() > 0 {
                             // shouldn't need to do this
-                            let mut audio_buffer = AudioBuffer::new();
+                            audio_buffer = AudioBuffer::new();
+                            // info!("Slice for {}", leftover.len());
                             let out = audio_buffer.slice_for(leftover.len());
+                            // info!("Slice for {}", out.len());
 
                             filter.filter(leftover, VOLUME, out, true);
                         }
                         // break;
                     }
-
                     if current_recording.is_complete() {
                         watchdog.feed();
                         // info!(
@@ -326,7 +328,7 @@ impl PdmMicrophone {
                         //     current_recording.total_samples,
                         //     current_recording.samples_taken
                         // );
-                        info!("DONE audio rec");
+
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if use_async {

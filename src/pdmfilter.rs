@@ -3,6 +3,7 @@ const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 16;
 const MAX_VOLUME: u8 = 64;
+use defmt::{info, warn};
 
 pub struct PDMFilter {
     lut: [u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
@@ -106,16 +107,8 @@ impl PDMFilter {
         let mut old_in: i64 = self.old_in;
         let mut oldz: i64 = self.oldz;
         let mut out_index = 0;
-        // skip PDM_DECIMATION bits, so change to bytes to match data u8 type
-        // info!("Data out is {}", dataout.len());
+
         for i in (0..=data.len() - 8).step_by(PDM_DECIMATION as usize >> 3) {
-            // info!("Running on index {}", i);
-            // info!(
-            //     "Starting {} stopping at {} out_index {}",
-            //     i,
-            //     data.len() - 8,
-            //     out_index
-            // );
             let index = i as usize;
             // 3 stages?
             let z0 = filter_table_mono_64(&self.lut, &data[index..index + 8], 0);
@@ -124,8 +117,9 @@ impl PDMFilter {
             // println!("z0 {} z1 {} z2 {}", z0, z1, z2);
 
             let mut z: i64 = self.coef[1] as i64 + z2 as i64 - self.sub_const as i64;
-            // println!("z now is {}", z);
+
             self.coef[1] = self.coef[0] + z1 as u32;
+
             self.coef[0] = z0 as u32;
 
             old_out = (self.hp_alpha as i64 * (old_out + z - old_in)) >> 8;
@@ -133,13 +127,11 @@ impl PDMFilter {
 
             oldz = ((256 - self.lp_alpha as i64) * oldz + self.lp_alpha as i64 * old_out) >> 8;
             z = oldz * volume as i64;
-            // println!("z now is {}", z);
 
             z = round_div(z, self.div_const as i64);
 
             z = satural_lh(z, -32700 as i64, 32700 as i64);
-            // println!("Z is {}", z);
-            // how is this right if satural lh can return -32700
+
             if (saveout) {
                 dataout[out_index] = (z as u16);
                 out_index += 1;
