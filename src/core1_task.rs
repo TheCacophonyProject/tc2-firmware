@@ -222,7 +222,7 @@ pub fn core_1_task(
     woken_by_alarm: bool,
     mut timer: Timer,
 ) {
-    let dev_mode = true;
+    let dev_mode = false;
     info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
@@ -249,7 +249,7 @@ pub fn core_1_task(
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-    let should_record_to_flash = false;
+    let should_record_to_flash = true;
 
     loop {
         // NOTE: Keep retrying until we get a datetime from RTC.
@@ -882,12 +882,11 @@ pub fn core_1_task(
             let is_outside_recording_window = if !dev_mode {
                 !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
             } else {
-                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
+                // !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
 
-                // DEV_MODE
-                // let is_inside_recording_window =
-                //     synced_date_time.date_time_utc < startup_date_time_utc + Duration::minutes(5);
-                // !is_inside_recording_window
+                let is_inside_recording_window =
+                    synced_date_time.date_time_utc < startup_date_time_utc + Duration::minutes(5);
+                !is_inside_recording_window
             };
 
             let flash_storage_nearly_full = flash_storage.is_too_full_to_start_new_recordings();
