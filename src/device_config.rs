@@ -1,6 +1,6 @@
 use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
-use crate::rp2040_flash::{read_device_config_from_rp2040_flash, read_is_audio_from_rp2040_flash};
+use crate::rp2040_flash::read_device_config_from_rp2040_flash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
@@ -27,6 +27,7 @@ pub struct DeviceConfigInner {
 pub struct DeviceConfig {
     config_inner: DeviceConfigInner,
     pub motion_detection_mask: DetectionMask,
+    pub cursor_position: usize,
 }
 
 impl Format for DeviceConfig {
@@ -54,6 +55,7 @@ impl Default for DeviceConfig {
                 last_offload: 0,
             },
             motion_detection_mask: DetectionMask::new(None),
+            cursor_position: 0,
         }
     }
 }
@@ -61,21 +63,16 @@ impl Default for DeviceConfig {
 impl DeviceConfig {
     pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
         let slice = read_device_config_from_rp2040_flash();
-        let (device_config, _) = DeviceConfig::from_bytes(slice);
+        let device_config = DeviceConfig::from_bytes(slice);
         device_config
     }
 
-    pub fn is_audio_device() -> bool {
-        let audio_byte = read_is_audio_from_rp2040_flash()[0];
-        return audio_byte == 1;
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> (Option<DeviceConfig>, usize) {
+    pub fn from_bytes(bytes: &[u8]) -> Option<DeviceConfig> {
         let mut cursor = Cursor::new(bytes);
         let device_id = cursor.read_u32();
         if device_id == u32::MAX {
             // Device config is uninitialised in flash
-            return (None, 0);
+            return None;
         }
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
@@ -93,7 +90,7 @@ impl DeviceConfig {
         let is_continuous_recorder = cursor.read_bool();
         let use_low_power_mode = cursor.read_bool();
         let device_name_length = cursor.read_u8() as usize;
-        let mut device_name = [0u8; 64];
+        let mut device_name: [u8; 64] = [0u8; 64];
         device_name[0] = device_name_length as u8;
         let len = device_name.len();
         let device_name = {
@@ -104,39 +101,36 @@ impl DeviceConfig {
         };
         let is_audio_device = cursor.read_bool();
         let last_offload = cursor.read_i64();
+        // let mask_length = cursor.read_i32();
+        let mut cursor_pos = cursor.position();
         let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
-        let len_before_mask = cursor.position();
         let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
-        let mut used_mask = true;
+
         if len != motion_detection_mask.inner.len() {
             // This payload came without the mask attached (i.e. from the rPi)
             motion_detection_mask.set_empty();
-            used_mask = false;
+        } else {
+            cursor_pos = cursor.position();
         }
-        (
-            Some(DeviceConfig {
-                config_inner: DeviceConfigInner {
-                    device_id,
-                    device_name,
-                    location: (latitude, longitude),
-                    location_altitude,
-                    location_timestamp,
-                    location_accuracy,
-                    start_recording_time,
-                    end_recording_time,
-                    is_continuous_recorder,
-                    use_low_power_mode,
-                    is_audio_device,
-                    last_offload,
-                },
-                motion_detection_mask,
-            }),
-            if used_mask {
-                cursor.position()
-            } else {
-                len_before_mask
+        info!("Curosr pos {}", cursor_pos);
+        Some(DeviceConfig {
+            config_inner: DeviceConfigInner {
+                device_id,
+                device_name,
+                location: (latitude, longitude),
+                location_altitude,
+                location_timestamp,
+                location_accuracy,
+                start_recording_time,
+                end_recording_time,
+                is_continuous_recorder,
+                use_low_power_mode,
+                is_audio_device,
+                last_offload,
             },
-        )
+            motion_detection_mask,
+            cursor_position: cursor_pos,
+        })
     }
     pub fn set_last_offload(&mut self, offload: i64) {
         self.config_inner.last_offload = offload;

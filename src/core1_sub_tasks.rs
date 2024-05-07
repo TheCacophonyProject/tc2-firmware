@@ -174,22 +174,13 @@ pub fn maybe_offload_flash_storage_and_events(
                     if attempts > 100 {
                         warn!("Failed sending file part to raspberry pi");
                         success = false;
-                        break 'transfer_all_file_parts;
+                        break 'transfer_part;
                     }
                 } else {
                     break 'transfer_part;
                 }
             }
             //info!("Took {}µs", (timer.get_counter() - start).to_micros());
-
-            part_count += 1;
-            if is_last {
-                file_count += 1;
-                info!("Offloaded {} file(s)", file_count);
-                file_start = true;
-            } else {
-                file_start = false;
-            }
 
             // Give spi peripheral back to flash storage.
             if let Some(spi) = pi_spi.disable() {
@@ -203,8 +194,22 @@ pub fn maybe_offload_flash_storage_and_events(
                         flash_storage,
                     );
                 }
+            } else {
+                info!("Didn't disable spi");
+            }
+            if !success {
+                break;
+            }
+            part_count += 1;
+            if is_last {
+                file_count += 1;
+                info!("Offloaded {} file(s)", file_count);
+                file_start = true;
+            } else {
+                file_start = false;
             }
         }
+
         if success {
             info!("Completed file offload, transferred {} files", file_count);
             // TODO: Some validation from the raspberry pi that the transfer completed
@@ -262,7 +267,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
                 // Skip 4 bytes of CRC checking
 
-                let (mut new_config, length_used) = DeviceConfig::from_bytes(&device_config[4..]);
+                let mut new_config = DeviceConfig::from_bytes(&device_config[4..]);
+                let mut length_used = 0;
+                if new_config.is_some() {
+                    length_used = new_config.as_mut().unwrap().cursor_position;
+                }
                 let mut new_config_bytes = [0u8; 2400 + 104];
                 new_config_bytes[0..length_used]
                     .copy_from_slice(&device_config[4..4 + length_used]);
@@ -316,6 +325,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let slice_to_write = &new_config_bytes[0..length_used + 2400];
                         write_device_config_to_rp2040_flash(slice_to_write);
+                        new_config.cursor_position += 2400;
                         config_was_updated = true;
                     }
                 }

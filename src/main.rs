@@ -26,13 +26,15 @@ mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
-use cortex_m::asm::nop;
-
 use crate::core1_task::{core_1_task, wake_raspberry_pi, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::device_config::DeviceConfig;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
+use crate::rp2040_flash::{
+    read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
+    write_device_config_to_rp2040_flash,
+};
 use bsp::{
     entry,
     hal::{
@@ -43,6 +45,7 @@ use bsp::{
     },
     pac::Peripherals,
 };
+use cortex_m::asm::nop;
 use cortex_m::asm::wfe;
 use rp2040_hal::rosc::RingOscillator;
 
@@ -107,13 +110,23 @@ use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
-    // let mut core1stack: Stack<45000> = Stack::new(); // 174,000 bytes
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
+    let mut pos: u32 = 0;
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
+    let mut is_audio = false;
+    {
+        let mut device_config = DeviceConfig::load_existing_config_from_flash();
 
-    let is_audio = DeviceConfig::is_audio_device();
+        is_audio =
+            device_config.is_some() && device_config.as_mut().unwrap().config().is_audio_device;
+        // loop {
+        //     nop();
+        // }
+    }
     let freq;
+
+    let is_audio = true;
     if is_audio {
         freq = ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz();
     } else {
