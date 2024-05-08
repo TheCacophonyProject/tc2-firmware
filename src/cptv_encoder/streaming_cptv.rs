@@ -715,6 +715,7 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
         header.loc_timestamp.is_some(),
         header.altitude.is_some(),
         header.accuracy.is_some(),
+        header.status_recording.is_some(),
     ]
     .iter()
     .filter(|x| **x)
@@ -828,7 +829,8 @@ impl Cptv2Header {
         }
         let status_recording = if is_status_recording {
             let mut status = [0u8; 30];
-            status.copy_from_slice("status: true".as_bytes());
+            info!("Creating status recording");
+            status[0..12].copy_from_slice("status: true".as_bytes());
             Some(status)
         } else {
             None

@@ -56,7 +56,7 @@ fn go_dormant_until_woken<T: PinId>(
 }
 
 pub fn frame_acquisition_loop(
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
+    mut rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,
@@ -130,7 +130,7 @@ pub fn frame_acquisition_loop(
 
             // FIXME - Whenever recording starts, we lose a frame here. It's the all important first frame of the recording.
             //  Let's just use a bit more power for now until we figure out how to fix this.
-            // rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
+            //rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
             continue 'frame_loop;
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
@@ -524,8 +524,8 @@ pub fn frame_acquisition_loop(
                 recording_ended = false;
             }
             // if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-            //     // rosc =
-            //     //     go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
+            //     rosc =
+            //         go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
             // } else if current_segment_num == 3 {
             //     //warn!("Overrunning frame time");
             // }
