@@ -33,7 +33,7 @@ const PDM_DECIMATION: usize = 64;
 const SAMPLE_RATE: usize = 48000;
 const WARMUP_RATE: usize = 28000;
 
-const WARMUP_CYCLES: usize = 200;
+const WARMUP_CYCLES: usize = 400;
 // actually more like 8125 equates to 800 sr
 struct RecordingStatus {
     total_samples: usize,
@@ -215,6 +215,9 @@ impl PdmMicrophone {
             adjusted_sr,
             self.system_clock_hz.to_MHz()
         );
+        watchdog.feed();
+        timer.delay_ms(2000); //how long to warm up??
+        watchdog.feed();
 
         let mut filter = PDMFilter::new(adjusted_sr);
         filter.init();

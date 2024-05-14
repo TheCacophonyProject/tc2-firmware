@@ -67,8 +67,8 @@ pub const FIRMWARE_VERSION: u32 = 10;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
 const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
 
-// got funny results at 150 for aduio seems to work better at 120
-const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 120_000_000;
+// got funny results at 150 for aduio seems to work better at 125
+const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
 
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
@@ -114,7 +114,6 @@ fn main() -> ! {
     let mut is_audio = false;
     {
         is_audio = read_is_audio_from_rp2040_flash();
-        info!("Is audio ?? {}", is_audio);
     }
     let freq;
 

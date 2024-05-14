@@ -254,7 +254,6 @@ pub fn audio_task(
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
             let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
             let mut microphone = PdmMicrophone::new(
                 gpio0.into_function().into_pull_type(),
                 gpio1.into_function().into_pull_type(),
