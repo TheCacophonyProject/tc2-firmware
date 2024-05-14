@@ -20,7 +20,6 @@ pub struct DeviceConfigInner {
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
     pub is_audio_device: bool,
-    pub last_offload: i64,
 }
 
 #[derive(PartialEq)]
@@ -52,7 +51,6 @@ impl Default for DeviceConfig {
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
                 is_audio_device: false,
-                last_offload: 0,
             },
             motion_detection_mask: DetectionMask::new(None),
             cursor_position: 0,
@@ -74,6 +72,7 @@ impl DeviceConfig {
             // Device config is uninitialised in flash
             return None;
         }
+        let is_audio_device = cursor.read_bool();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -99,8 +98,6 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
-        let is_audio_device = cursor.read_bool();
-        let last_offload = cursor.read_i64();
         // let mask_length = cursor.read_i32();
         let mut cursor_pos = cursor.position();
         let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
@@ -112,7 +109,6 @@ impl DeviceConfig {
         } else {
             cursor_pos = cursor.position();
         }
-        info!("Curosr pos {}", cursor_pos);
         Some(DeviceConfig {
             config_inner: DeviceConfigInner {
                 device_id,
@@ -126,15 +122,12 @@ impl DeviceConfig {
                 is_continuous_recorder,
                 use_low_power_mode,
                 is_audio_device,
-                last_offload,
             },
             motion_detection_mask,
             cursor_position: cursor_pos,
         })
     }
-    pub fn set_last_offload(&mut self, offload: i64) {
-        self.config_inner.last_offload = offload;
-    }
+
     pub fn config(&self) -> &DeviceConfigInner {
         &self.config_inner
     }

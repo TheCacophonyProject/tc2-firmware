@@ -347,7 +347,19 @@ impl SharedI2C {
             Err(x) => Err(x),
         }
     }
+    pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
+            Ok(state) => {
+                let camera_state = CameraState::from(state);
 
+                match camera_state {
+                    CameraState::PoweredOn | CameraState::PoweringOn => Ok(true),
+                    _ => Ok(false),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
     pub fn pi_is_awake_and_tc2_agent_is_ready(
         &mut self,
         delay: &mut Delay,
@@ -406,6 +418,31 @@ impl SharedI2C {
                     }
                 }
                 Ok(state & 1 << 1 == 2)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_request_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let rec_state: bool = (state & 1 << 1 == 2) && (state & 0x08 == 0x08);
+                Ok(rec_state)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_clear_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let mask = 8 << 1;
+                let val = state | mask;
+                //info!("Set tc2-agent state {}", val);
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
             }
             Err(e) => Err(e),
         }

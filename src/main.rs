@@ -31,10 +31,7 @@ use crate::cptv_encoder::FRAME_WIDTH;
 use crate::device_config::DeviceConfig;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
-use crate::rp2040_flash::{
-    read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
-    write_device_config_to_rp2040_flash,
-};
+use crate::rp2040_flash::read_is_audio_from_rp2040_flash;
 use bsp::{
     entry,
     hal::{
@@ -116,22 +113,18 @@ fn main() -> ! {
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     let mut is_audio = false;
     {
-        let mut device_config = DeviceConfig::load_existing_config_from_flash();
-
-        is_audio =
-            device_config.is_some() && device_config.as_mut().unwrap().config().is_audio_device;
-        // loop {
-        //     nop();
-        // }
+        is_audio = read_is_audio_from_rp2040_flash();
+        info!("Is audio ?? {}", is_audio);
     }
     let freq;
 
-    let is_audio = true;
     if is_audio {
         freq = ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz();
     } else {
+        //for some reason audio comes out faster than expected when using this clock
         freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
     }
+
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -189,8 +182,8 @@ fn main() -> ! {
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm();
+        shared_i2c.disable_alarm(&mut delay);
     }
-    shared_i2c.disable_alarm(&mut delay);
 
     let i2c1: I2C<
         pac::I2C1,
@@ -278,17 +271,20 @@ fn main() -> ! {
             fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
-        thermal_code(
-            lepton_pins,
-            pins,
-            watchdog,
-            system_clock_freq,
-            delay,
-            timer,
-            i2c1,
-            clocks,
-            rosc,
-        );
+        loop {
+            nop();
+        }
+        // thermal_code(
+        //     lepton_pins,
+        //     pins,
+        //     watchdog,
+        //     system_clock_freq,
+        //     delay,
+        //     timer,
+        //     i2c1,
+        //     clocks,
+        //     rosc,
+        // );
     }
 }
 use crate::attiny_rtc_i2c::I2CConfig;

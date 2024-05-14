@@ -59,7 +59,19 @@ pub fn audio_task(
     alarm_triggered: bool,
 ) -> ! {
     watchdog.feed();
-    let mut device_config = DeviceConfig::load_existing_config_from_flash().unwrap();
+    let mut device_config: DeviceConfig = DeviceConfig::load_existing_config_from_flash().unwrap();
+
+    //this isn't reliable so use alarm stored in flash
+    // let mut alarm_hours = shared_i2c.get_alarm_hours();
+    // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
+    let flash_alarm = read_alarm_from_rp2040_flash();
+    let alarm_day = flash_alarm[0];
+    let alarm_hours = flash_alarm[1];
+    let alarm_minutes = flash_alarm[2];
+    info!(
+        "Alarm day {} hours {} minutes {} ",
+        alarm_day, alarm_hours, alarm_minutes
+    );
 
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
@@ -129,91 +141,33 @@ pub fn audio_task(
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
 
-    //this isn't reliable so use alarm stored in flash
-    // let mut alarm_hours = shared_i2c.get_alarm_hours();
-    // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
-    let flash_alarm = read_alarm_from_rp2040_flash(device_config.cursor_position as u32);
-    let mut alarm_hours = flash_alarm[0];
-    let mut alarm_minutes = flash_alarm[1];
-    let scheduled: bool = alarm_hours != 255 && alarm_minutes != 255;
+    let mut scheduled: bool =
+        alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
 
-    info!("Alarm hours {} minutes {} ", alarm_hours, alarm_minutes);
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
     watchdog.feed();
-    let mut pi_is_awake = false;
-    // if pi is on
-    if let Ok(awake) = shared_i2c.pi_is_awake_and_tc2_agent_is_ready(&mut delay, true) {
-        pi_is_awake = awake;
-    }
-    if pi_is_awake
-        || should_offload_audio_recordings(
-            &mut flash_storage,
-            &mut event_logger,
-            &mut delay,
-            &mut shared_i2c,
-            synced_date_time.date_time_utc,
-            device_config.config().last_offload,
-        )
-    {
-        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
-            pi_is_awake = true;
-            let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-            // watchdog.disable(); //should watch dog go into offload
-            if maybe_offload_flash_storage_and_events(
-                &mut flash_storage,
-                &mut pi_spi,
-                &mut peripherals.RESETS,
-                &mut peripherals.DMA,
-                clock_freq,
-                &mut shared_i2c,
-                &mut delay,
-                timer,
-                &mut event_logger,
-                &synced_date_time,
-                Some(watchdog),
-            ) {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::OffloadedRecording,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    &mut flash_storage,
-                );
-            }
-        }
-    }
-
-    if pi_is_awake {
-        maybe_offload_events(
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            &mut delay,
-            timer,
-            &mut event_logger,
-            &mut flash_storage,
-            clock_freq,
-        );
-        let (update_config, device_config_was_updated) =
-            get_existing_device_config_or_config_from_pi_on_initial_handshake(
-                &mut flash_storage,
-                &mut pi_spi,
-                &mut peripherals.RESETS,
-                &mut peripherals.DMA,
-                clock_freq.Hz(),
-                2u32, //need to get radiometry and leton serial
-                1,
-                Some(synced_date_time.date_time_utc.timestamp_millis()),
-                timer,
-                Some(device_config),
-            );
-        device_config = update_config.unwrap();
-        info!(
-            "Updating last off load to {} cursor pos {}",
-            device_config.config().last_offload,
-            device_config.cursor_position
-        );
-
+    let should_wake = should_offload_audio_recordings(
+        &mut flash_storage,
+        &mut event_logger,
+        &mut delay,
+        &mut shared_i2c,
+        synced_date_time.date_time_utc,
+    );
+    let (new_config, was_updated) = offload(
+        &mut shared_i2c,
+        clock_freq,
+        &mut flash_storage,
+        &mut pi_spi,
+        timer,
+        &mut event_logger,
+        should_wake,
+        device_config,
+        &mut delay,
+        &synced_date_time,
+        watchdog,
+    );
+    device_config = new_config.unwrap();
+    if was_updated {
         if !device_config.config().is_audio_device {
             shared_i2c.disable_alarm(&mut delay);
             info!("Not audio device so restarting");
@@ -225,42 +179,31 @@ pub fn audio_task(
         }
 
         //needs to be rewritten every device config write
-        if scheduled {
-            write_alarm_schedule_to_rp2040_flash(
-                alarm_hours,
-                alarm_minutes,
-                device_config.cursor_position as u32,
-            );
-        }
+        // if scheduled {
+        // write_alarm_schedule_to_rp2040_flash(alarm_hours, alarm_minutes);
+        // }
     }
-
     watchdog.feed();
+
     let mut do_recording = alarm_triggered;
     let mut reschedule = !scheduled;
+    info!(
+        "ALarm triggered {} scheduled {}",
+        alarm_triggered, scheduled
+    );
     if !alarm_triggered && scheduled {
         // check we haven't missed the alarm somehow
         match get_alarm_dt(
             synced_date_time.get_adjusted_dt(timer),
+            alarm_day,
             alarm_hours,
             alarm_minutes,
         ) {
             Ok(alarm_dt) => {
-                info!(
-                    "Alarm dt is {} -  {}:{}",
-                    alarm_dt.year(),
-                    alarm_dt.month(),
-                    alarm_dt.day()
-                );
                 let synced = synced_date_time.get_adjusted_dt(timer);
-                info!(
-                    "Synced dt is {} -  {}:{}",
-                    synced.year(),
-                    synced.month(),
-                    synced.day()
-                );
                 let until_alarm =
                     (alarm_dt - synced_date_time.get_adjusted_dt(timer)).num_minutes();
-                if until_alarm < 0 || until_alarm > 60 {
+                if until_alarm <= 0 || until_alarm > 60 {
                     info!(
                         "Missed alarm was scheduled for {}:{} but its {} minutes away",
                         alarm_hours, alarm_minutes, until_alarm
@@ -279,9 +222,10 @@ pub fn audio_task(
             }
             Err(_) => {
                 error!(
-                    "Could not get alarm dt for {} {}",
-                    alarm_hours, alarm_minutes
-                )
+                    "Could not get alarm dt for {} {} {}",
+                    alarm_day, alarm_hours, alarm_minutes
+                );
+                do_recording = true;
             }
         }
     }
@@ -294,8 +238,12 @@ pub fn audio_task(
             &mut flash_storage,
         );
     }
-
-    if do_recording {
+    let mut take_test_rec = false;
+    if let Ok(test_rec) = shared_i2c.tc2_agent_request_audio_rec(&mut delay) {
+        take_test_rec = test_rec;
+        info!("Take test rec is {}", take_test_rec);
+    }
+    if do_recording || take_test_rec {
         watchdog.feed();
         //should of already offloaded but extra safety check
         if !flash_storage.is_too_full_for_audio() {
@@ -314,8 +262,12 @@ pub fn audio_task(
                 pio1,
                 sm1,
             );
-            microphone.record_for_n_seconds(
-                10,
+            let mut duration = 60;
+            if !do_recording && take_test_rec {
+                duration = 10;
+            }
+            let recorded = microphone.record_for_n_seconds(
+                duration,
                 dma_channels.ch3,
                 dma_channels.ch4,
                 timer,
@@ -324,15 +276,35 @@ pub fn audio_task(
                 &mut flash_storage,
                 timestamp,
                 watchdog,
+                &synced_date_time,
             );
             let _ = shared_i2c
                 .set_recording_flag(&mut delay, false)
                 .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+
+            if !recorded {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::AudioRecordingFailed,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
+                watchdog.start(100.micros());
+                info!("Recording failed restarting and will try again");
+                loop {
+                    nop();
+                }
+            }
         }
-        shared_i2c.clear_alarm();
-        reschedule = true;
-        if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
-            warn!("Could not clear alarm {}", err);
+        if do_recording && !take_test_rec {
+            shared_i2c.clear_alarm();
+            reschedule = true;
+            if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
+                warn!("Could not clear alarm {}", err);
+            }
+        } else {
+            shared_i2c.tc2_agent_clear_audio_rec(&mut delay);
         }
     }
 
@@ -340,25 +312,34 @@ pub fn audio_task(
     let mut alarm_time: Option<NaiveDateTime>;
     if reschedule {
         watchdog.feed();
-
         info!("Scheduling new recording");
-        let scheduled_time = schedule_audio_rec(
+        if let Ok(scheduled_time) = schedule_audio_rec(
             &mut delay,
             &synced_date_time,
             &mut shared_i2c,
             &mut flash_storage,
             timer,
             &mut event_logger,
-        );
-        write_alarm_schedule_to_rp2040_flash(
-            scheduled_time.hour() as u8,
-            scheduled_time.minute() as u8,
-            device_config.cursor_position as u32,
-        );
-        alarm_time = Some(scheduled_time);
+        ) {
+            write_alarm_schedule_to_rp2040_flash(
+                scheduled_time.day() as u8,
+                scheduled_time.hour() as u8,
+                scheduled_time.minute() as u8,
+            );
+            alarm_time = Some(scheduled_time);
+            scheduled = true;
+        } else {
+            error!("Couldn't schedule alarm will restart");
+            write_alarm_schedule_to_rp2040_flash(u8::MAX, u8::MAX, u8::MAX);
+            watchdog.start(100.micros());
+            loop {
+                nop();
+            }
+        }
     } else {
         match get_alarm_dt(
             synced_date_time.get_adjusted_dt(timer),
+            alarm_day,
             alarm_hours,
             alarm_minutes,
         ) {
@@ -377,11 +358,20 @@ pub fn audio_task(
     }
     if alarm_time.is_some() {
         info!(
-            "Recording scheduled for {}:{} ",
+            "Recording scheduled for {} {}:{} ",
+            alarm_time.as_mut().unwrap().day(),
             alarm_time.as_mut().unwrap().time().hour(),
             alarm_time.as_mut().unwrap().time().minute()
         );
     }
+    if do_recording && take_test_rec {
+        //means we didn't take the test rec as it was a normal rec time
+        watchdog.start(100.micros());
+        loop {
+            nop();
+        }
+    }
+
     let mut logged_power_down = false;
     loop {
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
@@ -424,8 +414,43 @@ pub fn audio_task(
                         error!("Failed sending sleep request to attiny");
                     }
                 }
+
+                //may aswell offload again if we are awake and have just taken a recording
+                if !pi_is_powered_down && flash_storage.has_files_to_offload() {
+                    let (new_config, was_updated) = offload(
+                        &mut shared_i2c,
+                        clock_freq,
+                        &mut flash_storage,
+                        &mut pi_spi,
+                        timer,
+                        &mut event_logger,
+                        false,
+                        device_config,
+                        &mut delay,
+                        &synced_date_time,
+                        watchdog,
+                    );
+                    device_config = new_config.unwrap();
+                    if was_updated {
+                        if !device_config.config().is_audio_device {
+                            shared_i2c.disable_alarm(&mut delay);
+                            info!("Not audio device so restarting");
+                            watchdog.start(100.micros());
+                            loop {
+                                // Wait to be reset and become thermal device
+                                nop();
+                            }
+                        }
+
+                        //needs to be rewritten every device config write
+                        //  if scheduled {
+                        //    write_alarm_schedule_to_rp2040_flash(alarm_hours, alarm_minutes);
+                        //}
+                    }
+                }
             }
         }
+
         let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
         if alarm_triggered {
             info!("Alarm triggered after taking a recording reseeting rp2040");
@@ -441,23 +466,96 @@ pub fn audio_task(
     }
 }
 
+pub fn offload(
+    i2c: &mut SharedI2C,
+    clock_freq: u32,
+
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    timer: &mut Timer,
+    event_logger: &mut EventLogger,
+    mut wake_if_asleep: bool,
+    device_config: DeviceConfig,
+    delay: &mut Delay,
+    synced_date_time: &SyncedDateTime,
+    watchdog: &mut bsp::hal::Watchdog,
+) -> (Option<DeviceConfig>, bool) {
+    if let Ok(pi_waking) = i2c.pi_is_waking_or_awake(delay) {
+        wake_if_asleep = true;
+    }
+    if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
+        if !awake && wake_if_asleep {
+            watchdog.disable();
+            awake = wake_raspberry_pi(i2c, delay);
+            watchdog.start(8388607.micros());
+        }
+        if awake {
+            let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+            // watchdog.disable(); //should watch dog go into offload
+            if maybe_offload_flash_storage_and_events(
+                flash_storage,
+                pi_spi,
+                &mut peripherals.RESETS,
+                &mut peripherals.DMA,
+                clock_freq,
+                i2c,
+                delay,
+                timer,
+                event_logger,
+                &synced_date_time,
+                Some(watchdog),
+            ) {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::OffloadedRecording,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+            }
+            maybe_offload_events(
+                pi_spi,
+                &mut peripherals.RESETS,
+                &mut peripherals.DMA,
+                delay,
+                timer,
+                event_logger,
+                flash_storage,
+                clock_freq,
+            );
+            let (update_config, device_config_was_updated) =
+                get_existing_device_config_or_config_from_pi_on_initial_handshake(
+                    flash_storage,
+                    pi_spi,
+                    &mut peripherals.RESETS,
+                    &mut peripherals.DMA,
+                    clock_freq.Hz(),
+                    2u32, //need to get radiometry and leton serial
+                    1,
+                    Some(synced_date_time.date_time_utc.timestamp_millis()),
+                    timer,
+                    Some(device_config),
+                );
+            return (update_config, device_config_was_updated);
+        }
+    }
+    (Some(device_config), false)
+}
 pub fn get_alarm_dt(
     datetime: NaiveDateTime,
+    alarm_day: u8,
     alarm_hours: u8,
     alarm_minutes: u8,
 ) -> Result<NaiveDateTime, ()> {
     let mut naive_date = chrono::NaiveDate::from_ymd_opt(
         datetime.year() as i32,
         datetime.month() as u32,
-        datetime.day() as u32,
+        alarm_day as u32,
     );
     if naive_date.is_none() {
         return Err(());
     }
     let mut naive_date = naive_date.unwrap();
-    if alarm_hours < datetime.time().hour() as u8 {
-        naive_date = naive_date + Duration::days(1);
-    }
 
     let naive_time = chrono::NaiveTime::from_hms_opt(alarm_hours as u32, alarm_minutes as u32, 0);
     if naive_time.is_none() {
@@ -473,7 +571,7 @@ fn schedule_audio_rec(
     flash_storage: &mut OnboardFlash,
     timer: &mut Timer,
     event_logger: &mut EventLogger,
-) -> NaiveDateTime {
+) -> Result<NaiveDateTime, ()> {
     i2c.disable_alarm(delay);
     i2c.enable_alarm(delay);
 
@@ -517,11 +615,12 @@ fn schedule_audio_rec(
                 ),
                 flash_storage,
             );
+            return Ok(wakeup);
         }
     } else {
         error!("Failed setting wake alarm, can't go to sleep");
     }
-    return wakeup;
+    return Err(());
 }
 
 fn should_offload_audio_recordings(
@@ -530,7 +629,6 @@ fn should_offload_audio_recordings(
     delay: &mut Delay,
     i2c: &mut SharedI2C,
     now: NaiveDateTime,
-    last_offload: i64,
 ) -> bool {
     let offload_hour = 10;
     // if event_logger.has_events_to_offload() {
@@ -541,19 +639,6 @@ fn should_offload_audio_recordings(
     let has_files = flash_storage.has_files_to_offload() || event_logger.is_nearly_full();
     if !has_files {
         return false;
-    }
-
-    // offloaded in last hour
-    let has_offloaded = (now.timestamp_millis() - last_offload) < 60 * 60 * 1000;
-    if (now.hour() >= offload_hour) && !has_offloaded {
-        info!(
-            "Waking up because need to offload after {} and its {}last offload {} now {}",
-            offload_hour,
-            now.hour(),
-            last_offload,
-            now.timestamp_millis(),
-        );
-        return true;
     }
 
     // flash getting full

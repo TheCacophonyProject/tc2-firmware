@@ -14,6 +14,7 @@ use crate::utils::{
 };
 use crate::{bsp, onboard_flash};
 use byteorder::{ByteOrder, LittleEndian};
+use chrono::Timelike;
 use cortex_m::delay::Delay;
 use cortex_m::singleton;
 use defmt::{info, warn};
@@ -136,10 +137,10 @@ impl PdmMicrophone {
         let (mut sm, rx, tx) = PIOBuilder::from_program(installed_program)
             .in_pin_base(data_pin_id)
             .side_set_pin_base(clk_pin_id)
-            .pull_threshold(32)
-            .push_threshold(32)
             .clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional)
             .autopush(true)
+            .push_threshold(32)
+            .pull_threshold(32)
             .autopull(true)
             .build(self.state_machine_1_uninit.take().unwrap());
         sm.set_pindirs([
@@ -201,14 +202,20 @@ impl PdmMicrophone {
         flash_storage: &mut OnboardFlash,
         timestamp: u64,
         watchdog: &mut bsp::hal::Watchdog,
-    ) {
+        date_time: &SyncedDateTime,
+    ) -> bool {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
 
         watchdog.feed();
-        timer.delay_ms(1000); //how long to warm up??
+        timer.delay_ms(2000); //how long to warm up??
         let adjusted_sr = self.alter_samplerate(SAMPLE_RATE) as u32;
-        info!("Adjusted sr becomes {}", adjusted_sr);
+        info!(
+            "Adjusted sr becomes {} clock {}",
+            adjusted_sr,
+            self.system_clock_hz.to_MHz()
+        );
+
         let mut filter = PDMFilter::new(adjusted_sr);
         filter.init();
         let mut current_recording = RecordingStatus {
@@ -219,13 +226,14 @@ impl PdmMicrophone {
         // flash_storage.take_spi(spi, resets, self.system_clock_hz);
         // flash_storage.init();
         let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
+        let mut recorded_successfully = false;
         // Swap our buffers?
         let use_async: bool = false;
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
         if let Some(pio_rx) = self.pio_rx.take() {
-            let start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
+            let mut start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
             // Chain some buffers together for continuous transfers
             let mut b_0 = [0u32; 512];
             let mut b_1 = [0u32; 512];
@@ -242,6 +250,7 @@ impl PdmMicrophone {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
                     warn!("Couldn't keep up with data discarding recording {}", cycle);
+                    timer.delay_ms(1000);
                     if use_async && transfer.is_some() {
                         flash_storage.finish_transfer(
                             None,
@@ -272,6 +281,9 @@ impl PdmMicrophone {
                         watchdog.feed();
                     }
                 } else {
+                    if (cycle == WARMUP_CYCLES) {
+                        start = timer.get_counter();
+                    }
                     current_recording.samples_taken += rx_buf.len() * 32;
 
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
@@ -321,14 +333,14 @@ impl PdmMicrophone {
                     }
                     if current_recording.is_complete() {
                         watchdog.feed();
-                        // info!(
-                        //     "Recording done counts are {} milis {}  samples {} took {}",
-                        //     (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
-                        //     (timer.get_counter() - start).to_millis(),
-                        //     current_recording.total_samples,
-                        //     current_recording.samples_taken
-                        // );
-
+                        info!(
+                            "Recording done counts are {} milis {}  samples {} took {}",
+                            (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
+                            (timer.get_counter() - start).to_millis(),
+                            current_recording.total_samples,
+                            current_recording.samples_taken
+                        );
+                        let start = date_time.get_adjusted_dt(timer);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if use_async {
@@ -338,7 +350,6 @@ impl PdmMicrophone {
                                 Ok((new_t, new_a)) => {
                                     transfer = new_t;
                                     address = new_a;
-                                    info!("WROTE LAST");
                                 }
                                 Err(e) => {
                                     warn!("Error writing bytes to flash ending rec early {}", e);
@@ -353,6 +364,7 @@ impl PdmMicrophone {
                                 break;
                             }
                         }
+                        recorded_successfully = true;
                         break;
                     };
                 }
@@ -360,6 +372,7 @@ impl PdmMicrophone {
             }
             self.disable();
         }
+        recorded_successfully
     }
 }
 

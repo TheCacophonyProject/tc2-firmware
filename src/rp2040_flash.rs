@@ -33,7 +33,6 @@ pub const FLASH_EVENT_LOG_SIZE: u32 = 256 * 4096; // Amount dedicated to user ev
 
 pub fn write_device_config_to_rp2040_flash(data: &[u8]) {
     let addr = FLASH_END - FLASH_USER_SIZE;
-
     unsafe {
         cortex_m::interrupt::free(|_cs| {
             rom_data::connect_internal_flash();
@@ -49,34 +48,47 @@ pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }
 }
-pub fn read_alarm_from_rp2040_flash(offset: u32) -> &'static [u8] {
-    let mut addr = FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE + offset;
+
+pub fn read_is_audio_from_rp2040_flash() -> bool {
+    let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
+    let config = unsafe { slice::from_raw_parts(addr, 5 as usize) };
+    if config[0] == u8::MAX && config[1] == u8::MAX && config[2] == u8::MAX && config[3] == u8::MAX
+    {
+        false
+    } else {
+        config[4] == 1
+    }
+}
+
+pub fn read_alarm_from_rp2040_flash() -> &'static [u8] {
+    let mut addr = FLASH_XIP_BASE + FLASH_END;
     if addr % 256 != 0 {
         addr = 256 * (1 + (addr / 256) as u32);
     }
-    info!("Alarm read from {} offset {}", addr, offset);
+    info!("Alarm read from {} ", addr);
 
-    unsafe { slice::from_raw_parts(addr as *const u8, 2 as usize) }
+    unsafe { slice::from_raw_parts(addr as *const u8, 256 as usize) }
 }
 
 #[inline(never)]
 #[link_section = ".data.ram_func"]
 
-pub fn write_alarm_schedule_to_rp2040_flash(alarm_hours: u8, alarm_minutes: u8, offset: u32) {
-    let data = &[alarm_hours, alarm_minutes];
-    let mut addr = FLASH_END - FLASH_USER_SIZE + offset;
+pub fn write_alarm_schedule_to_rp2040_flash(alarm_day: u8, alarm_hours: u8, alarm_minutes: u8) {
+    let data = &[alarm_day, alarm_hours, alarm_minutes];
+    let mut addr = FLASH_END;
     if addr % 256 != 0 {
         addr = 256 * (1 + (addr / 256) as u32);
     }
     info!(
-        "Alarm time written to {} {} : {} offset {}",
-        addr, alarm_hours, alarm_minutes, offset
+        "Alarm time written to {} {} : {} data {}",
+        addr, alarm_hours, alarm_minutes, data
     );
     unsafe {
         cortex_m::interrupt::free(|_cs| {
             rom_data::connect_internal_flash();
             rom_data::flash_exit_xip();
-            rom_data::flash_range_program(addr, data.as_ptr(), 2);
+            rom_data::flash_range_erase(addr, SECTOR_SIZE, BLOCK_SIZE, SECTOR_ERASE);
+            rom_data::flash_range_program(addr, data.as_ptr(), 256);
             rom_data::flash_flush_cache(); // Get the XIP working again
             rom_data::flash_enter_cmd_xip(); // Start XIP back up
         });

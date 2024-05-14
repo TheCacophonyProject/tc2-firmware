@@ -202,7 +202,7 @@ fn find_target_rosc_frequency(
 }
 
 pub fn normal_clock() -> ClocksManager {
-    let xtal: u32 = 13300_000u32;
+    let xtal: u32 = 12_000_000;
     let mut pac = unsafe { Peripherals::steal() };
     let mut watchdog = rp2040_hal::Watchdog::new(pac.WATCHDOG);
     // Configure the clocks
