@@ -166,6 +166,7 @@ impl PdmMicrophone {
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
         sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
+
         info!(
             "Altered Mic CLock speed {} divider {} fraction {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
@@ -202,7 +203,6 @@ impl PdmMicrophone {
         flash_storage: &mut OnboardFlash,
         timestamp: u64,
         watchdog: &mut bsp::hal::Watchdog,
-        date_time: &SyncedDateTime,
     ) -> bool {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
@@ -215,8 +215,6 @@ impl PdmMicrophone {
             adjusted_sr,
             self.system_clock_hz.to_MHz()
         );
-        watchdog.feed();
-        timer.delay_ms(2000); //how long to warm up??
         watchdog.feed();
 
         let mut filter = PDMFilter::new(adjusted_sr);
@@ -343,7 +341,6 @@ impl PdmMicrophone {
                             current_recording.total_samples,
                             current_recording.samples_taken
                         );
-                        let start = date_time.get_adjusted_dt(timer);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if use_async {

@@ -116,14 +116,8 @@ fn main() -> ! {
         is_audio = read_is_audio_from_rp2040_flash();
     }
     let freq;
-
-    if is_audio {
-        freq = ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz();
-    } else {
-        //for some reason audio comes out faster than expected when using this clock
-        freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
-    }
-
+    freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
+    is_audio = true;
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
