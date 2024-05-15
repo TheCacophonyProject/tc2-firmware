@@ -109,11 +109,12 @@ pub fn audio_task(
     watchdog.feed();
     flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
     flash_storage.init();
-
+    flash_storage.erase_all_blocks();
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut delay = Delay::new(core.SYST, clock_freq);
 
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
+    event_logger.clear(&mut flash_storage);
     watchdog.feed();
 
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
