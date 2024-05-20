@@ -3,7 +3,6 @@ const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 16;
 const MAX_VOLUME: u8 = 64;
-use defmt::{info, warn};
 
 pub struct PDMFilter {
     lut: [u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],

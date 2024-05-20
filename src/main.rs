@@ -123,7 +123,6 @@ fn main() -> ! {
         //for some reason audio comes out faster than expected when using this clock
         freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
     }
-
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -270,20 +269,17 @@ fn main() -> ! {
             fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
-        loop {
-            nop();
-        }
-        // thermal_code(
-        //     lepton_pins,
-        //     pins,
-        //     watchdog,
-        //     system_clock_freq,
-        //     delay,
-        //     timer,
-        //     i2c1,
-        //     clocks,
-        //     rosc,
-        // );
+        thermal_code(
+            lepton_pins,
+            pins,
+            watchdog,
+            system_clock_freq,
+            delay,
+            timer,
+            i2c1,
+            clocks,
+            rosc,
+        );
     }
 }
 use crate::attiny_rtc_i2c::I2CConfig;

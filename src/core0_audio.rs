@@ -122,7 +122,6 @@ pub fn audio_task(
     watchdog.feed();
     flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
     flash_storage.init();
-
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
@@ -205,8 +204,8 @@ pub fn audio_task(
                     (alarm_dt - synced_date_time.get_adjusted_dt(timer)).num_minutes();
                 if until_alarm <= 0 || until_alarm > 60 {
                     info!(
-                        "Missed alarm was scheduled for {}:{} but its {} minutes away",
-                        alarm_hours, alarm_minutes, until_alarm
+                        "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
+                        alarm_day, alarm_hours, alarm_minutes, until_alarm
                     );
 
                     // should take recording now
@@ -303,6 +302,7 @@ pub fn audio_task(
                 warn!("Could not clear alarm {}", err);
             }
         } else {
+            info!("taken test recoridng clearing status");
             shared_i2c.tc2_agent_clear_audio_rec(&mut delay);
         }
     }

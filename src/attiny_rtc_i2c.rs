@@ -327,19 +327,17 @@ impl SharedI2C {
         is_recording: bool,
     ) -> Result<(), Error> {
         let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                //info!("Read raw tc2-agent state {}", state);
-                Ok(state & 1 << 1 == 2)
-            }
+            Ok(state) => Ok(state),
             Err(e) => Err(e),
         };
         match state {
-            Ok(state) => {
-                let mut val = if state { 2 } else { 0 };
-                let flag = if is_recording { 4 } else { 0 };
-                val |= flag;
-                //info!("Set tc2-agent state {}", val);
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+            Ok(mut state) => {
+                if is_recording {
+                    state |= 4;
+                } else {
+                    state &= !4u8;
+                }
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),
                 }
@@ -413,6 +411,8 @@ impl SharedI2C {
                         info!("tc2-agent not ready, rp2040 recording",);
                     } else if state == 6 {
                         info!("tc2-agent ready and rp2040 recording",);
+                    } else if state == 10 {
+                        info!("tc2-agent ready and wanting test recording {}", state);
                     } else {
                         info!("tc2-agent unknown state {}", state);
                     }
@@ -426,6 +426,7 @@ impl SharedI2C {
     pub fn tc2_agent_request_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
+                info!("agent state {}", state);
                 let rec_state: bool = (state & 1 << 1 == 2) && (state & 0x08 == 0x08);
                 Ok(rec_state)
             }
@@ -436,9 +437,7 @@ impl SharedI2C {
     pub fn tc2_agent_clear_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let mask = 8 << 1;
-                let val = state | mask;
-                //info!("Set tc2-agent state {}", val);
+                let val = state & !8u8;
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),

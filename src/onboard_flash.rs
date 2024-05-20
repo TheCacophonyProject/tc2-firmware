@@ -957,9 +957,9 @@ impl OnboardFlash {
         //     "Writing {} to block:page {}:{}, is last {}",
         //     user_bytes_length, b, p, is_last
         // );
-        if is_last {
-            warn!("Ending file at {}:{}", b, p);
-        }
+        // if is_last {
+        // warn!("Ending file at {}:{}", b, p);
+        // }
         let mut transfer = None;
         if self.record_to_flash {
             self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);

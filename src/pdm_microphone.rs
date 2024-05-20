@@ -252,24 +252,24 @@ impl PdmMicrophone {
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
-                    warn!("Couldn't keep up with data discarding recording {}", cycle);
-                    timer.delay_ms(1000);
-                    if use_async && transfer.is_some() {
-                        flash_storage.finish_transfer(
-                            None,
-                            None,
-                            transfer.take().unwrap(),
-                            address.take().unwrap(),
-                            true,
-                        );
-                    }
-                    if flash_storage.last_used_block_index.is_some() {
-                        flash_storage.erase_block_range(
-                            start_block_index,
-                            flash_storage.last_used_block_index.unwrap(),
-                        );
-                    }
-                    break;
+                    warn!("Couldn't keep up with data {}", cycle);
+                    // timer.delay_ms(1000);
+                    // if use_async && transfer.is_some() {
+                    //     flash_storage.finish_transfer(
+                    //         None,
+                    //         None,
+                    //         transfer.take().unwrap(),
+                    //         address.take().unwrap(),
+                    //         true,
+                    //     );
+                    // }
+                    // if flash_storage.last_used_block_index.is_some() {
+                    //     flash_storage.erase_block_range(
+                    //         start_block_index,
+                    //         flash_storage.last_used_block_index.unwrap(),
+                    //     );
+                    // }
+                    // break;
                 }
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
@@ -288,7 +288,6 @@ impl PdmMicrophone {
                         start = timer.get_counter();
                     }
                     current_recording.samples_taken += rx_buf.len() * 32;
-
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
@@ -300,7 +299,6 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
-
                         if use_async {
                             match flash_storage.append_file_bytes_async(
                                 data, data_size, false, None, None, transfer, address,
@@ -324,11 +322,7 @@ impl PdmMicrophone {
                         }
                         audio_buffer.reset();
                         if leftover.len() > 0 {
-                            // shouldn't need to do this
-                            audio_buffer = AudioBuffer::new();
-                            // info!("Slice for {}", leftover.len());
                             let out = audio_buffer.slice_for(leftover.len());
-                            // info!("Slice for {}", out.len());
 
                             filter.filter(leftover, VOLUME, out, true);
                         }
@@ -422,7 +416,7 @@ impl AudioBuffer {
     }
 
     pub fn is_full(&mut self) -> bool {
-        return self.index == USER_BUFFER_LENGTH;
+        return USER_BUFFER_LENGTH == self.index;
     }
 
     pub fn reset(&mut self) {

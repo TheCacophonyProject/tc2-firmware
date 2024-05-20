@@ -65,8 +65,6 @@ pub fn read_alarm_from_rp2040_flash() -> &'static [u8] {
     if addr % 256 != 0 {
         addr = 256 * (1 + (addr / 256) as u32);
     }
-    info!("Alarm read from {} ", addr);
-
     unsafe { slice::from_raw_parts(addr as *const u8, 256 as usize) }
 }
 
@@ -79,10 +77,6 @@ pub fn write_alarm_schedule_to_rp2040_flash(alarm_day: u8, alarm_hours: u8, alar
     if addr % 256 != 0 {
         addr = 256 * (1 + (addr / 256) as u32);
     }
-    info!(
-        "Alarm time written to {} {} : {} data {}",
-        addr, alarm_hours, alarm_minutes, data
-    );
     unsafe {
         cortex_m::interrupt::free(|_cs| {
             rom_data::connect_internal_flash();
