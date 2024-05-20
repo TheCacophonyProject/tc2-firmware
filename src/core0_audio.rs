@@ -240,7 +240,6 @@ pub fn audio_task(
     let mut take_test_rec = false;
     if let Ok(test_rec) = shared_i2c.tc2_agent_request_audio_rec(&mut delay) {
         take_test_rec = test_rec;
-        info!("Take test rec is {}", take_test_rec);
     }
     if do_recording || take_test_rec {
         watchdog.feed();
@@ -288,7 +287,6 @@ pub fn audio_task(
                     ),
                     &mut flash_storage,
                 );
-                watchdog.start(100.micros());
                 info!("Recording failed restarting and will try again");
                 loop {
                     nop();

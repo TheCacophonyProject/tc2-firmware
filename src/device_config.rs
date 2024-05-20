@@ -22,11 +22,17 @@ pub struct DeviceConfigInner {
     pub is_audio_device: bool,
 }
 
-#[derive(PartialEq)]
 pub struct DeviceConfig {
     config_inner: DeviceConfigInner,
     pub motion_detection_mask: DetectionMask,
     pub cursor_position: usize,
+}
+
+impl PartialEq for DeviceConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.config_inner == other.config_inner
+            && self.motion_detection_mask == other.motion_detection_mask
+    }
 }
 
 impl Format for DeviceConfig {

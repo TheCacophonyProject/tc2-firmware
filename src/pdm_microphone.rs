@@ -253,23 +253,22 @@ impl PdmMicrophone {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
                     warn!("Couldn't keep up with data {}", cycle);
-                    // timer.delay_ms(1000);
-                    // if use_async && transfer.is_some() {
-                    //     flash_storage.finish_transfer(
-                    //         None,
-                    //         None,
-                    //         transfer.take().unwrap(),
-                    //         address.take().unwrap(),
-                    //         true,
-                    //     );
-                    // }
-                    // if flash_storage.last_used_block_index.is_some() {
-                    //     flash_storage.erase_block_range(
-                    //         start_block_index,
-                    //         flash_storage.last_used_block_index.unwrap(),
-                    //     );
-                    // }
-                    // break;
+                    if use_async && transfer.is_some() {
+                        flash_storage.finish_transfer(
+                            None,
+                            None,
+                            transfer.take().unwrap(),
+                            address.take().unwrap(),
+                            true,
+                        );
+                    }
+                    if flash_storage.last_used_block_index.is_some() {
+                        flash_storage.erase_block_range(
+                            start_block_index,
+                            flash_storage.last_used_block_index.unwrap(),
+                        );
+                    }
+                    break;
                 }
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
