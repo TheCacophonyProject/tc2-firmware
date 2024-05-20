@@ -349,7 +349,6 @@ impl SharedI2C {
         match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
             Ok(state) => {
                 let camera_state = CameraState::from(state);
-
                 match camera_state {
                     CameraState::PoweredOn | CameraState::PoweringOn => Ok(true),
                     _ => Ok(false),

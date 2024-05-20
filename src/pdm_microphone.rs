@@ -152,6 +152,7 @@ impl PdmMicrophone {
         // Start receiving data via DMA double buffer, and start streaming/writing out to disk, so
         // will need to have access to the fs
     }
+
     pub fn alter_samplerate(&mut self, sample_rate: usize) -> f32 {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
         let clock_divider =
@@ -160,6 +161,32 @@ impl PdmMicrophone {
             "Altering sample for clock {} divider {}",
             self.system_clock_hz.to_Hz(),
             clock_divider
+        );
+
+        let clock_divider_fractional =
+            (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
+
+        sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
+        info!(
+            "Altered Mic CLock speed {} divider {} fraction {}",
+            self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
+            clock_divider as u16,
+            clock_divider_fractional
+        );
+        self.state_machine_1_running = Some((sm, tx));
+        return self.system_clock_hz.to_Hz() as f32
+            / (PDM_DECIMATION as f32
+                * 2.0
+                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)));
+    }
+
+    pub fn alter_mic_clock(&mut self, clock_rate: f32) -> f32 {
+        let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
+        let clock_divider = self.system_clock_hz.to_MHz() as f32 / (clock_rate * 2.0);
+
+        info!(
+            "Altering mic clock to {} divider {}",
+            clock_rate, clock_divider
         );
 
         let clock_divider_fractional =
@@ -209,15 +236,12 @@ impl PdmMicrophone {
 
         watchdog.feed();
         timer.delay_ms(2000); //how long to warm up??
-        let adjusted_sr = self.alter_samplerate(SAMPLE_RATE) as u32;
+        let adjusted_sr = self.alter_mic_clock(3.072) as u32;
         info!(
             "Adjusted sr becomes {} clock {}",
             adjusted_sr,
             self.system_clock_hz.to_MHz()
         );
-        watchdog.feed();
-        timer.delay_ms(2000); //how long to warm up??
-        watchdog.feed();
 
         let mut filter = PDMFilter::new(adjusted_sr);
         filter.init();
@@ -294,7 +318,6 @@ impl PdmMicrophone {
                     if audio_buffer.is_full()
                         && (!current_recording.is_complete() || leftover.len() > 0)
                     {
-                        // timer.delay_us(500);
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
@@ -330,11 +353,8 @@ impl PdmMicrophone {
                     if current_recording.is_complete() {
                         watchdog.feed();
                         info!(
-                            "Recording done counts are {} milis {}  samples {} took {}",
-                            (timer.get_counter().ticks() - start.ticks()) as f32 / 1000000.0,
+                            "Recording done took {} ms",
                             (timer.get_counter() - start).to_millis(),
-                            current_recording.total_samples,
-                            current_recording.samples_taken
                         );
                         let start = date_time.get_adjusted_dt(timer);
                         let data_size = (audio_buffer.index - 2) * 2;

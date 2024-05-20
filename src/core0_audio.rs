@@ -478,8 +478,9 @@ pub fn offload(
     watchdog: &mut bsp::hal::Watchdog,
 ) -> (Option<DeviceConfig>, bool) {
     if let Ok(pi_waking) = i2c.pi_is_waking_or_awake(delay) {
-        wake_if_asleep = true;
+        wake_if_asleep = pi_waking;
     }
+
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
