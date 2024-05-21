@@ -295,9 +295,7 @@ pub fn audio_task(
         if do_recording && !take_test_rec {
             shared_i2c.clear_alarm(&mut delay);
             reschedule = true;
-            if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
-                warn!("Could not clear alarm {}", err);
-            }
+            write_alarm_schedule_to_rp2040_flash(u8::MAX, u8::MAX, u8::MAX);
         } else {
             info!("taken test recoridng clearing status");
             shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
