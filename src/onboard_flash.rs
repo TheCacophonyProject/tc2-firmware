@@ -248,6 +248,12 @@ pub unsafe fn extend_lifetime_generic_mut<'b, T>(r: &'b mut T) -> &'static mut T
     mem::transmute::<&'b mut T, &'static mut T>(r)
 }
 
+pub unsafe fn extend_lifetime_generic_mut_2<'b, T, const SIZE: usize>(
+    r: &'b mut [T; SIZE],
+) -> &'static mut [T; SIZE] {
+    mem::transmute::<&'b mut [T; SIZE], &'static mut [T; SIZE]>(r)
+}
+
 // pub unsafe fn extend_lifetime_a<'b>(
 //     r: &'b Mutex<RefCell<[FrameSeg; 4]>>,
 // ) -> &'static Mutex<RefCell<[FrameSeg; 4]>> {
@@ -769,9 +775,13 @@ impl OnboardFlash {
         self.read_from_cache_at_column_offset(block, 0, None);
     }
     pub fn spi_write(&mut self, bytes: &[u8]) {
-        self.cs.set_low().unwrap();
-        self.spi.as_mut().unwrap().write(bytes).unwrap();
-        self.cs.set_high().unwrap();
+        if let Some(spi) = self.spi.as_mut() {
+            self.cs.set_low().unwrap();
+            spi.write(bytes).unwrap();
+            self.cs.set_high().unwrap();
+        } else {
+            error!("Onboard flash doesn't own SPI, can't do write");
+        }
     }
 
     fn print_feature(&mut self, name: &str, feature: u8) {

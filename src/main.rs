@@ -58,8 +58,9 @@ use embedded_hal::prelude::{
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
-use rp2040_hal::gpio::FunctionI2C;
-use rp2040_hal::{Watchdog, I2C};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, SioInput};
+use rp2040_hal::I2C;
+
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
@@ -74,6 +75,8 @@ const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
+
+#[repr(C, align(32))]
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
 
 impl FrameBuffer {
@@ -174,42 +177,24 @@ fn main() -> ! {
     );
 
     info!("Initing shared i2c");
-    let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
+    // We need to get the GPIO pin for determining who is using the I2C bus.
+    let unlocked_pin = pins
+        .gpio3
+        .into_function::<FunctionSio<SioInput>>()
+        .into_pull_type::<PullDown>();
+
+    let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
     info!("Got shared i2c");
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
-        shared_i2c.clear_alarm();
-        shared_i2c.disable_alarm(&mut delay);
+        shared_i2c.clear_alarm(&mut delay);
     }
-
-    let i2c1: I2C<
-        pac::I2C1,
-        (
-            rp2040_hal::gpio::Pin<
-                rp2040_hal::gpio::bank0::Gpio6,
-                rp2040_hal::gpio::FunctionI2c,
-                rp2040_hal::gpio::PullDown,
-            >,
-            rp2040_hal::gpio::Pin<
-                rp2040_hal::gpio::bank0::Gpio7,
-                rp2040_hal::gpio::FunctionI2c,
-                rp2040_hal::gpio::PullDown,
-            >,
-        ),
-    > = shared_i2c.free();
-
-    // {
-    // If we're waking up to make an audio recording, do that.
-    // existing_config = None;
-    // if let Some(existing_config) = &existing_config {
-    //     info!("Existing config {:#?}", existing_config.config());
-    // } else {
-    //     // We need to wake up the rpi and get a config
-    //     if !(wake_raspberry_pi(&mut shared_i2c, &mut delay)) {
-    //         crate::panic!("Could not wake rpi to get config");
-    //     }
-    // }
+    let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+    if disabled_alarm.is_err() {
+        error!("{}", disabled_alarm.unwrap());
+    }
+    let (i2c1, unlocked_pin) = shared_i2c.free();
 
     if is_audio {
         let gpio0 = pins.gpio0;
@@ -357,6 +342,7 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
+    let mut core1_stack: Stack<45000> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
@@ -373,19 +359,23 @@ pub fn thermal_code(
     watchdog.disable();
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
-        let _ = core1.spawn(unsafe { &mut core1stack.mem }, move || {
-            core_1_task(
-                frame_buffer_local,
-                frame_buffer_local_2,
-                system_clock_freq,
-                pins,
-                i2c1,
-                lepton_serial,
-                lepton_firmware_version,
-                true,
-                timer,
-            )
-        });
+        let _ = core1.spawn(
+            unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) },
+            move || {
+                core_1_task(
+                    frame_buffer_local,
+                    frame_buffer_local_2,
+                    system_clock_freq,
+                    pins,
+                    i2c1,
+                    unlocked_pin,
+                    lepton_serial,
+                    lepton_firmware_version,
+                    alarm_woke_us,
+                    timer,
+                )
+            },
+        );
     }
 
     let result = sio.fifo.read_blocking();

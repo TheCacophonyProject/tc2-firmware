@@ -6,7 +6,7 @@ use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::core1_sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    maybe_offload_flash_storage_and_events,
+    offload_flash_storage_and_events,
 };
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
@@ -19,7 +19,7 @@ use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
-use chrono::NaiveDateTime;
+use chrono::{Duration, NaiveDateTime};
 use core::cell::RefCell;
 use core::ops::Add;
 use cortex_m::asm::nop;
@@ -29,7 +29,7 @@ use defmt::{error, info, warn, Format};
 use fugit::RateExtU32;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
-    Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio5, Gpio8, Gpio9,
+    Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio3, Gpio5, Gpio8, Gpio9,
 };
 use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioInput, SioOutput};
 use rp2040_hal::pio::PIOExt;
@@ -223,6 +223,7 @@ pub fn core_1_task(
     clock_freq: u32,
     pins: Core1Pins,
     i2c_config: I2CConfig,
+    unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
@@ -252,7 +253,7 @@ pub fn core_1_task(
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
-    let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
+    let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
@@ -391,26 +392,49 @@ pub fn core_1_task(
             clock_freq,
         );
     }
-    if maybe_offload_flash_storage_and_events(
-        &mut flash_storage,
-        &mut pi_spi,
-        &mut peripherals.RESETS,
-        &mut peripherals.DMA,
-        clock_freq,
-        &mut shared_i2c,
-        &mut delay,
-        &mut timer,
-        &mut event_logger,
-        &synced_date_time,
-        None,
-    ) {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::OffloadedRecording,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
+
+    // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
+    //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
+    //  Otherwise, if the rp2040 happens to restart, we'll pretty much
+    // always start the pi up, which we don't want.
+    let has_files_to_offload = flash_storage.has_files_to_offload();
+    let should_offload = (has_files_to_offload
+        && !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None))
+        || flash_storage.is_too_full_to_start_new_recordings();
+    let should_offload = if !should_offload {
+        let previous_offload_time = event_logger
+            .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
+            .map(|event| event.timestamp());
+        let duration_since_prev_offload: Duration =
+            if let Some(previous_offload_time) = previous_offload_time {
+                if let Some(timestamp) = previous_offload_time {
+                    synced_date_time.date_time_utc.clone() - timestamp
+                } else {
+                    Duration::minutes(0)
+                }
+            } else {
+                Duration::minutes(0)
+            };
+        has_files_to_offload && duration_since_prev_offload > Duration::hours(24)
+    } else {
+        should_offload
+    };
+
+    let did_offload_files = if should_offload {
+        offload_flash_storage_and_events(
             &mut flash_storage,
-        );
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            clock_freq,
+            &mut shared_i2c,
+            &mut delay,
+            &mut timer,
+            &mut event_logger,
+            &synced_date_time,
+        )
+    } else {
+        false
     };
 
     // Unset the is_recording flag on attiny on startup
@@ -449,14 +473,20 @@ pub fn core_1_task(
 
     info!(
         "Current time is in recording window? {}",
-        device_config.time_is_in_recording_window(&synced_date_time.date_time_utc)
+        device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
+    let mut current_recording_window = None;
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
     let mut logged_flash_storage_nearly_full = false;
+    // NOTE: If there are already recordings on the flash memory,
+    //  assume we've already made the startup status recording during this recording window.
+    let mut made_startup_status_recording = !has_files_to_offload || did_offload_files;
+    let mut made_shutdown_status_recording = false;
+    let mut making_status_recording = false;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     info!("Entering frame loop");
@@ -568,10 +598,38 @@ pub fn core_1_task(
                 &device_config.motion_detection_mask,
             );
             let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
-
+            let status_recording_length_in_frames = 18;
+            let motion_detection_triggered_this_frame =
+                this_frame_motion_detection.got_new_trigger();
             should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
-                && this_frame_motion_detection.got_new_trigger()
+                && (motion_detection_triggered_this_frame || !made_startup_status_recording)
                 && cptv_stream.is_none(); // wait until lepton stabilises before recording
+
+            if made_startup_status_recording
+                && !made_shutdown_status_recording
+                && !motion_detection_triggered_this_frame
+                && cptv_stream.is_none()
+            {
+                if dev_mode {
+                    if synced_date_time.date_time_utc + Duration::minutes(1)
+                        > startup_date_time_utc + Duration::minutes(4)
+                    {
+                        warn!("Make shutdown status recording");
+                        should_start_new_recording = true;
+                        made_shutdown_status_recording = true;
+                        making_status_recording = true;
+                    }
+                } else {
+                    if let Some((_, window_end)) = &current_recording_window {
+                        if synced_date_time.date_time_utc + Duration::minutes(1) > *window_end {
+                            warn!("Make shutdown status recording");
+                            should_start_new_recording = true;
+                            made_shutdown_status_recording = true;
+                            making_status_recording = true;
+                        }
+                    }
+                }
+            }
 
             // TODO: Do we want to have a max recording length timeout, or just pause recording if a subject stays in the frame
             //  but doesn't move for a while?  Maybe if a subject is stationary for 1 minute, we pause, and only resume
@@ -579,9 +637,12 @@ pub fn core_1_task(
             //  In continuous recording mode we'd have a really long timeout perhaps?  Needs more thought.
             //  Also consider the case where we have a mask region to ignore or pay attention to.
             let should_end_current_recording = cptv_stream.is_some()
-                && (this_frame_motion_detection.triggering_ended()
+                && ((this_frame_motion_detection.triggering_ended()
                     || frames_written >= max_length_in_frames
-                    || flash_storage.is_nearly_full());
+                    || flash_storage.is_nearly_full())
+                    || (making_status_recording
+                        && (frames_written >= status_recording_length_in_frames
+                            || flash_storage.is_nearly_full())));
 
             motion_detection = Some(this_frame_motion_detection);
 
@@ -592,13 +653,33 @@ pub fn core_1_task(
                 //  we just get it periodically, and then each frame add to it, then re-sync it
                 // (when we do our once a minute checks) when we're *not* trying to start a recording.
                 let is_inside_recording_window = if !dev_mode {
-                    device_config.time_is_in_recording_window(&synced_date_time.date_time_utc)
+                    device_config.time_is_in_recording_window(
+                        &synced_date_time.date_time_utc,
+                        &current_recording_window,
+                    )
                 } else {
                     // Recording window is 5 minutes from startup time in dev mode.
                     synced_date_time.date_time_utc
                         < startup_date_time_utc + chrono::Duration::minutes(5)
                 };
+
                 if is_inside_recording_window {
+                    if current_recording_window.is_none() {
+                        current_recording_window = Some(
+                            device_config
+                                .next_or_current_recording_window(&synced_date_time.date_time_utc),
+                        );
+                    }
+
+                    // Should we make a 2-second status recording at the beginning or end of the window?
+                    if !made_startup_status_recording && !motion_detection_triggered_this_frame {
+                        warn!("Make startup status recording");
+                        made_startup_status_recording = true;
+                        making_status_recording = true;
+                    } else {
+                        // We're making a shutdown recording.
+                    }
+
                     warn!("Setting recording flag on attiny");
                     // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
                     //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
@@ -606,6 +687,10 @@ pub fn core_1_task(
                     let _ = shared_i2c
                         .set_recording_flag(&mut delay, true)
                         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+                    warn!(
+                        "Making a status recording? {}, Triggered motion? {}",
+                        making_status_recording, motion_detection_triggered_this_frame
+                    );
                     error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
                     let mut cptv_streamer = CptvStream::new(
@@ -617,6 +702,7 @@ pub fn core_1_task(
                         &mut flash_storage,
                         &huffman_table,
                         &crc_table,
+                        making_status_recording,
                     );
                     cptv_streamer.init_gzip_stream(&mut flash_storage, false);
 
@@ -689,7 +775,8 @@ pub fn core_1_task(
                         ),
                         &mut flash_storage,
                     );
-                    if motion_detection.as_ref().unwrap().was_false_positive()
+                    if !making_status_recording
+                        && motion_detection.as_ref().unwrap().was_false_positive()
                     // && cptv_stream.num_frames <= 100
                     {
                         // error!("Discarding as a false-positive");
@@ -705,6 +792,9 @@ pub fn core_1_task(
                             ),
                             &mut flash_storage,
                         );
+                    }
+                    if making_status_recording {
+                        making_status_recording = false;
                     }
                 }
                 cptv_stream = None;
@@ -756,7 +846,7 @@ pub fn core_1_task(
         }
 
         let one_min_check_start = timer.get_counter();
-        let expected_rtc_sync_time_us = 2100;
+        let expected_rtc_sync_time_us = 3500;
         if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
@@ -764,7 +854,7 @@ pub fn core_1_task(
             //  the RPi will shut down when it wants to.
 
             if device_config.use_low_power_mode() {
-                // Once per minute, if we're not currently recording, tell the RPi it can shut-down, as it's not
+                // Once per minute, if we're not currently recording, tell the RPi it can shut down, as it's not
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
                 advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 if !logged_told_rpi_to_sleep {
@@ -777,7 +867,12 @@ pub fn core_1_task(
                     );
                     logged_told_rpi_to_sleep = true;
                 }
+                info!(
+                    "Advise pi to shutdown took {}µs",
+                    (timer.get_counter() - sync_rtc_start).to_micros()
+                );
             }
+            let sync_rtc_start_real = timer.get_counter();
             synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
                 Err(err_str) => {
@@ -792,16 +887,22 @@ pub fn core_1_task(
                     synced_date_time
                 }
             };
+            info!(
+                "RTC Sync time took {}µs",
+                (timer.get_counter() - sync_rtc_start_real).to_micros()
+            );
 
-            // NOTE: In continuous recording mode, the device will only shutdown briefly when the flash storage
+            // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
             // is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
             // never shut down.
             is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
             let is_outside_recording_window = if !dev_mode {
-                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc)
+                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
             } else {
-                let is_inside_recording_window = synced_date_time.date_time_utc
-                    < startup_date_time_utc + chrono::Duration::minutes(5);
+                // !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
+
+                let is_inside_recording_window =
+                    synced_date_time.date_time_utc < startup_date_time_utc + Duration::minutes(5);
                 !is_inside_recording_window
             };
 
@@ -820,6 +921,7 @@ pub fn core_1_task(
                 if flash_storage_nearly_full
                     || (is_outside_recording_window && flash_storage.has_files_to_offload())
                 {
+                    warn!("Recording window ended with files to offload, request restart");
                     // If flash storage is nearly full, or we're now outside the recording window,
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
@@ -844,6 +946,7 @@ pub fn core_1_task(
                         logged_told_rpi_to_sleep = true;
                     }
                 }
+                let check_power_down_state_start = timer.get_counter();
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
                         if !logged_pi_powered_down {
@@ -867,11 +970,23 @@ pub fn core_1_task(
                             // In dev mode, we always set the restart alarm for 2 minutes time.
                             synced_date_time.date_time_utc + chrono::Duration::minutes(2)
                         };
-                        shared_i2c.enable_alarm(&mut delay);
+                        let enabled_alarm = shared_i2c.enable_alarm(&mut delay);
+                        if enabled_alarm.is_err() {
+                            error!("Failed enabling alarm");
+                            event_logger.log_event(
+                                LoggerEvent::new(
+                                    LoggerEventKind::RtcCommError,
+                                    synced_date_time.get_timestamp_micros(&timer),
+                                ),
+                                &mut flash_storage,
+                            );
+                        }
                         if let Ok(_) =
                             shared_i2c.set_wakeup_alarm(&next_recording_window_start, &mut delay)
                         {
-                            let alarm_enabled = shared_i2c.alarm_interrupt_enabled();
+                            let alarm_enabled = shared_i2c
+                                .alarm_interrupt_enabled(&mut delay)
+                                .unwrap_or(false);
                             info!("Wake up alarm interrupt enabled {}", alarm_enabled);
                             if alarm_enabled {
                                 event_logger.log_event(
@@ -909,30 +1024,61 @@ pub fn core_1_task(
                                     info!("Sleeping");
                                 } else {
                                     error!("Failed sending sleep request to attiny");
+                                    event_logger.log_event(
+                                        LoggerEvent::new(
+                                            LoggerEventKind::AttinyCommError,
+                                            synced_date_time.get_timestamp_micros(&timer),
+                                        ),
+                                        &mut flash_storage,
+                                    );
                                 }
                             } else {
                                 error!("Alarm was not properly enabled");
+                                event_logger.log_event(
+                                    LoggerEvent::new(
+                                        LoggerEventKind::RtcCommError,
+                                        synced_date_time.get_timestamp_micros(&timer),
+                                    ),
+                                    &mut flash_storage,
+                                );
                             }
                             // Now we can put ourselves to sleep.
                         } else {
                             error!("Failed setting wake alarm, can't go to sleep");
+                            event_logger.log_event(
+                                LoggerEvent::new(
+                                    LoggerEventKind::RtcCommError,
+                                    synced_date_time.get_timestamp_micros(&timer),
+                                ),
+                                &mut flash_storage,
+                            );
                         }
                     } else {
                         warn!("Pi is still awake, so rp2040 must stay awake");
                     }
+                } else {
+                    warn!("Failed to get Pi powered down state from Attiny");
                 }
+                warn!(
+                    "Check pi power down state took {}",
+                    (timer.get_counter() - check_power_down_state_start).to_micros()
+                );
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
                 wake_raspberry_pi(&mut shared_i2c, &mut delay);
             }
+
             // Make sure timing is as close as possible to the non-sync case
             let sync_rtc_end = timer.get_counter();
             let sync_time = (sync_rtc_end - sync_rtc_start).to_micros() as i32;
-            let additional_wait = (expected_rtc_sync_time_us - sync_time).max(0);
+            let additional_wait = (expected_rtc_sync_time_us - sync_time).min(0);
             if additional_wait > 0 {
-                // warn!("Additional wait after RTC sync {}µs", additional_wait);
+                warn!(
+                    "Additional wait after RTC sync {}µs, total sync time {}",
+                    additional_wait, sync_time
+                );
                 delay.delay_us(additional_wait as u32);
             } else {
-                // warn!("RTC sync took {}µs", sync_time)
+                warn!("I2C messages took {}µs", sync_time)
             }
         } else {
             // Increment the datetime n frame's worth.
@@ -946,7 +1092,7 @@ pub fn core_1_task(
                 1
             };
 
-            incremented_datetime += chrono::Duration::milliseconds(115 * frames_elapsed as i64);
+            incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
             if incremented_datetime > synced_date_time.date_time_utc {
                 synced_date_time.set(incremented_datetime, &timer);
             }
@@ -970,7 +1116,7 @@ pub fn core_1_task(
     }
 }
 
-fn current_time(synced_time: &NaiveDateTime, offset: chrono::Duration) -> NaiveDateTime {
+fn current_time(synced_time: &NaiveDateTime, offset: Duration) -> NaiveDateTime {
     synced_time.add(offset)
 }
 
