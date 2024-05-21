@@ -129,9 +129,12 @@ pub fn offload_flash_storage_and_events(
     let mut success = true;
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
-    'transfer_all_file_parts: while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+    while let Some(((part, crc, block_index, page_index), is_last, spi)) =
         flash_storage.get_file_part()
     {
+        if watchdog.is_some() {
+            watchdog.as_mut().unwrap().feed();
+        }
         pi_spi.enable(spi, resets);
         let transfer_type = if file_start && !is_last {
             ExtTransferMessage::BeginFileTransfer
