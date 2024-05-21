@@ -5,7 +5,7 @@ use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{DMA, PIO1, SPI1};
-use crate::core1_sub_tasks::maybe_offload_flash_storage_and_events;
+use crate::core1_sub_tasks::offload_flash_storage_and_events;
 use crate::core1_task::SyncedDateTime;
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};

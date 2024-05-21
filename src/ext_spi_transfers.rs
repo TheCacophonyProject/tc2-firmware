@@ -3,7 +3,6 @@ use crate::bsp::pac;
 use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
 use crate::onboard_flash::extend_lifetime;
 
-use crate::utils::u32_slice_to_u8;
 use crate::utils::u8_slice_to_u32;
 
 use byteorder::{ByteOrder, LittleEndian};

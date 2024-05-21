@@ -1,4 +1,3 @@
-// #![allow(warnings)]
 #![no_std]
 #![no_main]
 #![allow(dead_code)]
@@ -26,9 +25,8 @@ mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, wake_raspberry_pi, Core1Pins, Core1Task};
+use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
-use crate::device_config::DeviceConfig;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
 use crate::rp2040_flash::read_is_audio_from_rp2040_flash;
@@ -43,9 +41,10 @@ use bsp::{
     pac::Peripherals,
 };
 use cortex_m::asm::nop;
-use cortex_m::asm::wfe;
 use rp2040_hal::rosc::RingOscillator;
 
+use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
+use bsp::hal::watchdog::Watchdog;
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
@@ -60,7 +59,6 @@ use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, SioInput};
 use rp2040_hal::I2C;
-
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
@@ -104,8 +102,6 @@ impl FrameBuffer {
             [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
     }
 }
-// use rp2040_hal::pac;
-use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 
 #[entry]
 fn main() -> ! {
@@ -222,6 +218,7 @@ fn main() -> ! {
             gpio1,
             watchdog,
             alarm_woke_us,
+            unlocked_pin,
         );
     } else {
         let lepton_pins = LeptonPins {
@@ -264,6 +261,8 @@ fn main() -> ! {
             i2c1,
             clocks,
             rosc,
+            alarm_woke_us,
+            unlocked_pin,
         );
     }
 }
@@ -286,6 +285,11 @@ pub fn audio_branch(
     >,
     mut watchdog: bsp::hal::Watchdog,
     alarm_triggered: bool,
+    unlocked_pin: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio3,
+        FunctionSio<SioInput>,
+        PullDown,
+    >,
 ) -> ! {
     audio_task(
         i2c_config,
@@ -296,6 +300,7 @@ pub fn audio_branch(
         gpio1,
         &mut watchdog,
         alarm_triggered,
+        unlocked_pin,
     );
 }
 pub fn thermal_code(
@@ -308,6 +313,12 @@ pub fn thermal_code(
     i2c1: I2CConfig,
     clocks: &ClocksManager,
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    alarm_woke_us: bool,
+    unlocked_pin: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio3,
+        FunctionSio<SioInput>,
+        PullDown,
+    >,
 ) -> ! {
     let mut core1stack: Stack<45000> = Stack::new(); // 180,000 bytes
     let core1stack = unsafe { extend_lifetime_generic_mut(&mut core1stack) };

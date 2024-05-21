@@ -1,44 +1,38 @@
-use core::ops::DerefMut;
-
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
+use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::core1_sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    maybe_offload_flash_storage_and_events,
+    offload_flash_storage_and_events,
 };
 use crate::core1_task::Core1Pins;
 use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime};
-use crate::device_config::{self, get_naive_datetime, DeviceConfig};
+use crate::device_config::{get_naive_datetime, DeviceConfig};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
-use crate::{bsp, event_logger};
 use cortex_m::delay::Delay;
-use defmt::{error, info, warn, Format};
+use defmt::{error, info, warn};
 use rp2040_hal::{Sio, Timer};
 
-use chrono::{Datelike, Duration, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Datelike, NaiveDateTime, Timelike};
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
     _embedded_hal_watchdog_WatchdogEnable,
 };
 use fugit::{ExtU32, RateExtU32};
-use pcf8563::DateTime;
 
 use cortex_m::asm::nop;
-use cortex_m::asm::wfe;
 use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
+use rp2040_hal::gpio::{FunctionSio, PullDown, SioInput};
 use rp2040_hal::pio::PIOExt;
 
 use crate::onboard_flash::extend_lifetime_generic_mut;
 
-use crate::rp2040_flash::{
-    read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
-    write_device_config_to_rp2040_flash,
-};
+use crate::rp2040_flash::{read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash};
 
 pub fn audio_task(
     i2c_config: I2CConfig,
@@ -57,6 +51,11 @@ pub fn audio_task(
     >,
     watchdog: &mut bsp::hal::Watchdog,
     alarm_triggered: bool,
+    unlocked_pin: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio3,
+        FunctionSio<SioInput>,
+        PullDown,
+    >,
 ) -> ! {
     watchdog.feed();
     let mut device_config: DeviceConfig = DeviceConfig::load_existing_config_from_flash().unwrap();
@@ -124,7 +123,7 @@ pub fn audio_task(
     flash_storage.init();
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut delay = Delay::new(core.SYST, clock_freq);
-    let mut shared_i2c = SharedI2C::new(i2c_config, &mut delay);
+    let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
@@ -238,7 +237,7 @@ pub fn audio_task(
         );
     }
     let mut take_test_rec = false;
-    if let Ok(test_rec) = shared_i2c.tc2_agent_request_audio_rec(&mut delay) {
+    if let Ok(test_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
         take_test_rec = test_rec;
     }
     if do_recording || take_test_rec {
@@ -294,14 +293,14 @@ pub fn audio_task(
             }
         }
         if do_recording && !take_test_rec {
-            shared_i2c.clear_alarm();
+            shared_i2c.clear_alarm(&mut delay);
             reschedule = true;
             if let Some(err) = shared_i2c.set_minutes(0, &mut delay).err() {
                 warn!("Could not clear alarm {}", err);
             }
         } else {
             info!("taken test recoridng clearing status");
-            shared_i2c.tc2_agent_clear_audio_rec(&mut delay);
+            shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
         }
     }
 
@@ -490,7 +489,7 @@ pub fn offload(
         if awake {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
             // watchdog.disable(); //should watch dog go into offload
-            if maybe_offload_flash_storage_and_events(
+            if offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
                 &mut peripherals.RESETS,
@@ -571,7 +570,6 @@ fn schedule_audio_rec(
     event_logger: &mut EventLogger,
 ) -> Result<NaiveDateTime, ()> {
     i2c.disable_alarm(delay);
-    i2c.enable_alarm(delay);
 
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
     let mut r = rng.generate();
@@ -601,19 +599,19 @@ fn schedule_audio_rec(
     // let wake_in: i32 = 60 * 2;
 
     let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
-
+    i2c.enable_alarm(delay);
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
-        let alarm_enabled = i2c.alarm_interrupt_enabled();
-        info!("Wake up alarm interrupt enabled {}", alarm_enabled);
-        if alarm_enabled {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
-            return Ok(wakeup);
+        if let Ok(alarm_enabled) = i2c.alarm_interrupt_enabled(delay) {
+            if alarm_enabled {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+                return Ok(wakeup);
+            }
         }
     } else {
         error!("Failed setting wake alarm, can't go to sleep");

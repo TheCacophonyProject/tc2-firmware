@@ -1,9 +1,6 @@
 use core::slice;
 use rp2040_hal::rom_data;
 
-use crate::utils::u16_slice_to_u8;
-use defmt::{info, warn};
-
 /// Taken from https://github.com/rp-rs/rp-hal/issues/257
 /// This allows writing config data to the rp2040's 2MB companion flash chip.
 ///

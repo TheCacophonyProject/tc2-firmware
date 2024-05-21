@@ -160,9 +160,7 @@ impl SharedI2C {
     }
     fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
         if let Some(config) = self.i2c.take() {
-            let mut rtc = PCF8563::new(config);
-            // rtc.rtc_init().unwrap();
-            self.rtc = Some(rtc);
+            self.rtc = Some(PCF8563::new(config))
         }
         self.rtc.as_mut().unwrap()
     }
@@ -455,7 +453,7 @@ impl SharedI2C {
         }
     }
 
-    pub fn tc2_agent_request_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
                 let rec_state: bool = (state & 1 << 1 == 2) && (state & 0x08 == 0x08);
@@ -465,7 +463,7 @@ impl SharedI2C {
         }
     }
 
-    pub fn tc2_agent_clear_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
                 let val = state & !8u8;
@@ -582,49 +580,7 @@ impl SharedI2C {
         }
     }
 
-
-    pub fn enable_alarm(&mut self, delay: &mut Delay) {
-        self.rtc().clear_alarm_flag().unwrap_or(());
-        self.rtc()
-            .control_alarm_interrupt(Control::On)
-            .unwrap_or(());
-        self.rtc().control_alarm_day(Control::Off).unwrap_or(());
-        self.rtc().control_alarm_hours(Control::On).unwrap_or(());
-        self.rtc().control_alarm_minutes(Control::On).unwrap_or(());
-        self.rtc().control_alarm_weekday(Control::Off).unwrap_or(());
-    }
-
-    pub fn print_alarm_status(&mut self, delay: &mut Delay) {
-        info!(
-            "CLock running: {}",
-            self.rtc().is_clock_running().unwrap_or(false)
-        );
-        info!(
-            "CLock output: {}",
-            self.rtc().is_clkout_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm interrupt enabled: {}",
-            self.rtc().is_alarm_interrupt_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm day enabled: {}",
-            self.rtc().is_alarm_day_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm weekday enabled: {}",
-            self.rtc().is_alarm_weekday_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm hour enabled: {}",
-            self.rtc().is_alarm_hours_enabled().unwrap_or(false)
-        );
-        info!(
-            "Alarm minute enabled: {}",
-            self.rtc().is_alarm_minutes_enabled().unwrap_or(false)
-        );
-
-        pub fn disable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
+    pub fn disable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
         let mut attempts = 0;
         loop {
             let lock_pin = self.unlocked_pin.take().unwrap();
@@ -635,7 +591,7 @@ impl SharedI2C {
                 success = success && self.rtc().clear_alarm_flag().is_ok();
                 success = success && self.rtc().control_alarm_interrupt(Control::Off).is_ok();
                 success = success && self.rtc().disable_all_alarms().is_ok();
-                
+
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
                 if success {
                     return Ok(());

@@ -95,7 +95,7 @@ impl DeviceConfig {
         let is_continuous_recorder = cursor.read_bool();
         let use_low_power_mode = cursor.read_bool();
         let device_name_length = cursor.read_u8() as usize;
-        let mut device_name: [u8; 64] = [0u8; 64];
+        let mut device_name = [0u8; 64];
         device_name[0] = device_name_length as u8;
         let len = device_name.len();
         let device_name = {

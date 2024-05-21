@@ -201,26 +201,6 @@ fn find_target_rosc_frequency(
     measured_rosc_frequency
 }
 
-pub fn normal_clock() -> ClocksManager {
-    let xtal: u32 = 12_000_000;
-    let mut pac = unsafe { Peripherals::steal() };
-    let mut watchdog = rp2040_hal::Watchdog::new(pac.WATCHDOG);
-    // Configure the clocks
-    let clocks = rp2040_hal::clocks::init_clocks_and_plls(
-        xtal,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    );
-    let clocks = match clocks {
-        Ok(ck) => ck,
-        Err(..) => panic!("No Clock"),
-    };
-    return clocks;
-}
 pub fn setup_rosc_as_system_clock(
     clocks_peripheral: CLOCKS,
     xosc_peripheral: XOSC,
@@ -256,8 +236,7 @@ pub fn setup_rosc_as_system_clock(
         .unwrap();
 
     // Now we can disable the crystal oscillator and run off the ring oscillator, for power savings.
-    let _xosc_disabled: rp2040_hal::xosc::CrystalOscillator<rp2040_hal::xosc::Disabled> =
-        xosc.disable();
+    let _xosc_disabled = xosc.disable();
 
     // NOTE: PLLs are disabled by default.
     // You may also wish to disable other clocks/peripherals that you don't need.
