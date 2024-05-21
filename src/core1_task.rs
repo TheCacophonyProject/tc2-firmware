@@ -347,7 +347,6 @@ pub fn core_1_task(
             clock_freq.Hz(),
             radiometry_enabled,
             lepton_serial.unwrap_or(0),
-            None,
             &mut timer,
             existing_config,
         );

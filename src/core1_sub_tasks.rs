@@ -185,8 +185,8 @@ pub fn offload_flash_storage_and_events(
                 );
             }
         }
-
         if !success {
+            info!("NOT success so breaking");
             break;
         }
 
@@ -212,6 +212,7 @@ pub fn offload_flash_storage_and_events(
         flash_storage.erase_all_blocks();
         file_count != 0
     } else {
+        flash_storage.scan();
         warn!("File transfer to pi failed");
         false
     }
@@ -226,7 +227,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     clock_freq: HertzU32,
     radiometry_enabled: u32,
     camera_serial_number: u32,
-    last_offload: Option<i64>,
     timer: &mut Timer,
     existing_config: Option<DeviceConfig>,
 ) -> (Option<DeviceConfig>, bool) {

@@ -351,6 +351,10 @@ impl OnboardFlash {
         self.scan();
         self.unlock_blocks();
     }
+    pub fn init_async_buf(&mut self) {
+        let mut flash_payload_buf = [0x42u8; 2115];
+        self.payload_buffer = Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
+    }
 
     pub fn reset(&mut self) {
         self.spi_write(&[RESET]);
@@ -972,6 +976,9 @@ impl OnboardFlash {
         // }
         let mut transfer = None;
         if self.record_to_flash {
+            if self.payload_buffer.is_none() {
+                return Err("Payload buffer is None have you called init_async_buf??");
+            }
             self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);
             self.cs.set_low().unwrap();
             let buf = self.payload_buffer.as_mut().unwrap();

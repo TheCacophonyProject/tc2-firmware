@@ -256,6 +256,9 @@ impl PdmMicrophone {
         let mut recorded_successfully = false;
         // Swap our buffers?
         let use_async: bool = false;
+        if use_async {
+            flash_storage.init_async_buf();
+        }
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;

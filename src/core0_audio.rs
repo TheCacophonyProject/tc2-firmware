@@ -84,8 +84,6 @@ pub fn audio_task(
     let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
     let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
 
-    let mut flash_payload_buf = [0x42u8; 2115];
-    let flash_payload_buf = unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) };
     let mut flash_storage = OnboardFlash::new(
         pins.fs_cs,
         pins.fs_mosi,
@@ -96,7 +94,7 @@ pub fn audio_task(
         dma_channels.ch1,
         dma_channels.ch2,
         true,
-        Some(flash_payload_buf),
+        None,
     );
 
     let mut payload_buf = [0x42u8; 2066];
@@ -121,6 +119,7 @@ pub fn audio_task(
     watchdog.feed();
     flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
     flash_storage.init();
+
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
@@ -474,8 +473,10 @@ pub fn offload(
     synced_date_time: &SyncedDateTime,
     watchdog: &mut bsp::hal::Watchdog,
 ) -> (Option<DeviceConfig>, bool) {
-    if let Ok(pi_waking) = i2c.pi_is_waking_or_awake(delay) {
-        wake_if_asleep = pi_waking;
+    if !wake_if_asleep {
+        if let Ok(pi_waking) = i2c.pi_is_waking_or_awake(delay) {
+            wake_if_asleep = pi_waking;
+        }
     }
 
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
@@ -507,6 +508,11 @@ pub fn offload(
                     ),
                     flash_storage,
                 );
+            } else if flash_storage.has_files_to_offload() {
+                info!("Restarting as failed to offload");
+                loop {
+                    nop();
+                }
             }
             maybe_offload_events(
                 pi_spi,
@@ -527,7 +533,6 @@ pub fn offload(
                     clock_freq.Hz(),
                     2u32, //need to get radiometry and leton serial
                     1,
-                    Some(synced_date_time.date_time_utc.timestamp_millis()),
                     timer,
                     Some(device_config),
                 );

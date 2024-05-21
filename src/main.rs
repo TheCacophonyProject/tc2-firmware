@@ -128,7 +128,6 @@ fn main() -> ! {
         peripherals.ROSC,
         freq,
     );
-    // let clocks = clock_utils::normal_clock();
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
     let system_clock_freq = clocks.system_clock.freq().to_Hz();
