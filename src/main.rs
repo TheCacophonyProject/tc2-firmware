@@ -110,10 +110,8 @@ fn main() -> ! {
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut pos: u32 = 0;
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let mut is_audio = false;
-    {
-        is_audio = read_is_audio_from_rp2040_flash();
-    }
+    let is_audio = read_is_audio_from_rp2040_flash();
+
     let freq;
 
     if is_audio {
@@ -319,8 +317,6 @@ pub fn thermal_code(
         PullDown,
     >,
 ) -> ! {
-    let mut core1stack: Stack<45000> = Stack::new(); // 180,000 bytes
-    let core1stack = unsafe { extend_lifetime_generic_mut(&mut core1stack) };
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
     let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
