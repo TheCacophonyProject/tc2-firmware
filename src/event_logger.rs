@@ -28,7 +28,7 @@ pub enum LoggerEventKind {
     Rp2040WokenByAlarm,
     RtcCommError,
     AttinyCommError,
-    Rp2040MissedAudioAlarm,
+    Rp2040MissedAudioAlarm(u64),
     AudioRecordingFailed,
 }
 
@@ -55,7 +55,7 @@ impl Into<u16> for LoggerEventKind {
             Rp2040WokenByAlarm => 17,
             RtcCommError => 18,
             AttinyCommError => 19,
-            Rp2040MissedAudioAlarm => 20,
+            Rp2040MissedAudioAlarm(_) => 20,
             AudioRecordingFailed => 21,
         }
     }
@@ -86,7 +86,7 @@ impl TryFrom<u16> for LoggerEventKind {
             17 => Ok(Rp2040WokenByAlarm),
             18 => Ok(RtcCommError),
             19 => Ok(AttinyCommError),
-            20 => Ok(Rp2040MissedAudioAlarm),
+            20 => Ok(Rp2040MissedAudioAlarm(0)),
             21 => Ok(AudioRecordingFailed),
             _ => Err(()),
         }
@@ -278,6 +278,8 @@ impl EventLogger {
                 LittleEndian::write_u16(&mut event_data[0..2], event.event.into());
                 LittleEndian::write_u64(&mut event_data[2..10], event.timestamp);
                 if let LoggerEventKind::SetAlarm(alarm_time) = event.event {
+                    LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
+                } else if let LoggerEventKind::Rp2040MissedAudioAlarm(alarm_time) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
                 }
                 // Write to the end of the flash storage.

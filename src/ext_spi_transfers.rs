@@ -189,7 +189,11 @@ impl ExtSpiTransfers {
         critical_section::with(|cs| {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
-        let _ = alarm.schedule(MicrosDurationU32::micros(300)).unwrap();
+
+        //this should be way less, gp hack
+        //CHANGE IT
+        // CHANGE IT
+        let _ = alarm.schedule(MicrosDurationU32::micros(100000)).unwrap();
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));

@@ -96,7 +96,6 @@ pub fn offload_flash_storage_and_events(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
-    mut watchdog: Option<&mut bsp::hal::Watchdog>,
 ) -> bool {
     warn!("There are files to offload!");
     if wake_raspberry_pi(shared_i2c, delay) {
@@ -108,7 +107,6 @@ pub fn offload_flash_storage_and_events(
             flash_storage,
         );
     }
-
     maybe_offload_events(
         pi_spi,
         resets,
@@ -119,7 +117,6 @@ pub fn offload_flash_storage_and_events(
         flash_storage,
         clock_freq,
     );
-
     // do some offloading.
     let mut file_count = 0;
     flash_storage.begin_offload();
@@ -132,9 +129,6 @@ pub fn offload_flash_storage_and_events(
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
         flash_storage.get_file_part()
     {
-        if watchdog.is_some() {
-            watchdog.as_mut().unwrap().feed();
-        }
         pi_spi.enable(spi, resets);
         let transfer_type = if file_start && !is_last {
             ExtTransferMessage::BeginFileTransfer
@@ -160,6 +154,7 @@ pub fn offload_flash_storage_and_events(
         'transfer_part: loop {
             let did_transfer =
                 pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+
             if !did_transfer {
                 attempts += 1;
                 if attempts > 100 {

@@ -150,7 +150,7 @@ pub fn audio_task(
         &mut shared_i2c,
         synced_date_time.date_time_utc,
     );
-    let (new_config, was_updated) = offload(
+    match offload(
         &mut shared_i2c,
         clock_freq,
         &mut flash_storage,
@@ -161,24 +161,29 @@ pub fn audio_task(
         device_config,
         &mut delay,
         &synced_date_time,
-        watchdog,
-    );
-    device_config = new_config.unwrap();
-    if was_updated {
-        if !device_config.config().is_audio_device {
-            shared_i2c.disable_alarm(&mut delay);
-            info!("Not audio device so restarting");
+    ) {
+        Ok((new_config, was_updated)) => {
+            device_config = new_config.unwrap();
+            if was_updated {
+                if !device_config.config().is_audio_device {
+                    shared_i2c.disable_alarm(&mut delay);
+                    info!("Not audio device so restarting");
+                    watchdog.start(100.micros());
+                    loop {
+                        // Wait to be reset and become thermal device
+                        nop();
+                    }
+                }
+            }
+        }
+        Err(()) => {
+            warn!("Restarting as could not offload");
             watchdog.start(100.micros());
             loop {
                 // Wait to be reset and become thermal device
                 nop();
             }
         }
-
-        //needs to be rewritten every device config write
-        // if scheduled {
-        // write_alarm_schedule_to_rp2040_flash(alarm_hours, alarm_minutes);
-        // }
     }
     watchdog.feed();
 
@@ -209,7 +214,9 @@ pub fn audio_task(
                     // should take recording now
                     event_logger.log_event(
                         LoggerEvent::new(
-                            LoggerEventKind::Rp2040MissedAudioAlarm,
+                            LoggerEventKind::Rp2040MissedAudioAlarm(
+                                alarm_dt.timestamp_micros() as u64
+                            ),
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
                         &mut flash_storage,
@@ -390,6 +397,13 @@ pub fn audio_task(
                         // otherwise the alarm could trigger  between here and sleeping
                         should_sleep = false;
                         info!("Alarm is scheduled in {} so not sleeping", until_alarm);
+                        if until_alarm <= 0 {
+                            watchdog.start(100.micros());
+                            loop {
+                                // Wait to be reset and become thermal device
+                                nop();
+                            }
+                        }
                         continue;
                     }
                     info!("Ask Attiny to power down rp2040");
@@ -410,24 +424,35 @@ pub fn audio_task(
 
                 //may aswell offload again if we are awake and have just taken a recording
                 if !pi_is_powered_down && flash_storage.has_files_to_offload() {
-                    let (new_config, was_updated) = offload(
+                    watchdog.disable();
+                    match offload(
                         &mut shared_i2c,
                         clock_freq,
                         &mut flash_storage,
                         &mut pi_spi,
                         timer,
                         &mut event_logger,
-                        false,
+                        should_wake,
                         device_config,
                         &mut delay,
                         &synced_date_time,
-                        watchdog,
-                    );
-                    device_config = new_config.unwrap();
-                    if was_updated {
-                        if !device_config.config().is_audio_device {
-                            shared_i2c.disable_alarm(&mut delay);
-                            info!("Not audio device so restarting");
+                    ) {
+                        Ok((new_config, was_updated)) => {
+                            device_config = new_config.unwrap();
+                            if was_updated {
+                                if !device_config.config().is_audio_device {
+                                    shared_i2c.disable_alarm(&mut delay);
+                                    info!("Not audio device so restarting");
+                                    watchdog.start(100.micros());
+                                    loop {
+                                        // Wait to be reset and become thermal device
+                                        nop();
+                                    }
+                                }
+                            }
+                        }
+                        Err(()) => {
+                            warn!("Restarting as failed to offload");
                             watchdog.start(100.micros());
                             loop {
                                 // Wait to be reset and become thermal device
@@ -435,6 +460,7 @@ pub fn audio_task(
                             }
                         }
                     }
+                    watchdog.feed();
                 }
             }
         }
@@ -466,8 +492,7 @@ pub fn offload(
     device_config: DeviceConfig,
     delay: &mut Delay,
     synced_date_time: &SyncedDateTime,
-    watchdog: &mut bsp::hal::Watchdog,
-) -> (Option<DeviceConfig>, bool) {
+) -> Result<(Option<DeviceConfig>, bool), ()> {
     if !wake_if_asleep {
         if let Ok(pi_waking) = i2c.pi_is_waking_or_awake(delay) {
             wake_if_asleep = pi_waking;
@@ -476,13 +501,10 @@ pub fn offload(
 
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
-            watchdog.disable();
             awake = wake_raspberry_pi(i2c, delay);
-            watchdog.start(8388607.micros());
         }
         if awake {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-            // watchdog.disable(); //should watch dog go into offload
             if offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
@@ -494,7 +516,6 @@ pub fn offload(
                 timer,
                 event_logger,
                 &synced_date_time,
-                Some(watchdog),
             ) {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -504,21 +525,9 @@ pub fn offload(
                     flash_storage,
                 );
             } else if flash_storage.has_files_to_offload() {
-                info!("Restarting as failed to offload");
-                loop {
-                    nop();
-                }
+                return Err(());
             }
-            maybe_offload_events(
-                pi_spi,
-                &mut peripherals.RESETS,
-                &mut peripherals.DMA,
-                delay,
-                timer,
-                event_logger,
-                flash_storage,
-                clock_freq,
-            );
+
             let (update_config, device_config_was_updated) =
                 get_existing_device_config_or_config_from_pi_on_initial_handshake(
                     flash_storage,
@@ -531,10 +540,10 @@ pub fn offload(
                     timer,
                     Some(device_config),
                 );
-            return (update_config, device_config_was_updated);
+            return Ok((update_config, device_config_was_updated));
         }
     }
-    (Some(device_config), false)
+    Ok((Some(device_config), false))
 }
 pub fn get_alarm_dt(
     datetime: NaiveDateTime,
