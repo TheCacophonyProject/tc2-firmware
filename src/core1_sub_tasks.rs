@@ -35,6 +35,7 @@ pub fn maybe_offload_events(
         let total_events = event_indices.end;
         warn!("Transferring {} events", total_events);
         let mut success = true;
+        let mut counter = timer.get_counter();
         'transfer_all_events: for event_index in event_indices {
             let event_bytes = event_logger.event_at_index(event_index, flash_storage);
             if let Some(event_bytes) = event_bytes {
@@ -45,6 +46,14 @@ pub fn maybe_offload_events(
                     let current_crc = crc_check.checksum(&event_bytes);
                     let mut attempts = 0;
                     'transfer_event: loop {
+                        //takes tc2-agent about this long to poll again will always fail otherwise
+                        if event_index != 0 {
+                            let time_since = (timer.get_counter() - counter).to_micros();
+                            if time_since < TIME_BETWEEN_TRANSFER {
+                                delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                            }
+                        }
+
                         let did_transfer = pi_spi.send_message(
                             transfer_type,
                             &event_bytes,
@@ -53,8 +62,7 @@ pub fn maybe_offload_events(
                             timer,
                             resets,
                         );
-                        //takes tc2-agent about this long to poll again will always fail otherwise
-                        delay.delay_ms(2000);
+                        counter = timer.get_counter();
                         if !did_transfer {
                             attempts += 1;
                             if attempts > 100 {
@@ -86,6 +94,9 @@ pub fn maybe_offload_events(
         }
     }
 }
+
+//feels like should be longer but seems to work
+const TIME_BETWEEN_TRANSFER: u64 = 1000;
 
 pub fn offload_flash_storage_and_events(
     flash_storage: &mut OnboardFlash,
@@ -124,8 +135,9 @@ pub fn offload_flash_storage_and_events(
     flash_storage.begin_offload();
     let mut file_start = true;
     let mut part_count = 0;
+    let mut success: bool = true;
+    let mut counter = timer.get_counter();
 
-    let mut success = true;
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
@@ -152,20 +164,25 @@ pub fn offload_flash_storage_and_events(
                 part_count, block_index, page_index
             );
         }
+
         let mut attempts = 0;
         'transfer_part: loop {
+            if part_count != 0 {
+                let time_since = (timer.get_counter() - counter).to_micros();
+                if time_since < TIME_BETWEEN_TRANSFER {
+                    delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                }
+            }
             let did_transfer =
                 pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-
+            counter = timer.get_counter();
             if !did_transfer {
                 attempts += 1;
                 if attempts > 100 {
-                    warn!("Failed sending file part to raspberry pi");
                     success = false;
                     break 'transfer_part;
                 }
                 //takes tc2-agent about this long to poll again will always fail otherwise
-                delay.delay_ms(2000);
             } else {
                 break 'transfer_part;
             }

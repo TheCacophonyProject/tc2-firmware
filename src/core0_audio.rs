@@ -636,11 +636,6 @@ fn should_offload_audio_recordings(
     now: NaiveDateTime,
 ) -> bool {
     let offload_hour = 10;
-    // if event_logger.has_events_to_offload() {
-    //     info!("Offloading as logger as have events");
-
-    //     return true;
-    // }
     let has_files = flash_storage.has_files_to_offload() || event_logger.is_nearly_full();
     if !has_files {
         return false;
