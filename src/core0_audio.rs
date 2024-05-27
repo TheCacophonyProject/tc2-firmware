@@ -150,6 +150,7 @@ pub fn audio_task(
         &mut shared_i2c,
         synced_date_time.date_time_utc,
     );
+    watchdog.disable();
     match offload(
         &mut shared_i2c,
         clock_freq,
@@ -185,7 +186,7 @@ pub fn audio_task(
             }
         }
     }
-    watchdog.feed();
+    watchdog.start(8388607.micros());
 
     let mut do_recording = alarm_triggered;
     let mut reschedule = !scheduled;
@@ -358,7 +359,7 @@ pub fn audio_task(
     }
     if alarm_time.is_some() {
         info!(
-            "Recording scheduled for {} {}:{} ",
+            "Recording scheduled for the {} at {}:{} ",
             alarm_time.as_mut().unwrap().day(),
             alarm_time.as_mut().unwrap().time().hour(),
             alarm_time.as_mut().unwrap().time().minute()
@@ -371,6 +372,7 @@ pub fn audio_task(
             nop();
         }
     }
+    watchdog.start(8388607.micros());
 
     let mut logged_power_down = false;
     loop {
@@ -460,7 +462,7 @@ pub fn audio_task(
                             }
                         }
                     }
-                    watchdog.feed();
+                    watchdog.start(8388607.micros());
                 }
             }
         }

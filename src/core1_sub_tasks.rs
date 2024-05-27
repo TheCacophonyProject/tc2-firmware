@@ -53,6 +53,8 @@ pub fn maybe_offload_events(
                             timer,
                             resets,
                         );
+                        //takes tc2-agent about this long to poll again will always fail otherwise
+                        delay.delay_ms(2000);
                         if !did_transfer {
                             attempts += 1;
                             if attempts > 100 {
@@ -162,6 +164,8 @@ pub fn offload_flash_storage_and_events(
                     success = false;
                     break 'transfer_part;
                 }
+                //takes tc2-agent about this long to poll again will always fail otherwise
+                delay.delay_ms(2000);
             } else {
                 break 'transfer_part;
             }
