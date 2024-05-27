@@ -168,6 +168,7 @@ pub fn offload_flash_storage_and_events(
         let mut attempts = 0;
         'transfer_part: loop {
             if part_count != 0 {
+                //takes tc2-agent about this long to poll again will fail a lot otherwise
                 let time_since = (timer.get_counter() - counter).to_micros();
                 if time_since < TIME_BETWEEN_TRANSFER {
                     delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
@@ -182,7 +183,6 @@ pub fn offload_flash_storage_and_events(
                     success = false;
                     break 'transfer_part;
                 }
-                //takes tc2-agent about this long to poll again will always fail otherwise
             } else {
                 break 'transfer_part;
             }
