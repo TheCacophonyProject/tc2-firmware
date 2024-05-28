@@ -108,7 +108,6 @@ fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
-    let mut pos: u32 = 0;
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     let is_audio = read_is_audio_from_rp2040_flash();
 
