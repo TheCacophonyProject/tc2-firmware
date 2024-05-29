@@ -41,6 +41,7 @@ use bsp::{
     pac::Peripherals,
 };
 use cortex_m::asm::nop;
+use device_config::DeviceConfig;
 use rp2040_hal::rosc::RingOscillator;
 
 use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
@@ -108,10 +109,9 @@ fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
-    let mut pos: u32 = 0;
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let is_audio = read_is_audio_from_rp2040_flash();
-
+    let config = DeviceConfig::load_existing_config_from_flash(false).unwrap();
+    let is_audio = config.config().is_audio_device;
     let freq;
 
     if is_audio {

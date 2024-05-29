@@ -1,7 +1,7 @@
-use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::rp2040_flash::read_device_config_from_rp2040_flash;
 use crate::sun_times::sun_times;
+use crate::{byte_slice_cursor::Cursor, motion_detector};
 use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
 use embedded_io::Read;
@@ -65,13 +65,13 @@ impl Default for DeviceConfig {
 }
 
 impl DeviceConfig {
-    pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
+    pub fn load_existing_config_from_flash(load_mask: bool) -> Option<DeviceConfig> {
         let slice = read_device_config_from_rp2040_flash();
-        let device_config = DeviceConfig::from_bytes(slice);
+        let device_config = DeviceConfig::from_bytes(slice, load_mask);
         device_config
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Option<DeviceConfig> {
+    pub fn from_bytes(bytes: &[u8], load_mask: bool) -> Option<DeviceConfig> {
         let mut cursor = Cursor::new(bytes);
         let device_id = cursor.read_u32();
         if device_id == u32::MAX {
@@ -106,14 +106,21 @@ impl DeviceConfig {
         };
         // let mask_length = cursor.read_i32();
         let mut cursor_pos = cursor.position();
-        let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
-        let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
+        let mut motion_detection_mask;
+        if load_mask {
+            motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
+            let len = cursor
+                .read(&mut motion_detection_mask.inner.unwrap())
+                .unwrap();
 
-        if len != motion_detection_mask.inner.len() {
-            // This payload came without the mask attached (i.e. from the rPi)
-            motion_detection_mask.set_empty();
+            if len != motion_detection_mask.inner.unwrap().len() {
+                // This payload came without the mask attached (i.e. from the rPi)
+                motion_detection_mask.set_empty();
+            } else {
+                cursor_pos = cursor.position();
+            }
         } else {
-            cursor_pos = cursor.position();
+            motion_detection_mask = DetectionMask::new(None);
         }
         Some(DeviceConfig {
             config_inner: DeviceConfigInner {

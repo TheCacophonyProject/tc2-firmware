@@ -58,7 +58,8 @@ pub fn audio_task(
     >,
 ) -> ! {
     watchdog.feed();
-    let mut device_config: DeviceConfig = DeviceConfig::load_existing_config_from_flash().unwrap();
+    let mut device_config: DeviceConfig =
+        DeviceConfig::load_existing_config_from_flash(false).unwrap();
 
     //this isn't reliable so use alarm stored in flash
     // let mut alarm_hours = shared_i2c.get_alarm_hours();

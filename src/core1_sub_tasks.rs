@@ -268,7 +268,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
                 // Skip 4 bytes of CRC checking
 
-                let mut new_config = DeviceConfig::from_bytes(&device_config[4..]);
+                let mut new_config = DeviceConfig::from_bytes(&device_config[4..], true);
                 let mut length_used = 0;
                 if new_config.is_some() {
                     length_used = new_config.as_mut().unwrap().cursor_position;
@@ -323,7 +323,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         }
 
                         new_config_bytes[length_used..length_used + 2400]
-                            .copy_from_slice(&new_config.motion_detection_mask.inner);
+                            .copy_from_slice(&new_config.motion_detection_mask.inner.unwrap());
                         let slice_to_write = &new_config_bytes[0..length_used + 2400];
                         write_device_config_to_rp2040_flash(slice_to_write);
                         new_config.cursor_position += 2400;
