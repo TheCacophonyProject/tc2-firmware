@@ -25,11 +25,10 @@ mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
+use crate::core1_task::{core_1_task, Core1Pins, Core1Task, SyncedDateTime};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
-use crate::rp2040_flash::read_is_audio_from_rp2040_flash;
 use bsp::{
     entry,
     hal::{
@@ -40,8 +39,9 @@ use bsp::{
     },
     pac::Peripherals,
 };
+use chrono::{NaiveDateTime, Timelike};
 use cortex_m::asm::nop;
-use device_config::DeviceConfig;
+use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use rp2040_hal::rosc::RingOscillator;
 
 use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
@@ -65,10 +65,11 @@ use rp2040_hal::I2C;
 //  for the agent software.
 pub const FIRMWARE_VERSION: u32 = 11;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
-const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 125_000_000;
 
 // got funny results at 150 for aduio seems to work better at 125
 const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
@@ -111,20 +112,13 @@ fn main() -> ! {
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     let config = DeviceConfig::load_existing_config_from_flash(false).unwrap();
-    let is_audio = config.config().is_audio_device;
-    let freq;
+    let mut is_audio = config.config().is_audio_device;
 
-    if is_audio {
-        freq = ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz();
-    } else {
-        //for some reason audio comes out faster than expected when using this clock
-        freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
-    }
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
         peripherals.ROSC,
-        freq,
+        ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
     );
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
@@ -187,7 +181,40 @@ fn main() -> ! {
     if disabled_alarm.is_err() {
         error!("{}", disabled_alarm.unwrap());
     }
+
+    let mut date_time: NaiveDateTime;
+    match shared_i2c.get_datetime(&mut delay) {
+        Ok(now) => {
+            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
+            date_time = get_naive_datetime(now)
+        }
+        Err(_) => crate::panic!("Unable to get DateTime from RTC"),
+    }
+
+    // if let AudioMode::AudioOrThermal = config.config().audio_mode {
+    //     is_audio = !config.time_is_in_recording_window(&date_time, &None);
+    // } else if let AudioMode::AudioAndThermal = config.config().audio_mode {
+    //     let in_window = config.time_is_in_recording_window(&date_time, &None);
+    //     if in_window {
+    //         if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+    //             is_audio = audio_request;
+    //             if (is_audio) {
+    //                 info!("Is audio because thermal requested");
+    //             }
+    //         }
+    //     } else {
+    //         is_audio = true;
+    //     }
+    // }
     let (i2c1, unlocked_pin) = shared_i2c.free();
+
+    info!(
+        "At {}:{}:{} is audio {}",
+        date_time.hour(),
+        date_time.minute(),
+        date_time.second(),
+        is_audio
+    );
 
     if is_audio {
         let gpio0 = pins.gpio0;
@@ -216,6 +243,7 @@ fn main() -> ! {
             watchdog,
             alarm_woke_us,
             unlocked_pin,
+            config,
         );
     } else {
         let lepton_pins = LeptonPins {
@@ -287,6 +315,7 @@ pub fn audio_branch(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    device_config: DeviceConfig,
 ) -> ! {
     audio_task(
         i2c_config,
@@ -298,6 +327,7 @@ pub fn audio_branch(
         &mut watchdog,
         alarm_triggered,
         unlocked_pin,
+        device_config,
     );
 }
 pub fn thermal_code(

@@ -8,7 +8,7 @@ use crate::core1_sub_tasks::{
 };
 use crate::core1_task::Core1Pins;
 use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime};
-use crate::device_config::{get_naive_datetime, DeviceConfig};
+use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
@@ -56,11 +56,9 @@ pub fn audio_task(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    mut device_config: DeviceConfig,
 ) -> ! {
     watchdog.feed();
-    let mut device_config: DeviceConfig =
-        DeviceConfig::load_existing_config_from_flash(false).unwrap();
-
     //this isn't reliable so use alarm stored in flash
     // let mut alarm_hours = shared_i2c.get_alarm_hours();
     // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
@@ -245,10 +243,21 @@ pub fn audio_task(
         );
     }
     let mut take_test_rec = false;
-    if let Ok(test_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+    if let Ok(test_rec) = shared_i2c.tc2_agent_requested_test_audio_rec(&mut delay) {
         take_test_rec = test_rec;
     }
-    if do_recording || take_test_rec {
+
+    let thermal_requested_audio;
+    if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+        thermal_requested_audio = take_rec;
+        if thermal_requested_audio {
+            do_recording = true;
+        }
+    } else {
+        thermal_requested_audio = false;
+    }
+
+    if do_recording || take_test_rec || thermal_requested_audio {
         watchdog.feed();
         //should of already offloaded but extra safety check
         if !flash_storage.is_too_full_for_audio() {
@@ -322,12 +331,8 @@ pub fn audio_task(
             &mut flash_storage,
             timer,
             &mut event_logger,
+            &device_config,
         ) {
-            write_alarm_schedule_to_rp2040_flash(
-                scheduled_time.day() as u8,
-                scheduled_time.hour() as u8,
-                scheduled_time.minute() as u8,
-            );
             alarm_time = Some(scheduled_time);
             scheduled = true;
         } else {
@@ -365,6 +370,15 @@ pub fn audio_task(
             alarm_time.as_mut().unwrap().time().hour(),
             alarm_time.as_mut().unwrap().time().minute()
         );
+    }
+
+    if thermal_requested_audio {
+        shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
+        info!("Audio taken in thermal window");
+        watchdog.start(100.micros());
+        loop {
+            nop();
+        }
     }
     if do_recording && take_test_rec {
         //means we didn't take the test rec as it was a normal rec time
@@ -571,18 +585,19 @@ pub fn get_alarm_dt(
     Ok(NaiveDateTime::new(naive_date, naive_time.unwrap()))
 }
 
-fn schedule_audio_rec(
+pub fn schedule_audio_rec(
     delay: &mut Delay,
     synced_date_time: &SyncedDateTime,
     i2c: &mut SharedI2C,
     flash_storage: &mut OnboardFlash,
     timer: &mut Timer,
     event_logger: &mut EventLogger,
+    device_config: &DeviceConfig,
 ) -> Result<NaiveDateTime, ()> {
     i2c.disable_alarm(delay);
 
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
-    let mut r = rng.generate();
+    let r = rng.generate();
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;
     let short_pause: u64 = 2 * 60;
@@ -595,6 +610,31 @@ fn schedule_audio_rec(
     } else {
         wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
     }
+
+    let current_time = synced_date_time.get_adjusted_dt(timer);
+    let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);
+
+    match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+            let (start, end) = device_config.next_or_current_recording_window(&current_time);
+            if wakeup > start {
+                if start > current_time {
+                    if let AudioMode::AudioAndThermal = device_config.config().audio_mode {
+                        //audio recording inside recording window
+                        info!("Scheudling audio inside thermal window");
+                    } else {
+                        info!("Already in rec window so restart now");
+                        return Err(());
+                    }
+                } else {
+                    info!("Setting wake up to be start of next rec window");
+                    wakeup = start;
+                }
+            }
+        }
+        _ => (),
+    }
+
     info!(
         "Scheduling to wake up in {} seconds random was {}",
         wake_in, r
@@ -608,7 +648,6 @@ fn schedule_audio_rec(
     // GP TESTING
     // let wake_in: i32 = 60 * 2;
 
-    let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
     i2c.enable_alarm(delay);
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
         if let Ok(alarm_enabled) = i2c.alarm_interrupt_enabled(delay) {
@@ -619,6 +658,12 @@ fn schedule_audio_rec(
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     flash_storage,
+                );
+
+                write_alarm_schedule_to_rp2040_flash(
+                    wakeup.day() as u8,
+                    wakeup.hour() as u8,
+                    wakeup.minute() as u8,
                 );
                 return Ok(wakeup);
             }

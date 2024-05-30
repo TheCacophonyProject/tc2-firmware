@@ -7,6 +7,35 @@ use defmt::{info, Format, Formatter};
 use embedded_io::Read;
 use pcf8563::DateTime;
 
+pub enum AudioMode {
+    AudioOnly = 0,
+    AudioOrThermal = 1,
+    AudioAndThermal = 2,
+}
+impl PartialEq for AudioMode {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(self, other)
+    }
+}
+
+impl Format for AudioMode {
+    fn format(&self, fmt: Formatter) {}
+}
+
+impl TryFrom<u8> for AudioMode {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        use AudioMode::*;
+
+        match value {
+            0 => Ok(AudioOnly),
+            1 => Ok(AudioOrThermal),
+            2 => Ok(AudioAndThermal),
+            _ => Err(()),
+        }
+    }
+}
 #[derive(Format, PartialEq)]
 pub struct DeviceConfigInner {
     pub device_id: u32,
@@ -20,6 +49,7 @@ pub struct DeviceConfigInner {
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
     pub is_audio_device: bool,
+    pub audio_mode: AudioMode,
 }
 
 pub struct DeviceConfig {
@@ -57,6 +87,7 @@ impl Default for DeviceConfig {
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
                 is_audio_device: false,
+                audio_mode: AudioMode::try_from(0).ok().unwrap(),
             },
             motion_detection_mask: DetectionMask::new(None),
             cursor_position: 0,
@@ -79,6 +110,7 @@ impl DeviceConfig {
             return None;
         }
         let is_audio_device = cursor.read_bool();
+        let audio_mode = AudioMode::try_from(0).ok().unwrap();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -135,6 +167,7 @@ impl DeviceConfig {
                 is_continuous_recorder,
                 use_low_power_mode,
                 is_audio_device,
+                audio_mode,
             },
             motion_detection_mask,
             cursor_position: cursor_pos,

@@ -41,10 +41,12 @@ enum CameraState {
 
 #[repr(u8)]
 #[derive(Format)]
-enum Tc2AgentReadyState {
+enum Tc2AgentState {
     NotReady = 0x00,
     Ready = 0x02,
     Recording = 0x04,
+    TestAudioRecording = 0x08,
+    TakeAudio = 0x16,
 }
 
 impl Into<u8> for CameraState {
@@ -455,6 +457,13 @@ impl SharedI2C {
 
     pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok(state & 0x16 == 0x16),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_requested_test_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
                 let rec_state: bool = (state & 1 << 1 == 2) && (state & 0x08 == 0x08);
                 Ok(rec_state)
@@ -467,6 +476,32 @@ impl SharedI2C {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
                 let val = state & !8u8;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let val = state & !16u8;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_clear_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let val = state & !16u8;
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),
