@@ -191,21 +191,26 @@ fn main() -> ! {
         Err(_) => crate::panic!("Unable to get DateTime from RTC"),
     }
 
-    // if let AudioMode::AudioOrThermal = config.config().audio_mode {
-    //     is_audio = !config.time_is_in_recording_window(&date_time, &None);
-    // } else if let AudioMode::AudioAndThermal = config.config().audio_mode {
-    //     let in_window = config.time_is_in_recording_window(&date_time, &None);
-    //     if in_window {
-    //         if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-    //             is_audio = audio_request;
-    //             if (is_audio) {
-    //                 info!("Is audio because thermal requested");
-    //             }
-    //         }
-    //     } else {
-    //         is_audio = true;
-    //     }
-    // }
+    if let AudioMode::AudioOrThermal = config.config().audio_mode {
+        is_audio = !config.time_is_in_recording_window(&date_time, &None);
+        info!(
+            "Is audio is {} because is one or other in window {}",
+            is_audio,
+            config.time_is_in_recording_window(&date_time, &None)
+        );
+    } else if let AudioMode::AudioAndThermal = config.config().audio_mode {
+        let in_window = config.time_is_in_recording_window(&date_time, &None);
+        if in_window {
+            if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+                is_audio = audio_request;
+                if (is_audio) {
+                    info!("Is audio because thermal requested");
+                }
+            }
+        } else {
+            is_audio = true;
+        }
+    }
     let (i2c1, unlocked_pin) = shared_i2c.free();
 
     info!(
@@ -243,7 +248,6 @@ fn main() -> ! {
             watchdog,
             alarm_woke_us,
             unlocked_pin,
-            config,
         );
     } else {
         let lepton_pins = LeptonPins {
@@ -315,7 +319,6 @@ pub fn audio_branch(
         FunctionSio<SioInput>,
         PullDown,
     >,
-    device_config: DeviceConfig,
 ) -> ! {
     audio_task(
         i2c_config,
@@ -327,7 +330,6 @@ pub fn audio_branch(
         &mut watchdog,
         alarm_triggered,
         unlocked_pin,
-        device_config,
     );
 }
 pub fn thermal_code(
@@ -378,7 +380,7 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<45000> = Stack::new();
+    let mut core1_stack: Stack<43000> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));

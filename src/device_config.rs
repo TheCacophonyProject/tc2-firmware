@@ -110,7 +110,7 @@ impl DeviceConfig {
             return None;
         }
         let is_audio_device = cursor.read_bool();
-        let audio_mode = AudioMode::try_from(0).ok().unwrap();
+        let audio_mode = AudioMode::try_from(1).ok().unwrap();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();

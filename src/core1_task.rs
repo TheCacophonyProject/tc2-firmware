@@ -17,7 +17,7 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
-use crate::rp2040_flash::{read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash};
+use crate::rp2040_flash::{clear_flash_alarm, read_alarm_from_rp2040_flash};
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
 use chrono::{Duration, NaiveDateTime};
@@ -373,11 +373,13 @@ pub fn core_1_task(
 
     let mut device_config = device_config.unwrap_or(DeviceConfig::default());
     if device_config.config().is_audio_device {
-        shared_i2c.disable_alarm(&mut delay);
-        sio.fifo.write_blocking(Core1Task::RequestReset.into());
-        loop {
-            // Wait to be reset
-            nop();
+        if let AudioMode::AudioOnly = device_config.config().audio_mode {
+            shared_i2c.disable_alarm(&mut delay);
+            sio.fifo.write_blocking(Core1Task::RequestReset.into());
+            loop {
+                // Wait to be reset
+                nop();
+            }
         }
     }
     if !device_config.use_low_power_mode() {
@@ -480,56 +482,24 @@ pub fn core_1_task(
     let mut record_audio: bool = false;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
+    clear_flash_alarm();
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal => {
             record_audio = true;
-            let flash_alarm = read_alarm_from_rp2040_flash();
-            let alarm_set =
-                flash_alarm[0] != u8::MAX && flash_alarm[1] != u8::MAX && flash_alarm[2] != u8::MAX;
-            if alarm_set {
-                match get_alarm_dt(
-                    synced_date_time.get_adjusted_dt(&mut timer),
-                    flash_alarm[0],
-                    flash_alarm[1],
-                    flash_alarm[2],
-                ) {
-                    Ok(alarm_dt) => {
-                        next_audio_alarm = Some(alarm_dt);
-                    }
-                    Err(_) => {
-                        error!("Could not get alarm dt for");
-                        //schedule a new one
-                        if let Ok(next_alarm) = schedule_audio_rec(
-                            &mut delay,
-                            &synced_date_time,
-                            &mut shared_i2c,
-                            &mut flash_storage,
-                            &mut timer,
-                            &mut event_logger,
-                            &mut device_config,
-                        ) {
-                            next_audio_alarm = Some(next_alarm);
-                        } else {
-                            error!("Couldn't schedule alarm");
-                            //will need to do something here
-                        }
-                    }
-                }
+            if let Ok(next_alarm) = schedule_audio_rec(
+                &mut delay,
+                &synced_date_time,
+                &mut shared_i2c,
+                &mut flash_storage,
+                &mut timer,
+                &mut event_logger,
+                &mut device_config,
+            ) {
+                next_audio_alarm = Some(next_alarm);
             } else {
-                if let Ok(next_alarm) = schedule_audio_rec(
-                    &mut delay,
-                    &synced_date_time,
-                    &mut shared_i2c,
-                    &mut flash_storage,
-                    &mut timer,
-                    &mut event_logger,
-                    &mut device_config,
-                ) {
-                    next_audio_alarm = Some(next_alarm);
-                } else {
-                    error!("Couldn't schedule alarm");
-                }
+                error!("Couldn't schedule alarm");
             }
+
             //schedule an alarm if one in the future is not set
         }
         _ => record_audio = false,
@@ -1004,6 +974,17 @@ pub fn core_1_task(
                         );
                         logged_told_rpi_to_sleep = true;
                     }
+                }
+                match device_config.config().audio_mode {
+                    AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                        //just reboot and it will go into audio branch
+                        sio.fifo.write(Core1Task::RequestReset.into());
+                        info!("Reset as thermal finished and time for audio");
+                        loop {
+                            nop();
+                        }
+                    }
+                    _ => (),
                 }
                 let check_power_down_state_start = timer.get_counter();
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
