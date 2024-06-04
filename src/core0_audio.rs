@@ -269,6 +269,13 @@ pub fn audio_task(
             if !do_recording && take_test_rec {
                 duration = 10;
             }
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::StartedRecording,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
             let recorded = microphone.record_for_n_seconds(
                 duration,
                 dma_channels.ch3,
@@ -297,6 +304,14 @@ pub fn audio_task(
                 loop {
                     nop();
                 }
+            } else {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::EndedRecording,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
             }
         }
         if do_recording && !take_test_rec {
@@ -390,23 +405,25 @@ pub fn audio_task(
         watchdog.feed();
         if should_sleep {
             if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
-                if pi_is_powered_down && alarm_time.is_some() {
-                    let until_alarm = (alarm_time.unwrap()
-                        - synced_date_time.get_adjusted_dt(timer))
-                    .num_minutes();
+                if pi_is_powered_down {
+                    if alarm_time.is_some() {
+                        let until_alarm = (alarm_time.unwrap()
+                            - synced_date_time.get_adjusted_dt(timer))
+                        .num_minutes();
 
-                    if until_alarm < 1 {
-                        // otherwise the alarm could trigger  between here and sleeping
-                        should_sleep = false;
-                        info!("Alarm is scheduled in {} so not sleeping", until_alarm);
-                        if until_alarm <= 0 {
-                            watchdog.start(100.micros());
-                            loop {
-                                // Wait to be reset and become thermal device
-                                nop();
+                        if until_alarm < 1 {
+                            // otherwise the alarm could trigger  between here and sleeping
+                            should_sleep = false;
+                            info!("Alarm is scheduled in {} so not sleeping", until_alarm);
+                            if until_alarm <= 0 {
+                                watchdog.start(100.micros());
+                                loop {
+                                    // Wait to be reset and become thermal device
+                                    nop();
+                                }
                             }
+                            continue;
                         }
-                        continue;
                     }
                     info!("Ask Attiny to power down rp2040");
                     event_logger.log_event(
