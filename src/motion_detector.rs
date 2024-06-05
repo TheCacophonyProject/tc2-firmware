@@ -245,7 +245,7 @@ pub fn track_motion(
 
 #[derive(Format, PartialEq)]
 pub struct DetectionMask {
-    pub inner: Option<[u8; 2400]>,
+    pub inner: [u8; 2400],
     length: usize,
 }
 
@@ -254,33 +254,33 @@ impl DetectionMask {
         self.length = 0;
     }
     pub fn append_piece(&mut self, piece: &[u8]) {
-        self.inner.unwrap()[self.length..self.length + piece.len()].copy_from_slice(piece);
+        self.inner[self.length..self.length + piece.len()].copy_from_slice(piece);
         self.length += piece.len();
     }
     pub fn new(mask: Option<[u8; 2400]>) -> DetectionMask {
         let length = if mask.is_some() { 2400 } else { 0 };
         DetectionMask {
-            inner: mask,
+            inner: mask.unwrap_or([0u8; 2400]),
             length,
         }
     }
     pub fn is_masked_at_pos(&self, x: usize, y: usize) -> bool {
         let index = (y * 160) + x;
-        self.inner.unwrap()[index >> 3] & (1 << (index % 8)) != 0
+        self.inner[index >> 3] & (1 << (index % 8)) != 0
     }
 
     pub fn set_index(&mut self, index: usize) {
-        self.inner.unwrap()[index >> 3] |= 1 << (index % 8);
+        self.inner[index >> 3] |= 1 << (index % 8);
     }
 
     pub fn set_pos(&mut self, x: usize, y: usize) {
         let i = (y * 160) + x;
-        self.inner.unwrap()[i >> 3] |= 1 << (i % 8);
+        self.inner[i >> 3] |= 1 << (i % 8);
     }
 
     #[inline(always)]
     pub fn is_masked_at_index(&self, index: usize) -> bool {
-        let group = self.inner.unwrap()[index >> 3];
+        let group = self.inner[index >> 3];
         group != 0 && group & (1 << (index % 8)) != 0
     }
 }

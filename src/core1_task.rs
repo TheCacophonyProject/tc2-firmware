@@ -331,7 +331,7 @@ pub fn core_1_task(
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-    let existing_config = DeviceConfig::load_existing_config_from_flash(true);
+    let existing_config = DeviceConfig::load_existing_config_from_flash();
 
     if let Some(existing_config) = &existing_config {
         info!("Existing config {:#?}", existing_config.config());
@@ -349,6 +349,7 @@ pub fn core_1_task(
             clock_freq.Hz(),
             radiometry_enabled,
             lepton_serial.unwrap_or(0),
+            false,
             &mut timer,
             existing_config,
         );
@@ -485,6 +486,7 @@ pub fn core_1_task(
     clear_flash_alarm();
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal => {
+            info!("SCHEDULING");
             record_audio = true;
             if let Ok(next_alarm) = schedule_audio_rec(
                 &mut delay,
@@ -496,6 +498,7 @@ pub fn core_1_task(
                 &mut device_config,
             ) {
                 next_audio_alarm = Some(next_alarm);
+                info!("Setting a pending audio alarm");
             } else {
                 error!("Couldn't schedule alarm");
             }
@@ -520,13 +523,15 @@ pub fn core_1_task(
     pi_spi.enable_pio_spi();
     info!("Entering frame loop");
     loop {
+        info!("WAITING TO READ");
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
             input,
             Core1Task::ReceiveFrame.into(),
-            "Got unknown fifo input to core1 task loop {}",
+            "Got unkno 258120wn fifo input to core1 task loop {}",
             input
         );
+        info!("GOT A READ");
 
         let start = timer.get_counter();
         // Get the currently selected buffer to transfer/write to disk.

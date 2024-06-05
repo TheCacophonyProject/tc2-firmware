@@ -59,7 +59,7 @@ pub fn audio_task(
         PullDown,
     >,
 ) -> ! {
-    let mut device_config = DeviceConfig::load_existing_config_from_flash(false).unwrap();
+    let mut device_config = DeviceConfig::load_existing_config_from_flash().unwrap();
 
     watchdog.feed();
     //this isn't reliable so use alarm stored in flash
@@ -327,6 +327,7 @@ pub fn audio_task(
 
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
+    info!("COnfig mode is now {}", device_config.config().audio_mode);
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
             //thermal alarm check the time represents next thermal start time
@@ -543,6 +544,21 @@ pub fn offload(
         }
         if awake {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+            let (update_config, device_config_was_updated) =
+                get_existing_device_config_or_config_from_pi_on_initial_handshake(
+                    flash_storage,
+                    pi_spi,
+                    &mut peripherals.RESETS,
+                    &mut peripherals.DMA,
+                    clock_freq.Hz(),
+                    2u32, //need to get radiometry and leton serial
+                    1,
+                    true,
+                    timer,
+                    Some(device_config),
+                );
+
             if offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
@@ -566,18 +582,6 @@ pub fn offload(
                 return Err(());
             }
 
-            let (update_config, device_config_was_updated) =
-                get_existing_device_config_or_config_from_pi_on_initial_handshake(
-                    flash_storage,
-                    pi_spi,
-                    &mut peripherals.RESETS,
-                    &mut peripherals.DMA,
-                    clock_freq.Hz(),
-                    2u32, //need to get radiometry and leton serial
-                    1,
-                    timer,
-                    Some(device_config),
-                );
             return Ok((update_config, device_config_was_updated));
         }
     }
@@ -668,11 +672,6 @@ pub fn schedule_audio_rec(
         }
         _ => (),
     }
-
-    info!(
-        "Scheduling to wake up in {} seconds random was {}",
-        wake_in, r
-    );
     info!(
         "Current time is {}:{}",
         synced_date_time.date_time_utc.time().hour(),

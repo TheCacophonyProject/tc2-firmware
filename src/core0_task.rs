@@ -110,10 +110,12 @@ pub fn frame_acquisition_loop(
 
     watchdog.pause_on_debug(true);
     watchdog.start(8388607.micros());
-
+    info!("STARTING FRAME LOOP");
     'frame_loop: loop {
+        info!("LOOP");
         if got_sync || is_recording {
             watchdog.feed();
+            info!("FEEDING");
         }
         if got_sync {
             current_segment_num += 1;
@@ -137,6 +139,7 @@ pub fn frame_acquisition_loop(
             // Initiate the transfer of the previous frame
             sio_fifo.write(Core1Task::ReceiveFrame.into());
             sio_fifo.write(selected_frame_buffer);
+            info!("WRITTEN FRAME READY");
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
             } else {
@@ -150,7 +153,9 @@ pub fn frame_acquisition_loop(
             let mut prev_packet_id = -1;
             'scanline: loop {
                 // This is one scanline
+                info!("TRANFER");
                 let packet = lepton.transfer(&mut scanline_buffer).unwrap();
+                info!("GOT A PACKET");
                 let packet_header = packet[0];
                 let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
                 let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
@@ -333,6 +338,7 @@ pub fn frame_acquisition_loop(
                                 .unwrap()
                                 .packet(segment_index, packet_id as usize),
                         );
+                        info!("WRITING INTO BUFFER");
                     });
 
                     let is_last_segment = valid_frame_current_segment_num == 4;

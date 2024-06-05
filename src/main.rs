@@ -41,7 +41,10 @@ use bsp::{
 };
 use chrono::{NaiveDateTime, Timelike};
 use cortex_m::asm::nop;
-use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use device_config::{
+    get_naive_datetime, next_or_current_recording_window_non, time_is_in_recording_window_non,
+    AudioMode, DeviceConfig,
+};
 use rp2040_hal::rosc::RingOscillator;
 
 use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
@@ -108,12 +111,12 @@ impl FrameBuffer {
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
-
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let config = DeviceConfig::load_existing_config_from_flash(false).unwrap();
-    let mut is_audio = config.config().is_audio_device;
-
+    let config = DeviceConfig::load_existing_minimal_config_from_flash().unwrap();
+    let mut is_audio = config.0;
+    info!("CONFIG IS {}", config);
+    // let mut is_audio = false;
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -191,35 +194,42 @@ fn main() -> ! {
         Err(_) => crate::panic!("Unable to get DateTime from RTC"),
     }
 
-    if let AudioMode::AudioOrThermal = config.config().audio_mode {
-        is_audio = !config.time_is_in_recording_window(&date_time, &None);
-        info!(
-            "Is audio is {} because is one or other in window {}",
-            is_audio,
-            config.time_is_in_recording_window(&date_time, &None)
-        );
-    } else if let AudioMode::AudioAndThermal = config.config().audio_mode {
-        let in_window = config.time_is_in_recording_window(&date_time, &None);
-        if in_window {
-            if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-                is_audio = audio_request;
-                if (is_audio) {
-                    info!("Is audio because thermal requested");
+    if config.0 {
+        let in_window;
+        match config.1 {
+            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                let (start_time, end_time) = next_or_current_recording_window_non(
+                    config.5 .0,
+                    config.5 .1,
+                    config.6 .0,
+                    config.6 .1,
+                    config.2,
+                    config.3,
+                    config.4,
+                    &date_time,
+                );
+
+                in_window =
+                    time_is_in_recording_window_non(start_time, end_time, &date_time, &None);
+                info!("Is in window{} ", in_window);
+                is_audio = !in_window;
+            }
+            _ => in_window = false,
+        }
+
+        if let AudioMode::AudioAndThermal = config.1 {
+            if in_window {
+                is_audio = false;
+                if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+                    is_audio = audio_request;
+                    if (is_audio) {
+                        info!("Is audio because thermal requested");
+                    }
                 }
             }
-        } else {
-            is_audio = true;
         }
     }
     let (i2c1, unlocked_pin) = shared_i2c.free();
-
-    info!(
-        "At {}:{}:{} is audio {}",
-        date_time.hour(),
-        date_time.minute(),
-        date_time.second(),
-        is_audio
-    );
 
     if is_audio {
         let gpio0 = pins.gpio0;
@@ -280,6 +290,7 @@ fn main() -> ! {
             fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
+
         thermal_code(
             lepton_pins,
             pins,
@@ -378,9 +389,11 @@ pub fn thermal_code(
     info!("Camera serial #{}", lepton_serial);
     info!("Radiometry enabled? {}", radiometric_mode);
 
-    let mut fb0 = FrameBuffer::new();
-    let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<43000> = Stack::new();
+    let mut fb0 = FrameBuffer::new(); //39060
+    let mut fb1 = FrameBuffer::new(); //39060
+    let mut core1_stack: Stack<45000> = Stack::new(); //180000
+                                                      //258.12 out of a total of 260.49536
+                                                      //leaves 2.37536KB
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
@@ -418,11 +431,14 @@ pub fn thermal_code(
 
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
+    info!("GOT READY");
     sio.fifo
         .write_blocking(if radiometric_mode { 2 } else { 1 });
 
+    info!("WROTE RADIO");
     let result = sio.fifo.read_blocking();
     if result == Core1Task::RequestReset.into() {
+        info!("GOT A RESET");
         watchdog.start(100.micros());
         loop {
             nop();
