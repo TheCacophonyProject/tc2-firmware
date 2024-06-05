@@ -46,7 +46,7 @@ enum Tc2AgentState {
     Ready = 0x02,
     Recording = 0x04,
     TestAudioRecording = 0x08,
-    TakeAudio = 0x16,
+    TakeAudio = 16,
 }
 
 impl Into<u8> for CameraState {
@@ -457,7 +457,7 @@ impl SharedI2C {
 
     pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok(state & 0x16 == 0x16),
+            Ok(state) => Ok((state & 16) == 16),
             Err(e) => Err(e),
         }
     }
@@ -488,7 +488,7 @@ impl SharedI2C {
     pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let val = state & !16u8;
+                let val = state | 16u8;
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),

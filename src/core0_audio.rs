@@ -154,7 +154,20 @@ pub fn audio_task(
         &mut shared_i2c,
         synced_date_time.date_time_utc,
     );
+
+    let mut do_recording = alarm_triggered;
+
+    let thermal_requested_audio;
+    if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+        thermal_requested_audio = take_rec;
+        if thermal_requested_audio {
+            do_recording = true;
+        }
+    } else {
+        thermal_requested_audio = false;
+    }
     watchdog.disable();
+
     match offload(
         &mut shared_i2c,
         clock_freq,
@@ -170,10 +183,23 @@ pub fn audio_task(
         Ok((new_config, was_updated)) => {
             device_config = new_config.unwrap();
             if was_updated {
-                if !device_config.config().is_audio_device {
+                let reboot;
+                if device_config.config().is_audio_device && !thermal_requested_audio {
+                    if let AudioMode::AudioOnly = device_config.config().audio_mode {
+                        reboot = false;
+                    } else {
+                        let in_window = device_config
+                            .time_is_in_recording_window(&synced_date_time.date_time_utc, &None);
+                        reboot = in_window;
+                    }
+                } else {
+                    reboot = !device_config.config().is_audio_device
+                }
+
+                if reboot {
                     let _ = shared_i2c.disable_alarm(&mut delay);
                     clear_flash_alarm();
-                    info!("Not audio device so restarting");
+                    info!("Restarting as should be in thermal mode");
                     watchdog.start(100.micros());
                     loop {
                         // Wait to be reset and become thermal device
@@ -192,8 +218,6 @@ pub fn audio_task(
         }
     }
     watchdog.start(8388607.micros());
-
-    let mut do_recording = alarm_triggered;
     let mut reschedule = !scheduled;
     info!(
         "ALarm triggered {} scheduled {}",
@@ -251,16 +275,6 @@ pub fn audio_task(
     let mut take_test_rec = false;
     if let Ok(test_rec) = shared_i2c.tc2_agent_requested_test_audio_rec(&mut delay) {
         take_test_rec = test_rec;
-    }
-
-    let thermal_requested_audio;
-    if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-        thermal_requested_audio = take_rec;
-        if thermal_requested_audio {
-            do_recording = true;
-        }
-    } else {
-        thermal_requested_audio = false;
     }
 
     if do_recording || take_test_rec || thermal_requested_audio {
@@ -327,7 +341,6 @@ pub fn audio_task(
 
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
-    info!("COnfig mode is now {}", device_config.config().audio_mode);
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
             //thermal alarm check the time represents next thermal start time
@@ -354,7 +367,6 @@ pub fn audio_task(
             &device_config,
         ) {
             alarm_time = Some(scheduled_time);
-            scheduled = true;
         } else {
             error!("Couldn't schedule alarm will restart");
             clear_flash_alarm();
@@ -393,8 +405,8 @@ pub fn audio_task(
     }
 
     if thermal_requested_audio {
-        shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
-        info!("Audio taken in thermal window");
+        let _ = shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
+        info!("Audio taken in thermal window clearing flag");
         watchdog.start(100.micros());
         loop {
             nop();
@@ -477,16 +489,11 @@ pub fn audio_task(
                         Ok((new_config, was_updated)) => {
                             device_config = new_config.unwrap();
                             if was_updated {
-                                if !device_config.config().is_audio_device {
-                                    let _ = shared_i2c.disable_alarm(&mut delay);
-                                    clear_flash_alarm();
-
-                                    info!("Not audio device so restarting");
-                                    watchdog.start(100.micros());
-                                    loop {
-                                        // Wait to be reset and become thermal device
-                                        nop();
-                                    }
+                                info!("Config updated restarting");
+                                watchdog.start(100.micros());
+                                loop {
+                                    // Wait to be reset and become thermal device
+                                    nop();
                                 }
                             }
                         }
@@ -619,8 +626,7 @@ pub fn schedule_audio_rec(
     event_logger: &mut EventLogger,
     device_config: &DeviceConfig,
 ) -> Result<NaiveDateTime, ()> {
-    i2c.disable_alarm(delay);
-
+    let _ = i2c.disable_alarm(delay);
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
     let r = rng.generate();
     let r_max: u16 = 65535u16;
@@ -643,16 +649,11 @@ pub fn schedule_audio_rec(
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
             let (start, end) = device_config.next_or_current_recording_window(&current_time);
             info!(
-                "Checking  next alarm {}:{} for rec window start{}:{}",
+                "Checking next alarm {}:{} for rec window start{}:{}",
                 wakeup.hour(),
                 wakeup.minute(),
                 start.hour(),
                 start.minute(),
-            );
-            info!(
-                "current_time is {}:{}",
-                current_time.hour(),
-                current_time.minute()
             );
             if wakeup > start {
                 if start < current_time {
@@ -677,9 +678,6 @@ pub fn schedule_audio_rec(
         synced_date_time.date_time_utc.time().hour(),
         synced_date_time.date_time_utc.time().minute()
     );
-
-    // GP TESTING
-    // let wake_in: i32 = 60 * 2;
 
     i2c.enable_alarm(delay);
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {

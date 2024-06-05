@@ -220,8 +220,10 @@ fn main() -> ! {
         if let AudioMode::AudioAndThermal = config.1 {
             if in_window {
                 is_audio = false;
+                info!("Checking if agent requested rec");
                 if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
                     is_audio = audio_request;
+                    info!("Audio request?? {}", audio_request);
                     if (is_audio) {
                         info!("Is audio because thermal requested");
                     }
@@ -394,6 +396,7 @@ pub fn thermal_code(
     let mut core1_stack: Stack<45000> = Stack::new(); //180000
                                                       //258.12 out of a total of 260.49536
                                                       //leaves 2.37536KB
+
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
@@ -408,6 +411,7 @@ pub fn thermal_code(
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
     watchdog.disable();
+
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
         let _ = core1.spawn(
@@ -428,17 +432,13 @@ pub fn thermal_code(
             },
         );
     }
-
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
-    info!("GOT READY");
     sio.fifo
         .write_blocking(if radiometric_mode { 2 } else { 1 });
 
-    info!("WROTE RADIO");
     let result = sio.fifo.read_blocking();
     if result == Core1Task::RequestReset.into() {
-        info!("GOT A RESET");
         watchdog.start(100.micros());
         loop {
             nop();
@@ -458,3 +458,4 @@ pub fn thermal_code(
         watchdog,
     );
 }
+use crate::rp2040_flash::{clear_flash_alarm, read_alarm_from_rp2040_flash};

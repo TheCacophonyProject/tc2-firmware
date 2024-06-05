@@ -20,7 +20,8 @@ use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::rp2040_flash::{clear_flash_alarm, read_alarm_from_rp2040_flash};
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
-use chrono::{Duration, NaiveDateTime};
+use chrono::{Duration, NaiveDateTime, Timelike};
+
 use core::cell::RefCell;
 use core::ops::Add;
 use cortex_m::asm::nop;
@@ -340,7 +341,7 @@ pub fn core_1_task(
         // We need to wake up the rpi and get a config
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
     }
-    let (mut device_config, device_config_was_updated) =
+    let (device_config, device_config_was_updated) =
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             &mut flash_storage,
             &mut pi_spi,
@@ -353,6 +354,8 @@ pub fn core_1_task(
             &mut timer,
             existing_config,
         );
+    clear_flash_alarm();
+
     if woken_by_alarm {
         event_logger.log_event(
             LoggerEvent::new(
@@ -372,7 +375,7 @@ pub fn core_1_task(
         );
     }
 
-    let mut device_config = device_config.unwrap_or(DeviceConfig::default());
+    let device_config = device_config.unwrap_or(DeviceConfig::default());
     if device_config.config().is_audio_device {
         if let AudioMode::AudioOnly = device_config.config().audio_mode {
             shared_i2c.disable_alarm(&mut delay);
@@ -441,6 +444,49 @@ pub fn core_1_task(
         false
     };
 
+    let startup_date_time_utc;
+
+    loop {
+        // NOTE: Keep retrying until we get a datetime from RTC.
+        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
+            synced_date_time.set(get_naive_datetime(now), &timer);
+            startup_date_time_utc = synced_date_time.date_time_utc.clone();
+            break;
+        } else {
+            warn!("Failed getting date from RTC, retrying");
+            delay.delay_ms(10);
+        }
+    }
+
+    let mut record_audio: bool = false;
+    let mut audio_pending: bool = false;
+    let mut next_audio_alarm: Option<NaiveDateTime> = None;
+    clear_flash_alarm();
+    if device_config.config().is_audio_device {
+        match device_config.config().audio_mode {
+            AudioMode::AudioAndThermal => {
+                record_audio = true;
+                if let Ok(next_alarm) = schedule_audio_rec(
+                    &mut delay,
+                    &synced_date_time,
+                    &mut shared_i2c,
+                    &mut flash_storage,
+                    &mut timer,
+                    &mut event_logger,
+                    &device_config,
+                ) {
+                    next_audio_alarm = Some(next_alarm);
+                    info!("Setting a pending audio alarm");
+                } else {
+                    error!("Couldn't schedule alarm");
+                }
+
+                //schedule an alarm if one in the future is not set
+            }
+            _ => record_audio = false,
+        }
+    }
+
     // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
         .set_recording_flag(&mut delay, false)
@@ -460,53 +506,12 @@ pub fn core_1_task(
     let mut prev_frame_telemetry: Option<Telemetry> = None;
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
-    let startup_date_time_utc;
-
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
-            synced_date_time.set(get_naive_datetime(now), &timer);
-            startup_date_time_utc = synced_date_time.date_time_utc.clone();
-            break;
-        } else {
-            warn!("Failed getting date from RTC, retrying");
-            delay.delay_ms(10);
-        }
-    }
-
     let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
 
     info!(
         "Current time is in recording window? {}",
         device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
     );
-    let mut record_audio: bool = false;
-    let mut audio_pending: bool = false;
-    let mut next_audio_alarm: Option<NaiveDateTime> = None;
-    clear_flash_alarm();
-    match device_config.config().audio_mode {
-        AudioMode::AudioAndThermal => {
-            info!("SCHEDULING");
-            record_audio = true;
-            if let Ok(next_alarm) = schedule_audio_rec(
-                &mut delay,
-                &synced_date_time,
-                &mut shared_i2c,
-                &mut flash_storage,
-                &mut timer,
-                &mut event_logger,
-                &mut device_config,
-            ) {
-                next_audio_alarm = Some(next_alarm);
-                info!("Setting a pending audio alarm");
-            } else {
-                error!("Couldn't schedule alarm");
-            }
-
-            //schedule an alarm if one in the future is not set
-        }
-        _ => record_audio = false,
-    }
 
     let mut motion_detection: Option<MotionTracking> = None;
     let mut current_recording_window = None;
@@ -523,15 +528,13 @@ pub fn core_1_task(
     pi_spi.enable_pio_spi();
     info!("Entering frame loop");
     loop {
-        info!("WAITING TO READ");
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
             input,
             Core1Task::ReceiveFrame.into(),
-            "Got unkno 258120wn fifo input to core1 task loop {}",
+            "Got unknown fifo input to core1 task loop {}",
             input
         );
-        info!("GOT A READ");
 
         let start = timer.get_counter();
         // Get the currently selected buffer to transfer/write to disk.
@@ -1162,12 +1165,20 @@ pub fn core_1_task(
             && synced_date_time.get_adjusted_dt(&timer) > next_audio_alarm.unwrap()
         {
             audio_pending = true;
-            info!("Audio recording is pending")
+            let cur_time = synced_date_time.get_adjusted_dt(&timer);
+
+            info!(
+                "Audio recording is pending because time {}:{} is after {}:{} ",
+                cur_time.hour(),
+                cur_time.minute(),
+                next_audio_alarm.unwrap().hour(),
+                next_audio_alarm.unwrap().minute()
+            )
         }
         if record_audio && audio_pending && cptv_stream.is_none() {
             info!("Taking audio recording");
             //make audio rec now
-            shared_i2c.tc2_agent_take_audio_rec(&mut delay);
+            let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
             sio.fifo.write(Core1Task::RequestReset.into());
             loop {
                 // Wait to be reset

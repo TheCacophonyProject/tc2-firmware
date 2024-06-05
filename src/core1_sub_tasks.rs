@@ -132,6 +132,7 @@ pub fn offload_flash_storage_and_events(
     );
     // do some offloading.
     let mut file_count = 0;
+    info!("BEGIN OFFLOAD");
     flash_storage.begin_offload();
     let mut file_start = true;
     let mut part_count = 0;
@@ -140,6 +141,7 @@ pub fn offload_flash_storage_and_events(
 
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
+    info!("CYCLE PARTS");
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
         flash_storage.get_file_part()
     {
@@ -166,6 +168,7 @@ pub fn offload_flash_storage_and_events(
         }
 
         let mut attempts = 0;
+        info!("SENDING A PART");
         'transfer_part: loop {
             if part_count != 0 {
                 //takes tc2-agent about this long to poll again will fail a lot otherwise
@@ -179,6 +182,9 @@ pub fn offload_flash_storage_and_events(
             counter = timer.get_counter();
             if !did_transfer {
                 attempts += 1;
+                if attempts % 10 == 0 {
+                    info!("Failed {}", attempts);
+                }
                 if attempts > 100 {
                     success = false;
                     break 'transfer_part;
