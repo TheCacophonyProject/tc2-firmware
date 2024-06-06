@@ -150,7 +150,6 @@ pub fn audio_task(
         &mut shared_i2c,
         synced_date_time.date_time_utc,
     );
-    watchdog.disable();
     match offload(
         &mut shared_i2c,
         clock_freq,
@@ -162,6 +161,7 @@ pub fn audio_task(
         device_config,
         &mut delay,
         &synced_date_time,
+        watchdog,
     ) {
         Ok((new_config, was_updated)) => {
             device_config = new_config.unwrap();
@@ -186,7 +186,6 @@ pub fn audio_task(
             }
         }
     }
-    watchdog.start(8388607.micros());
 
     let mut do_recording = alarm_triggered;
     let mut reschedule = !scheduled;
@@ -443,7 +442,6 @@ pub fn audio_task(
 
                 //may aswell offload again if we are awake and have just taken a recording
                 if !pi_is_powered_down && flash_storage.has_files_to_offload() {
-                    watchdog.disable();
                     match offload(
                         &mut shared_i2c,
                         clock_freq,
@@ -455,6 +453,7 @@ pub fn audio_task(
                         device_config,
                         &mut delay,
                         &synced_date_time,
+                        watchdog,
                     ) {
                         Ok((new_config, was_updated)) => {
                             device_config = new_config.unwrap();
@@ -479,7 +478,6 @@ pub fn audio_task(
                             }
                         }
                     }
-                    watchdog.start(8388607.micros());
                 }
             }
         }
@@ -511,6 +509,7 @@ pub fn offload(
     device_config: DeviceConfig,
     delay: &mut Delay,
     synced_date_time: &SyncedDateTime,
+    watchdog: &mut bsp::hal::Watchdog,
 ) -> Result<(Option<DeviceConfig>, bool), ()> {
     if !wake_if_asleep {
         if let Ok(pi_waking) = i2c.pi_is_waking_or_awake(delay) {
@@ -520,7 +519,9 @@ pub fn offload(
 
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
+            watchdog.disable();
             awake = wake_raspberry_pi(i2c, delay);
+            watchdog.start(8388607.micros());
         }
         if awake {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
@@ -535,6 +536,7 @@ pub fn offload(
                 timer,
                 event_logger,
                 &synced_date_time,
+                Some(watchdog),
             ) {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -546,7 +548,7 @@ pub fn offload(
             } else if flash_storage.has_files_to_offload() {
                 return Err(());
             }
-
+            watchdog.feed();
             let (update_config, device_config_was_updated) =
                 get_existing_device_config_or_config_from_pi_on_initial_handshake(
                     flash_storage,
