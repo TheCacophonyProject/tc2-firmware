@@ -1164,6 +1164,7 @@ pub fn core_1_task(
             && !audio_pending
             && synced_date_time.get_adjusted_dt(&timer) > next_audio_alarm.unwrap()
         {
+            //Should we be checking alarm triggered? or just us ethis and clear alarm
             audio_pending = true;
             let cur_time = synced_date_time.get_adjusted_dt(&timer);
 

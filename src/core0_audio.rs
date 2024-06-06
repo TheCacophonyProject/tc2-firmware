@@ -641,7 +641,6 @@ pub fn schedule_audio_rec(
     } else {
         wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
     }
-
     let current_time = synced_date_time.get_adjusted_dt(timer);
     let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);
     let mut alarm_mode = 0u8;
