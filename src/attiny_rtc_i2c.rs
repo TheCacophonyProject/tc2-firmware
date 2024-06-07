@@ -354,6 +354,13 @@ impl SharedI2C {
         self.try_attiny_read_command(REG_RP2040_PI_POWER_CTRL, delay, None)
     }
 
+    pub fn get_is_recording(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        let res = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & 4) == 4),
+            Err(e) => Err(e),
+        };
+        return res;
+    }
     pub fn set_recording_flag(
         &mut self,
         delay: &mut Delay,

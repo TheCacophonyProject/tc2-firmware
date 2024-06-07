@@ -1176,14 +1176,19 @@ pub fn core_1_task(
                 next_audio_alarm.unwrap().minute()
             )
         }
-        if record_audio && audio_pending && cptv_stream.is_none() {
-            info!("Taking audio recording");
-            //make audio rec now
-            let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
-            sio.fifo.write(Core1Task::RequestReset.into());
-            loop {
-                // Wait to be reset
-                nop();
+        if record_audio && audio_pending {
+            //hanldes case where thermal recorder is doing recording
+            if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+                if !is_recording {
+                    info!("Taking audio recording");
+                    //make audio rec now
+                    let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
+                    sio.fifo.write(Core1Task::RequestReset.into());
+                    loop {
+                        // Wait to be reset
+                        nop();
+                    }
+                }
             }
         }
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
