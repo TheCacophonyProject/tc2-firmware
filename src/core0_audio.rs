@@ -319,7 +319,7 @@ pub fn audio_task(
             write_alarm_schedule_to_rp2040_flash(u8::MAX, u8::MAX, u8::MAX);
         } else {
             info!("taken test recoridng clearing status");
-            shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
+            let _ = shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
         }
     }
 
@@ -459,7 +459,6 @@ pub fn audio_task(
                             device_config = new_config.unwrap();
                             if was_updated {
                                 if !device_config.config().is_audio_device {
-                                    shared_i2c.disable_alarm(&mut delay);
                                     info!("Not audio device so restarting");
                                     watchdog.start(100.micros());
                                     loop {
@@ -598,8 +597,10 @@ fn schedule_audio_rec(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
 ) -> Result<NaiveDateTime, ()> {
-    i2c.disable_alarm(delay);
-
+    if let Err(err) = i2c.disable_alarm(delay) {
+        error!("Failed to disable alarm");
+        return Err(());
+    }
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
     let r = rng.generate();
     let r_max: u16 = 65535u16;
