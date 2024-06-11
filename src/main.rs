@@ -111,14 +111,12 @@ fn main() -> ! {
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     let is_audio = read_is_audio_from_rp2040_flash();
 
-    let freq;
-
-    if is_audio {
-        freq = ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz();
+    let freq = if is_audio {
+        ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
     } else {
         //for some reason audio comes out faster than expected when using this clock
-        freq = ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz();
-    }
+        ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz()
+    };
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -143,7 +141,7 @@ fn main() -> ! {
     watchdog.start(8388607.micros());
 
     info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
+    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);

@@ -573,7 +573,7 @@ pub fn get_alarm_dt(
     alarm_hours: u8,
     alarm_minutes: u8,
 ) -> Result<NaiveDateTime, ()> {
-    let mut naive_date = chrono::NaiveDate::from_ymd_opt(
+    let naive_date = chrono::NaiveDate::from_ymd_opt(
         datetime.year() as i32,
         datetime.month() as u32,
         alarm_day as u32,
@@ -581,7 +581,7 @@ pub fn get_alarm_dt(
     if naive_date.is_none() {
         return Err(());
     }
-    let mut naive_date = naive_date.unwrap();
+    let naive_date = naive_date.unwrap();
 
     let naive_time = chrono::NaiveTime::from_hms_opt(alarm_hours as u32, alarm_minutes as u32, 0);
     if naive_time.is_none() {
@@ -601,14 +601,14 @@ fn schedule_audio_rec(
     i2c.disable_alarm(delay);
 
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
-    let mut r = rng.generate();
+    let r = rng.generate();
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;
     let short_pause: u64 = 2 * 60;
     let short_window: u64 = 5 * 60;
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
-    let mut wake_in;
+    let wake_in;
     if r <= short_chance {
         wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
     } else {
@@ -624,11 +624,11 @@ fn schedule_audio_rec(
         synced_date_time.date_time_utc.time().minute()
     );
 
-    // GP TESTING
-    // let wake_in: i32 = 60 * 2;
-
     let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
-    i2c.enable_alarm(delay);
+    if let Err(err) = i2c.enable_alarm(delay) {
+        error!("Failed to enable alarm");
+        return Err(());
+    }
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
         if let Ok(alarm_enabled) = i2c.alarm_interrupt_enabled(delay) {
             if alarm_enabled {
