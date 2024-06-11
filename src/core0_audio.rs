@@ -635,7 +635,7 @@ pub fn schedule_audio_rec(
     let short_window: u64 = 5 * 60;
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
-    let mut wake_in;
+    let wake_in;
     if r <= short_chance {
         wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
     } else {
