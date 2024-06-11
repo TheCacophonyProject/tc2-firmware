@@ -520,7 +520,8 @@ pub fn offload(
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
-            awake = wake_raspberry_pi(i2c, delay);
+            wake_raspberry_pi(i2c, delay);
+            awake = true;
             watchdog.start(8388607.micros());
         }
         if awake {
