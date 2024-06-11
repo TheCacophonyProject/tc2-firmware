@@ -180,9 +180,11 @@ fn main() -> ! {
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
-    let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
-    if disabled_alarm.is_err() {
-        error!("{}", disabled_alarm.unwrap());
+    if !is_audio {
+        let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+        if disabled_alarm.is_err() {
+            error!("{}", disabled_alarm.unwrap());
+        }
     }
 
     let mut date_time: NaiveDateTime;

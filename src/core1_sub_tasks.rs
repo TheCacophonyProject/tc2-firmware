@@ -12,7 +12,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::{info, warn};
-use fugit::{HertzU32, RateExtU32};
+use fugit::{ExtU32, HertzU32, RateExtU32};
 use rp2040_hal::Timer;
 
 use embedded_hal::prelude::{
@@ -29,6 +29,7 @@ pub fn maybe_offload_events(
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
     clock_freq: u32,
+    mut watchdog: Option<&mut bsp::hal::Watchdog>,
 ) {
     if event_logger.has_events_to_offload() {
         let event_indices = event_logger.event_range();
@@ -37,6 +38,9 @@ pub fn maybe_offload_events(
         let mut success = true;
         let mut counter = timer.get_counter();
         'transfer_all_events: for event_index in event_indices {
+            if watchdog.is_some() {
+                watchdog.as_mut().unwrap().feed();
+            }
             let event_bytes = event_logger.event_at_index(event_index, flash_storage);
             if let Some(event_bytes) = event_bytes {
                 if let Some(spi) = flash_storage.free_spi() {
@@ -109,8 +113,13 @@ pub fn offload_flash_storage_and_events(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
+    mut watchdog: Option<&mut bsp::hal::Watchdog>,
 ) -> bool {
     warn!("There are files to offload!");
+    if watchdog.is_some() {
+        watchdog.as_mut().unwrap().disable();
+    }
+
     if wake_raspberry_pi(shared_i2c, delay) {
         event_logger.log_event(
             LoggerEvent::new(
@@ -120,6 +129,10 @@ pub fn offload_flash_storage_and_events(
             flash_storage,
         );
     }
+    if watchdog.is_some() {
+        watchdog.as_mut().unwrap().start(8388607.micros());
+    }
+
     maybe_offload_events(
         pi_spi,
         resets,
@@ -129,6 +142,11 @@ pub fn offload_flash_storage_and_events(
         event_logger,
         flash_storage,
         clock_freq,
+        if watchdog.is_some() {
+            Some(watchdog.as_mut().unwrap())
+        } else {
+            None
+        },
     );
     // do some offloading.
     let mut file_count = 0;
@@ -145,6 +163,9 @@ pub fn offload_flash_storage_and_events(
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
         flash_storage.get_file_part()
     {
+        if watchdog.is_some() {
+            watchdog.as_mut().unwrap().feed();
+        }
         pi_spi.enable(spi, resets);
         let transfer_type = if file_start && !is_last {
             ExtTransferMessage::BeginFileTransfer
@@ -170,6 +191,9 @@ pub fn offload_flash_storage_and_events(
         let mut attempts = 0;
         info!("SENDING A PART");
         'transfer_part: loop {
+            if watchdog.is_some() {
+                watchdog.as_mut().unwrap().feed();
+            }
             if part_count != 0 {
                 //takes tc2-agent about this long to poll again will fail a lot otherwise
                 let time_since = (timer.get_counter() - counter).to_micros();

@@ -397,6 +397,7 @@ pub fn core_1_task(
             &mut event_logger,
             &mut flash_storage,
             clock_freq,
+            None,
         );
     }
 
@@ -439,6 +440,7 @@ pub fn core_1_task(
             &mut timer,
             &mut event_logger,
             &synced_date_time,
+            None,
         )
     } else {
         false
