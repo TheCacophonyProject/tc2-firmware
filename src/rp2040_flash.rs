@@ -47,8 +47,7 @@ pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }
 }
 
-//use the last second sector for writing rp2040 alarm time because the rtc doesn't give the correct time
-//4096 - 8192
+// this is assuming the device config stucture has not change and is audio mode is at byte 4
 pub fn read_is_audio_from_rp2040_flash() -> bool {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     let config = unsafe { slice::from_raw_parts(addr, 5usize) };
@@ -60,6 +59,8 @@ pub fn read_is_audio_from_rp2040_flash() -> bool {
     }
 }
 
+//use the last second sector for writing rp2040 alarm time because the rtc doesn't give the correct time
+//4096 - 8192
 pub fn read_alarm_from_rp2040_flash() -> &'static [u8] {
     let mut addr = FLASH_XIP_BASE + FLASH_END;
     if addr % 256 != 0 {

@@ -295,7 +295,7 @@ pub struct OnboardFlash {
     dma_channel_1: Option<Channel<CH1>>,
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
-    payload_buffer: Option<&'static mut [u8; 2115]>,
+    pub payload_buffer: Option<&'static mut [u8; 2115]>,
 }
 
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
@@ -350,10 +350,6 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
-    }
-    pub fn init_async_buf(&mut self) {
-        let mut flash_payload_buf = [0x42u8; 2115];
-        self.payload_buffer = Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
     }
 
     pub fn reset(&mut self) {

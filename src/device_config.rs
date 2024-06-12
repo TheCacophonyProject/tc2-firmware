@@ -63,7 +63,11 @@ impl Default for DeviceConfig {
         }
     }
 }
-
+pub fn is_audio() -> bool {
+    DeviceConfig::load_existing_config_from_flash()
+        .map(|config| config.config().is_audio_device)
+        .unwrap_or_default()
+}
 impl DeviceConfig {
     pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
         let slice = read_device_config_from_rp2040_flash();
