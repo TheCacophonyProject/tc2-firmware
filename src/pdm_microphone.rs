@@ -256,8 +256,8 @@ impl PdmMicrophone {
         let mut recorded_successfully = false;
         // Swap our buffers?
         let use_async: bool = false;
+        let mut flash_payload_buf = [0x42u8; 2115];
         if use_async {
-            let mut flash_payload_buf = [0x42u8; 2115];
             flash_storage.payload_buffer =
                 Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
         }
