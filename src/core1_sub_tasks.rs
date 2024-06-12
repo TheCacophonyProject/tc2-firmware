@@ -50,14 +50,6 @@ pub fn maybe_offload_events(
                     let current_crc = crc_check.checksum(&event_bytes);
                     let mut attempts = 0;
                     'transfer_event: loop {
-                        //takes tc2-agent about this long to poll again will always fail otherwise
-                        if event_index != 0 {
-                            let time_since = (timer.get_counter() - counter).to_micros();
-                            if time_since < TIME_BETWEEN_TRANSFER {
-                                delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
-                            }
-                        }
-
                         let did_transfer = pi_spi.send_message(
                             transfer_type,
                             &event_bytes,
@@ -73,6 +65,11 @@ pub fn maybe_offload_events(
                                 warn!("Failed sending logger event to raspberry pi");
                                 success = false;
                                 break 'transfer_event;
+                            }
+                            //takes tc2-agent about this long to poll again will always fail otherwise
+                            let time_since = (timer.get_counter() - counter).to_micros();
+                            if time_since < TIME_BETWEEN_TRANSFER {
+                                delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
                             }
                         } else {
                             break 'transfer_event;
@@ -191,13 +188,6 @@ pub fn offload_flash_storage_and_events(
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
             }
-            if part_count != 0 {
-                //takes tc2-agent about this long to poll again will fail a lot otherwise
-                let time_since = (timer.get_counter() - counter).to_micros();
-                if time_since < TIME_BETWEEN_TRANSFER {
-                    delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
-                }
-            }
             let did_transfer =
                 pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
             counter = timer.get_counter();
@@ -206,6 +196,11 @@ pub fn offload_flash_storage_and_events(
                 if attempts > 100 {
                     success = false;
                     break 'transfer_part;
+                }
+                //takes tc2-agent about this long to poll again will fail a lot otherwise
+                let time_since = (timer.get_counter() - counter).to_micros();
+                if time_since < TIME_BETWEEN_TRANSFER {
+                    delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
                 }
             } else {
                 break 'transfer_part;
