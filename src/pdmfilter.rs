@@ -4,6 +4,9 @@ const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 64;
 const MAX_VOLUME: u8 = 64;
 
+//this is ported from
+//https://github.com/ArmDeveloperEcosystem/microphone-library-for-pico/blob/main/src/pdm_microphone.c
+
 pub struct PDMFilter {
     lut: [u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
     fs: u32,
