@@ -377,7 +377,7 @@ pub fn audio_task(
             clear_flash_alarm();
         } else {
             info!("taken test recoridng clearing status");
-            shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
+            let _ = shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
         }
     }
 
@@ -582,7 +582,8 @@ pub fn offload(
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
-            awake = wake_raspberry_pi(i2c, delay);
+            wake_raspberry_pi(i2c, delay);
+            awake = true;
             watchdog.start(8388607.micros());
         }
         if awake {
@@ -636,7 +637,7 @@ pub fn get_alarm_dt(
     alarm_hours: u8,
     alarm_minutes: u8,
 ) -> Result<NaiveDateTime, ()> {
-    let mut naive_date = chrono::NaiveDate::from_ymd_opt(
+    let naive_date = chrono::NaiveDate::from_ymd_opt(
         datetime.year() as i32,
         datetime.month() as u32,
         alarm_day as u32,
@@ -644,7 +645,7 @@ pub fn get_alarm_dt(
     if naive_date.is_none() {
         return Err(());
     }
-    let mut naive_date = naive_date.unwrap();
+    let naive_date = naive_date.unwrap();
 
     let naive_time = chrono::NaiveTime::from_hms_opt(alarm_hours as u32, alarm_minutes as u32, 0);
     if naive_time.is_none() {
@@ -662,7 +663,10 @@ pub fn schedule_audio_rec(
     event_logger: &mut EventLogger,
     device_config: &DeviceConfig,
 ) -> Result<NaiveDateTime, ()> {
-    let _ = i2c.disable_alarm(delay);
+    if let Err(err) = i2c.disable_alarm(delay) {
+        error!("Failed to disable alarm");
+        return Err(());
+    }
     let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
     let r = rng.generate();
     let r_max: u16 = 65535u16;
@@ -714,7 +718,11 @@ pub fn schedule_audio_rec(
         synced_date_time.date_time_utc.time().minute()
     );
 
-    i2c.enable_alarm(delay);
+    let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
+    if let Err(err) = i2c.enable_alarm(delay) {
+        error!("Failed to enable alarm");
+        return Err(());
+    }
     if let Ok(_) = i2c.set_wakeup_alarm(&wakeup, delay) {
         if let Ok(alarm_enabled) = i2c.alarm_interrupt_enabled(delay) {
             if alarm_enabled {

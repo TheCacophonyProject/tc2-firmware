@@ -113,6 +113,12 @@ fn main() -> ! {
     let mut config = DeviceConfig::load_existing_inner_config_from_flash();
     let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
 
+    let freq = if is_audio {
+        ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
+    } else {
+        //for some reason audio comes out faster than expected when using this clock
+        ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz()
+    };
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -137,7 +143,7 @@ fn main() -> ! {
     watchdog.start(8388607.micros());
 
     info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
+    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);

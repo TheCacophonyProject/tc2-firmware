@@ -27,7 +27,8 @@ pub const FLASH_EVENT_LOG_SIZE: u32 = 256 * 4096; // Amount dedicated to user ev
 #[link_section = ".data.ram_func"]
 
 // 2460 bytes
-
+//Config is stored in first sector of the flash drive 0-4096 bytes, if it ever becomes more will need to re arrange
+//the rp2040 flash alarm location too
 pub fn write_device_config_to_rp2040_flash(data: &[u8]) {
     let addr = FLASH_END - FLASH_USER_SIZE;
     unsafe {
@@ -46,9 +47,10 @@ pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }
 }
 
+// this is assuming the device config stucture has not change and is audio mode is at byte 4
 pub fn read_is_audio_from_rp2040_flash() -> bool {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
-    let config = unsafe { slice::from_raw_parts(addr, 5 as usize) };
+    let config = unsafe { slice::from_raw_parts(addr, 5usize) };
     if config[0] == u8::MAX && config[1] == u8::MAX && config[2] == u8::MAX && config[3] == u8::MAX
     {
         false
@@ -57,9 +59,14 @@ pub fn read_is_audio_from_rp2040_flash() -> bool {
     }
 }
 
+//use the last second sector for writing rp2040 alarm time because the rtc doesn't give the correct time
+//4096 - 8192
 pub fn read_alarm_from_rp2040_flash() -> &'static [u8] {
-    let addr = FLASH_XIP_BASE + FLASH_END;
-    unsafe { slice::from_raw_parts(addr as *const u8, 256 as usize) }
+    let mut addr = FLASH_XIP_BASE + FLASH_END;
+    if addr % 256 != 0 {
+        addr = 256 * (1 + (addr / 256));
+    }
+    unsafe { slice::from_raw_parts(addr as *const u8, 256usize) }
 }
 pub fn clear_flash_alarm() {
     write_alarm_schedule_to_rp2040_flash(u8::MAX, u8::MAX, u8::MAX, u8::MAX);

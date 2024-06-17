@@ -235,7 +235,12 @@ impl PdmMicrophone {
         self.enable();
 
         watchdog.feed();
-        timer.delay_ms(2000); //how long to warm up??
+        //how long to warm up??
+        timer.delay_ms(2000);
+
+        //3.072 mhz is the minimum clock rate that the microphone supports for 48Khz SR according to the microphone data sheet
+        // think there were some weird noises when running slightly lower
+        //https://www.knowles.com/docs/default-source/model-downloads/sph0641lu4h-1-revb.pdf
         let adjusted_sr = self.alter_mic_clock(3.072) as u32;
         info!(
             "Adjusted sr becomes {} clock {}",
@@ -256,8 +261,10 @@ impl PdmMicrophone {
         let mut recorded_successfully = false;
         // Swap our buffers?
         let use_async: bool = false;
+        let mut flash_payload_buf = [0x42u8; 2115];
         if use_async {
-            flash_storage.init_async_buf();
+            flash_storage.payload_buffer =
+                Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
         }
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;

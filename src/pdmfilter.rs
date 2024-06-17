@@ -4,6 +4,9 @@ const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 64;
 const MAX_VOLUME: u8 = 64;
 
+//this is ported from
+//https://github.com/ArmDeveloperEcosystem/microphone-library-for-pico/blob/main/src/pdm_microphone.c
+
 pub struct PDMFilter {
     lut: [u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
     fs: u32,
@@ -35,12 +38,12 @@ impl PDMFilter {
         let lp_hz: f32 = self.fs as f32 / 128.0;
         let hp_hz: f32 = 10.0;
         if lp_hz != 0.0 {
-            self.lp_alpha = (lp_hz as f32 * 256.0 / (lp_hz + self.fs as f32 / (2.0 * PI))) as u32;
+            self.lp_alpha = (lp_hz * 256.0 / (lp_hz + self.fs as f32 / (2.0 * PI))) as u32;
         }
         if hp_hz != 0.0 {
             self.hp_alpha = (self.fs as f32 * 256.0 / (2.0 * PI * hp_hz + self.fs as f32)) as u32;
         }
-        let mut sinc = [1u16; PDM_DECIMATION as usize];
+        let sinc = [1u16; PDM_DECIMATION as usize];
         let mut sinc_out = [0u16; PDM_DECIMATION as usize * 2 - 1];
 
         let mut sinc2 = [0u16; PDM_DECIMATION as usize * 3 - 2];
@@ -87,15 +90,16 @@ impl PDMFilter {
 
             for c in 0..256u32 {
                 for d in 0..8 as usize {
+                    let coef_offset = offset + d * 8;
                     self.lut[((s as usize * 256 * 8) + c as usize * 8 + d) as usize] = (c >> 7)
-                        * coef[offset + d * 8]
-                        + ((c >> 6) & 0x01) * coef[offset + d * 8 + 1]
-                        + ((c >> 5) & 0x01) * coef[offset + d * 8 + 2]
-                        + ((c >> 4) & 0x01) * coef[offset + d * 8 + 3]
-                        + ((c >> 3) & 0x01) * coef[offset + d * 8 + 4]
-                        + ((c >> 2) & 0x01) * coef[offset + d * 8 + 5]
-                        + ((c >> 1) & 0x01) * coef[offset + d * 8 + 6]
-                        + ((c) & 0x01) * coef[offset + d * 8 + 7];
+                        * coef[coef_offset]
+                        + ((c >> 6) & 0x01) * coef[coef_offset + 1]
+                        + ((c >> 5) & 0x01) * coef[coef_offset + 2]
+                        + ((c >> 4) & 0x01) * coef[coef_offset + 3]
+                        + ((c >> 3) & 0x01) * coef[coef_offset + 4]
+                        + ((c >> 2) & 0x01) * coef[coef_offset + 5]
+                        + ((c >> 1) & 0x01) * coef[coef_offset + 6]
+                        + ((c) & 0x01) * coef[coef_offset + 7];
                 }
             }
         }
