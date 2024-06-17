@@ -1,8 +1,7 @@
 .program pdm_microphone_data
 .side_set 1
 .wrap_target
-    nop side 0
-    in pins, 1 side 0
-    push iffull noblock side 1
-    nop side 1
+    in pins, 1 side 1
+    push iffull noblock side 0; mic data takes max of 43ns (assert delay) + 3(clock delay)ns
 .wrap
+

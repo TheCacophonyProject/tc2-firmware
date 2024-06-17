@@ -133,7 +133,6 @@ impl SharedI2C {
                 }
             };
         }
-
         shared_i2c
     }
 
@@ -359,19 +358,17 @@ impl SharedI2C {
         is_recording: bool,
     ) -> Result<(), Error> {
         let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                //info!("Read raw tc2-agent state {}", state);
-                Ok(state & 1 << 1 == 2)
-            }
+            Ok(state) => Ok(state),
             Err(e) => Err(e),
         };
         match state {
-            Ok(state) => {
-                let mut val = if state { 2 } else { 0 };
-                let flag = if is_recording { 4 } else { 0 };
-                val |= flag;
-                //info!("Set tc2-agent state {}", val);
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+            Ok(mut state) => {
+                if is_recording {
+                    state |= 4;
+                } else {
+                    state &= !4u8;
+                }
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),
                 }
@@ -379,7 +376,18 @@ impl SharedI2C {
             Err(x) => Err(x),
         }
     }
-
+    pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
+            Ok(state) => {
+                let camera_state = CameraState::from(state);
+                match camera_state {
+                    CameraState::PoweredOn | CameraState::PoweringOn => Ok(true),
+                    _ => Ok(false),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
     pub fn pi_is_awake_and_tc2_agent_is_ready(
         &mut self,
         delay: &mut Delay,
@@ -433,11 +441,36 @@ impl SharedI2C {
                         info!("tc2-agent not ready, rp2040 recording",);
                     } else if state == 6 {
                         info!("tc2-agent ready and rp2040 recording",);
+                    } else if state == 10 {
+                        info!("tc2-agent ready and wanting test recording {}", state);
                     } else {
                         info!("tc2-agent unknown state {}", state);
                     }
                 }
                 Ok(state & 1 << 1 == 2)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let rec_state: bool = (state & 1 << 1 == 2) && (state & 0x08 == 0x08);
+                Ok(rec_state)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let val = state & !8u8;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
             }
             Err(e) => Err(e),
         }
@@ -557,10 +590,8 @@ impl SharedI2C {
                 let mut success = true;
                 success = success && self.rtc().clear_alarm_flag().is_ok();
                 success = success && self.rtc().control_alarm_interrupt(Control::Off).is_ok();
-                success = success && self.rtc().control_alarm_day(Control::Off).is_ok();
-                success = success && self.rtc().control_alarm_hours(Control::Off).is_ok();
-                success = success && self.rtc().control_alarm_minutes(Control::Off).is_ok();
-                success = success && self.rtc().control_alarm_weekday(Control::Off).is_ok();
+                success = success && self.rtc().disable_all_alarms().is_ok();
+
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
                 if success {
                     return Ok(());

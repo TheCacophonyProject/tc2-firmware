@@ -417,7 +417,7 @@ impl<'a> CptvStream<'a> {
         crc_table: &'a [u32; 256],
         is_status_recording: bool,
     ) -> CptvStream<'a> {
-        let starting_block_index = flash_storage.start_file();
+        let starting_block_index = flash_storage.start_file(1);
 
         // Camera serial, camera firmware, location_altitude, location_timestamp, location_accuracy
         let cptv_header = Cptv2Header::new(

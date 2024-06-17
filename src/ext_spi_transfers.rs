@@ -2,7 +2,9 @@ use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
 use crate::onboard_flash::extend_lifetime;
+
 use crate::utils::u8_slice_to_u32;
+
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
@@ -11,6 +13,7 @@ use defmt::{info, warn, Format};
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
+
 use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, CH0};
@@ -24,7 +27,6 @@ use rp2040_hal::pio::{
 };
 use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
-
 #[repr(u8)]
 #[derive(Copy, Clone, Format, PartialEq)]
 pub enum ExtTransferMessage {
@@ -187,6 +189,7 @@ impl ExtSpiTransfers {
         critical_section::with(|cs| {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
+
         let _ = alarm.schedule(MicrosDurationU32::micros(300)).unwrap();
         alarm.enable_interrupt();
         critical_section::with(|cs| {
@@ -219,7 +222,6 @@ impl ExtSpiTransfers {
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
         self.ping = Some(ping_pin.into_pull_down_input());
-
         // FIXME - Can we print this when we think the Pi should be awake?
         if finished && pi_is_awake {
             //warn!("Alarm triggered, ping took {}", ping_time);

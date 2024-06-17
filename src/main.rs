@@ -2,35 +2,34 @@
 #![no_main]
 #![allow(dead_code)]
 #![allow(unused_variables)]
-
-mod lepton;
-mod utils;
-
 mod attiny_rtc_i2c;
 mod bsp;
 mod byte_slice_cursor;
 mod clock_utils;
+mod core0_audio;
 mod core0_task;
+mod core1_sub_tasks;
 mod core1_task;
 mod cptv_encoder;
 mod device_config;
 mod event_logger;
 mod ext_spi_transfers;
+mod lepton;
 mod motion_detector;
 mod onboard_flash;
-//mod pdm_microphone;
-mod core1_sub_tasks;
+mod pdm_microphone;
+mod pdmfilter;
 mod rp2040_flash;
 mod sun_times;
-
+mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
+use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
-use crate::onboard_flash::{
-    extend_lifetime_generic, extend_lifetime_generic_mut, extend_lifetime_generic_mut_2,
-};
+use crate::onboard_flash::extend_lifetime_generic;
+use crate::rp2040_flash::read_is_audio_from_rp2040_flash;
 use bsp::{
     entry,
     hal::{
@@ -41,6 +40,11 @@ use bsp::{
     },
     pac::Peripherals,
 };
+use cortex_m::asm::nop;
+use rp2040_hal::rosc::RingOscillator;
+
+use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
+use bsp::hal::watchdog::Watchdog;
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
@@ -55,13 +59,16 @@ use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, SioInput};
 use rp2040_hal::I2C;
-
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
 pub const FIRMWARE_VERSION: u32 = 11;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
-const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
+
+// got funny results at 150 for aduio seems to work better at 125
+const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
+
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
@@ -101,34 +108,44 @@ fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
-    let mut peripherals = Peripherals::take().unwrap();
+    let mut peripherals: Peripherals = Peripherals::take().unwrap();
+    let is_audio = read_is_audio_from_rp2040_flash();
+
+    let freq = if is_audio {
+        ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
+    } else {
+        //for some reason audio comes out faster than expected when using this clock
+        ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz()
+    };
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
         peripherals.ROSC,
-        ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
+        freq,
     );
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
+
     let system_clock_freq = clocks.system_clock.freq().to_Hz();
+
     info!(
         "System clock speed {}MHz",
         clocks.system_clock.freq().to_MHz()
     );
+
     // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
+
     let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
     watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
+
     watchdog.pause_on_debug(true);
     watchdog.start(8388607.micros());
+
     info!("Enabled watchdog timer");
     let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
-    let mut sio = Sio::new(peripherals.SIO);
-
-    let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
-
-    let cores = mc.cores();
-    let core1 = &mut cores[1];
+    let mut delay = Delay::new(core.SYST, system_clock_freq);
+    let sio = Sio::new(peripherals.SIO);
 
     let pins = rp2040_hal::gpio::Pins::new(
         peripherals.IO_BANK0,
@@ -148,7 +165,7 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
-    let mut delay = Delay::new(core.SYST, system_clock_freq);
+
     info!("Initing shared i2c");
     // We need to get the GPIO pin for determining who is using the I2C bus.
     let unlocked_pin = pins
@@ -163,77 +180,148 @@ fn main() -> ! {
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
-    let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
-    if disabled_alarm.is_err() {
-        error!("{}", disabled_alarm.unwrap());
+    if !is_audio {
+        let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+        if disabled_alarm.is_err() {
+            error!("{}", disabled_alarm.unwrap());
+        }
     }
     let (i2c1, unlocked_pin) = shared_i2c.free();
-    // If we're waking up to make an audio recording, do that.
 
-    /*
-    let i2c1 = if let Some(existing_config) = existing_config {
-        info!(
-            "Got device config {:?}, {}",
-            existing_config,
-            existing_config.device_name()
+    if is_audio {
+        let gpio0 = pins.gpio0;
+        let gpio1 = pins.gpio1;
+        let pins = Core1Pins {
+            pi_ping: pins.gpio5.into_pull_down_input(),
+
+            pi_miso: pins.gpio15.into_floating_disabled(),
+            pi_mosi: pins.gpio12.into_floating_disabled(),
+            pi_cs: pins.gpio13.into_floating_disabled(),
+            pi_clk: pins.gpio14.into_floating_disabled(),
+
+            fs_cs: pins.gpio9.into_push_pull_output(),
+            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+        };
+
+        audio_branch(
+            i2c1,
+            system_clock_freq,
+            timer,
+            pins,
+            gpio0,
+            gpio1,
+            watchdog,
+            alarm_woke_us,
+            unlocked_pin,
         );
-        // Try to work out our wakeup reason.  If we're within a recording window, assume that we want
-        // to record thermal video, otherwise make an audio recording and go to sleep.
-
-        // We need a double buffering system of 3 flash pages.
-        // One is the page that is currently being written to by data,
-        // Another is ready to take over when that first buffer is full,
-
-        let mut shared_i2c = SharedI2C::new(i2c1, &mut delay);
-        match shared_i2c.get_datetime(&mut delay) {
-            Ok(now) => {
-                let date_time_utc = get_naive_datetime(now);
-                let is_inside_recording_window =
-                    existing_config.time_is_in_recording_window(&date_time_utc);
-                if !is_inside_recording_window {
-                    info!("Woke outside recording window, lets make an audio recording and go back to sleep?");
-                    let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
-                    let mut microphone = PdmMicrophone::new(
-                        pins.gpio0.into_function().into_pull_type(),
-                        pins.gpio1.into_function().into_pull_type(),
-                        system_clock_freq.Hz(),
-                        pio1,
-                        sm1,
-                    );
-                    let mut front = [0u8; 2180];
-                    let mut back = [0u8; 2180];
-                    let mut front_ptr = &mut &mut front;
-                    let mut back_ptr = &mut &mut back;
-                    while let Some(data) = microphone.record_for_n_seconds(60) {
-                        // TODO: Process and stream the data out to flash before we get the next block.
-                    }
-                }
-            }
-            Err(_) => error!("Unable to get DateTime from RTC"),
-        }
-        shared_i2c.free()
     } else {
-        i2c1
-    };
-     */
+        let lepton_pins = LeptonPins {
+            tx: pins.gpio23.into_function(),
+            rx: pins.gpio20.into_function(),
+            clk: pins.gpio22.into_function(),
+            cs: pins.gpio21.into_function(),
 
-    let lepton_pins = LeptonPins {
-        tx: pins.gpio23.into_function(),
-        rx: pins.gpio20.into_function(),
-        clk: pins.gpio22.into_function(),
-        cs: pins.gpio21.into_function(),
+            vsync: pins.gpio19.into_function(),
 
-        vsync: pins.gpio19.into_function(),
+            sda: pins.gpio24.into_function(),
+            scl: pins.gpio25.into_function(),
 
-        sda: pins.gpio24.into_function(),
-        scl: pins.gpio25.into_function(),
+            power_down: pins.gpio28.into_push_pull_output(),
+            power_enable: pins.gpio18.into_push_pull_output(),
+            reset: pins.gpio29.into_push_pull_output(),
+            clk_disable: pins.gpio27.into_push_pull_output(),
+            master_clk: pins.gpio26.into_floating_input(),
+        };
+        let pins = Core1Pins {
+            pi_ping: pins.gpio5.into_pull_down_input(),
 
-        power_down: pins.gpio28.into_push_pull_output(),
-        power_enable: pins.gpio18.into_push_pull_output(),
-        reset: pins.gpio29.into_push_pull_output(),
-        clk_disable: pins.gpio27.into_push_pull_output(),
-        master_clk: pins.gpio26.into_floating_input(),
-    };
+            pi_miso: pins.gpio15.into_floating_disabled(),
+            pi_mosi: pins.gpio12.into_floating_disabled(),
+            pi_cs: pins.gpio13.into_floating_disabled(),
+            pi_clk: pins.gpio14.into_floating_disabled(),
+
+            fs_cs: pins.gpio9.into_push_pull_output(),
+            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+        };
+        thermal_code(
+            lepton_pins,
+            pins,
+            watchdog,
+            system_clock_freq,
+            delay,
+            timer,
+            i2c1,
+            clocks,
+            rosc,
+            alarm_woke_us,
+            unlocked_pin,
+        );
+    }
+}
+use crate::attiny_rtc_i2c::I2CConfig;
+
+pub fn audio_branch(
+    i2c_config: I2CConfig,
+    clock_freq: u32,
+    mut timer: bsp::hal::Timer,
+    pins: Core1Pins,
+    gpio0: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio0,
+        rp2040_hal::gpio::FunctionNull,
+        rp2040_hal::gpio::PullDown,
+    >,
+    gpio1: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio1,
+        rp2040_hal::gpio::FunctionNull,
+        rp2040_hal::gpio::PullDown,
+    >,
+    mut watchdog: bsp::hal::Watchdog,
+    alarm_triggered: bool,
+    unlocked_pin: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio3,
+        FunctionSio<SioInput>,
+        PullDown,
+    >,
+) -> ! {
+    audio_task(
+        i2c_config,
+        clock_freq,
+        &mut timer,
+        pins,
+        gpio0,
+        gpio1,
+        &mut watchdog,
+        alarm_triggered,
+        unlocked_pin,
+    );
+}
+pub fn thermal_code(
+    lepton_pins: LeptonPins,
+    pins: Core1Pins,
+    mut watchdog: Watchdog,
+    system_clock_freq: u32,
+    mut delay: Delay,
+    timer: bsp::hal::Timer,
+    i2c1: I2CConfig,
+    clocks: &ClocksManager,
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    alarm_woke_us: bool,
+    unlocked_pin: rp2040_hal::gpio::Pin<
+        rp2040_hal::gpio::bank0::Gpio3,
+        FunctionSio<SioInput>,
+        PullDown,
+    >,
+) -> ! {
+    let mut peripherals = unsafe { Peripherals::steal() };
+    let mut sio = Sio::new(peripherals.SIO);
+    let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
+
+    let cores = mc.cores();
+    let core1 = &mut cores[1];
     let mut lepton = init_lepton_module(
         peripherals.SPI0,
         peripherals.I2C0,
@@ -276,19 +364,6 @@ fn main() -> ! {
     watchdog.disable();
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
         let _ = core1.spawn(
             unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) },
             move || {
@@ -314,6 +389,12 @@ fn main() -> ! {
         .write_blocking(if radiometric_mode { 2 } else { 1 });
 
     let result = sio.fifo.read_blocking();
+    if result == Core1Task::RequestReset.into() {
+        watchdog.start(100.micros());
+        loop {
+            nop();
+        }
+    }
     crate::assert_eq!(result, Core1Task::Ready.into());
 
     frame_acquisition_loop(

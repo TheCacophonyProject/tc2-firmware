@@ -19,12 +19,20 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
+    pub is_audio_device: bool,
 }
 
-#[derive(PartialEq)]
 pub struct DeviceConfig {
     config_inner: DeviceConfigInner,
     pub motion_detection_mask: DetectionMask,
+    pub cursor_position: usize,
+}
+
+impl PartialEq for DeviceConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.config_inner == other.config_inner
+            && self.motion_detection_mask == other.motion_detection_mask
+    }
 }
 
 impl Format for DeviceConfig {
@@ -48,26 +56,33 @@ impl Default for DeviceConfig {
                 end_recording_time: (false, 0),
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
+                is_audio_device: false,
             },
             motion_detection_mask: DetectionMask::new(None),
+            cursor_position: 0,
         }
     }
 }
-
+pub fn is_audio() -> bool {
+    DeviceConfig::load_existing_config_from_flash()
+        .map(|config| config.config().is_audio_device)
+        .unwrap_or_default()
+}
 impl DeviceConfig {
     pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
         let slice = read_device_config_from_rp2040_flash();
-        let (device_config, _) = DeviceConfig::from_bytes(slice);
+        let device_config = DeviceConfig::from_bytes(slice);
         device_config
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> (Option<DeviceConfig>, usize) {
+    pub fn from_bytes(bytes: &[u8]) -> Option<DeviceConfig> {
         let mut cursor = Cursor::new(bytes);
         let device_id = cursor.read_u32();
         if device_id == u32::MAX {
             // Device config is uninitialised in flash
-            return (None, 0);
+            return None;
         }
+        let is_audio_device = cursor.read_bool();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -93,37 +108,34 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
+        // let mask_length = cursor.read_i32();
+        let mut cursor_pos = cursor.position();
         let mut motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
-        let len_before_mask = cursor.position();
         let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
-        let mut used_mask = true;
+
         if len != motion_detection_mask.inner.len() {
             // This payload came without the mask attached (i.e. from the rPi)
             motion_detection_mask.set_empty();
-            used_mask = false;
+        } else {
+            cursor_pos = cursor.position();
         }
-        (
-            Some(DeviceConfig {
-                config_inner: DeviceConfigInner {
-                    device_id,
-                    device_name,
-                    location: (latitude, longitude),
-                    location_altitude,
-                    location_timestamp,
-                    location_accuracy,
-                    start_recording_time,
-                    end_recording_time,
-                    is_continuous_recorder,
-                    use_low_power_mode,
-                },
-                motion_detection_mask,
-            }),
-            if used_mask {
-                cursor.position()
-            } else {
-                len_before_mask
+        Some(DeviceConfig {
+            config_inner: DeviceConfigInner {
+                device_id,
+                device_name,
+                location: (latitude, longitude),
+                location_altitude,
+                location_timestamp,
+                location_accuracy,
+                start_recording_time,
+                end_recording_time,
+                is_continuous_recorder,
+                use_low_power_mode,
+                is_audio_device,
             },
-        )
+            motion_detection_mask,
+            cursor_position: cursor_pos,
+        })
     }
 
     pub fn config(&self) -> &DeviceConfigInner {

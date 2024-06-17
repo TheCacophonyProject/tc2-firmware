@@ -28,6 +28,8 @@ pub enum LoggerEventKind {
     Rp2040WokenByAlarm,
     RtcCommError,
     AttinyCommError,
+    Rp2040MissedAudioAlarm(u64),
+    AudioRecordingFailed,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -53,6 +55,8 @@ impl Into<u16> for LoggerEventKind {
             Rp2040WokenByAlarm => 17,
             RtcCommError => 18,
             AttinyCommError => 19,
+            Rp2040MissedAudioAlarm(_) => 20,
+            AudioRecordingFailed => 21,
         }
     }
 }
@@ -82,6 +86,8 @@ impl TryFrom<u16> for LoggerEventKind {
             17 => Ok(Rp2040WokenByAlarm),
             18 => Ok(RtcCommError),
             19 => Ok(AttinyCommError),
+            20 => Ok(Rp2040MissedAudioAlarm(0)),
+            21 => Ok(AudioRecordingFailed),
             _ => Err(()),
         }
     }
@@ -167,6 +173,7 @@ impl EventLogger {
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index as isize / 256);
         let page = ((event_index % 256) / 4) as isize;
         let page_offset = (event_index % 4) * 64; // Allocate 64 bytes for each event
+
         if block >= 2048 {
             None
         } else if flash_storage.read_page(block, page).is_ok() {
@@ -183,7 +190,7 @@ impl EventLogger {
     }
 
     pub fn has_events_to_offload(&self) -> bool {
-        self.next_event_index.is_some_and(|index| index != 0)
+        self.count() != 0
     }
 
     pub fn clear(&mut self, flash_storage: &mut OnboardFlash) {
@@ -191,11 +198,9 @@ impl EventLogger {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
             let end_block_index = 2048;
             for block_index in start_block_index..end_block_index {
-                while flash_storage.bad_blocks.contains(&(block_index as i16)) {
+                if flash_storage.bad_blocks.contains(&(block_index as i16)) {
                     info!("Skipping erase of bad block {}", block_index);
-                    continue;
-                }
-                if !flash_storage.erase_block(block_index).is_ok() {
+                } else if !flash_storage.erase_block(block_index).is_ok() {
                     error!("Block erase failed for block {}", block_index);
                 }
             }
@@ -262,6 +267,10 @@ impl EventLogger {
         Self::get_event_at_index(index, flash_storage)
     }
 
+    pub fn is_nearly_full(&self) -> bool {
+        self.count() >= (MAX_EVENTS_IN_LOGGER - 3)
+    }
+
     pub fn log_event(&mut self, event: LoggerEvent, flash_storage: &mut OnboardFlash) {
         if self.count() < MAX_EVENTS_IN_LOGGER {
             if let Some(next_event_index) = &mut self.next_event_index {
@@ -269,6 +278,8 @@ impl EventLogger {
                 LittleEndian::write_u16(&mut event_data[0..2], event.event.into());
                 LittleEndian::write_u64(&mut event_data[2..10], event.timestamp);
                 if let LoggerEventKind::SetAlarm(alarm_time) = event.event {
+                    LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
+                } else if let LoggerEventKind::Rp2040MissedAudioAlarm(alarm_time) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
                 }
                 // Write to the end of the flash storage.
