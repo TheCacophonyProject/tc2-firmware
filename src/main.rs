@@ -41,10 +41,7 @@ use bsp::{
 };
 use chrono::{NaiveDateTime, Timelike};
 use cortex_m::asm::nop;
-use device_config::{
-    get_naive_datetime, next_or_current_recording_window_non, time_is_in_recording_window_non,
-    AudioMode, DeviceConfig,
-};
+use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use rp2040_hal::rosc::RingOscillator;
 
 use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
@@ -113,10 +110,9 @@ fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let config = DeviceConfig::load_existing_minimal_config_from_flash().unwrap();
-    let mut is_audio = config.0;
-    info!("CONFIG IS {}", config);
-    // let mut is_audio = false;
+    let mut config = DeviceConfig::load_existing_inner_config_from_flash();
+    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -196,30 +192,22 @@ fn main() -> ! {
         Err(_) => crate::panic!("Unable to get DateTime from RTC"),
     }
 
-    if config.0 {
+    if is_audio {
         let in_window;
-        match config.1 {
+        let config = config.unwrap().0;
+        match config.audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                let (start_time, end_time) = next_or_current_recording_window_non(
-                    config.5 .0,
-                    config.5 .1,
-                    config.6 .0,
-                    config.6 .1,
-                    config.2,
-                    config.3,
-                    config.4,
-                    &date_time,
-                );
+                let (start_time, end_time) = config.next_or_current_recording_window(&date_time);
 
-                in_window =
-                    time_is_in_recording_window_non(start_time, end_time, &date_time, &None);
-                info!("Is in window{} ", in_window);
+                in_window = config.time_is_in_recording_window(&date_time, &None);
+
+                info!("Is in window {}", in_window);
                 is_audio = !in_window;
             }
             _ => in_window = false,
         }
 
-        if let AudioMode::AudioAndThermal = config.1 {
+        if let AudioMode::AudioAndThermal = config.audio_mode {
             if in_window {
                 is_audio = false;
                 info!("Checking if agent requested rec");
@@ -234,7 +222,6 @@ fn main() -> ! {
         }
     }
     let (i2c1, unlocked_pin) = shared_i2c.free();
-
     if is_audio {
         let gpio0 = pins.gpio0;
         let gpio1 = pins.gpio1;
@@ -395,7 +382,7 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new(); //39060
     let mut fb1 = FrameBuffer::new(); //39060
-    let mut core1_stack: Stack<45000> = Stack::new(); //180000
+    let mut core1_stack: Stack<44940> = Stack::new(); //180000
                                                       //258.12 out of a total of 260.49536
                                                       //leaves 2.37536KB
 

@@ -142,18 +142,36 @@ pub fn audio_task(
         Err(_) => error!("Unable to get DateTime from RTC"),
     }
 
-    let mut scheduled: bool =
+    let scheduled: bool =
         alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
+    let mut reschedule = !scheduled;
 
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
     watchdog.feed();
-    let should_wake = should_offload_audio_recordings(
-        &mut flash_storage,
-        &mut event_logger,
-        &mut delay,
-        &mut shared_i2c,
-        synced_date_time.date_time_utc,
-    );
+
+    let mut should_wake = false;
+    match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+            let in_window = device_config
+                .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(timer), &None);
+            if !in_window {
+                let is_cptv = flash_storage.has_cptv_files(true);
+                info!("last is cptv? {}", is_cptv);
+                if is_cptv {
+                    should_wake = true;
+                }
+            }
+        }
+        (_) => {}
+    }
+    should_wake = should_wake
+        || should_offload_audio_recordings(
+            &mut flash_storage,
+            &mut event_logger,
+            &mut delay,
+            &mut shared_i2c,
+            synced_date_time.date_time_utc,
+        );
 
     let mut do_recording = alarm_triggered;
 
@@ -183,7 +201,7 @@ pub fn audio_task(
             device_config = new_config.unwrap();
             if was_updated {
                 let reboot;
-                if device_config.config().is_audio_device && !thermal_requested_audio {
+                if device_config.config().is_audio_device() && !thermal_requested_audio {
                     if let AudioMode::AudioOnly = device_config.config().audio_mode {
                         reboot = false;
                     } else {
@@ -192,9 +210,21 @@ pub fn audio_task(
                         reboot = in_window;
                     }
                 } else {
-                    reboot = !device_config.config().is_audio_device
+                    reboot = !device_config.config().is_audio_device()
                 }
 
+                // match device_config.config().audio_mode {
+                //     AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                //         //thermal alarm check the time represents next thermal start time
+                //         let (start, end) = device_config
+                //             .next_or_current_recording_window(&synced_date_time.get_adjusted_dt(timer));
+                //         if start.hour() != alarm_hours as u32 || start.minute() != alarm_minutes as u32 {
+                //             //config may of changed so reset the alarm
+                //             reschedule = true;
+                //         }
+                //     }
+                //     _ => (),
+                // }
                 if reboot {
                     let _ = shared_i2c.disable_alarm(&mut delay);
                     clear_flash_alarm();
@@ -216,7 +246,6 @@ pub fn audio_task(
             }
         }
     }
-    let mut reschedule = !scheduled;
     info!(
         "ALarm triggered {} scheduled {}",
         alarm_triggered, scheduled
@@ -352,20 +381,18 @@ pub fn audio_task(
         }
     }
 
+    if thermal_requested_audio {
+        //if audio requested from thermal, the alarm will be re scheduled there
+        let _ = shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
+        info!("Audio taken in thermal window clearing flag");
+        watchdog.start(100.micros());
+        loop {
+            nop();
+        }
+    }
+
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
-    match device_config.config().audio_mode {
-        AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-            //thermal alarm check the time represents next thermal start time
-            let (start, end) = device_config
-                .next_or_current_recording_window(&synced_date_time.get_adjusted_dt(timer));
-            if start.hour() != alarm_hours as u32 || start.minute() != alarm_minutes as u32 {
-                //config may of changed so reset the alarm
-                reschedule = true;
-            }
-        }
-        _ => (),
-    }
 
     if reschedule {
         watchdog.feed();
@@ -417,14 +444,6 @@ pub fn audio_task(
         );
     }
 
-    if thermal_requested_audio {
-        let _ = shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
-        info!("Audio taken in thermal window clearing flag");
-        watchdog.start(100.micros());
-        loop {
-            nop();
-        }
-    }
     if do_recording && take_test_rec {
         //means we didn't take the test rec as it was a normal rec time
         watchdog.start(100.micros());

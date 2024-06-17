@@ -364,6 +364,57 @@ impl OnboardFlash {
         self.spi_write(&[SET_FEATURES, FEATURE_BLOCK_LOCK, 0x00]);
         self.wait_for_ready();
     }
+
+    pub fn has_cptv_files(&mut self, only_last: bool) -> bool {
+        if !self.has_files_to_offload() {
+            return false;
+        }
+        let mut is_last = false;
+        let mut page_index = 0;
+        let mut is_cptv: Option<bool> = None;
+        info!(
+            "Checking files from {}:{} current block {}",
+            self.last_used_block_index, self.current_page_index, self.current_block_index
+        );
+        //only need to check last used page in a block and first page
+        for block_index in (0..=self.last_used_block_index.unwrap()).rev() {
+            info!("READING BLOCK {}", block_index);
+            while page_index >= 0 {
+                //find first used page
+                self.read_page(block_index, page_index).unwrap();
+                self.read_page_from_cache(block_index);
+                info!("Reading page {}:{} ", block_index, page_index,);
+                page_index -= 1;
+                if !self.current_page.page_is_used() {
+                    continue;
+                }
+
+                if is_cptv.is_none() {
+                    //first page
+                    is_cptv = Some(self.current_page.user_data()[0] != 1);
+                }
+
+                is_last = self.current_page.is_last_page_for_file();
+                if is_last {
+                    info!("Is last{}", is_last);
+                    if only_last || is_cptv.unwrap() {
+                        return is_cptv.unwrap();
+                    }
+                    break;
+                }
+                is_cptv = Some(self.current_page.user_data()[0] != 1);
+                break;
+            }
+            page_index = 63;
+        }
+
+        //only one file exists
+        info!("checking 0:0");
+        self.read_page(0, 0).unwrap();
+        self.read_page_from_cache(0);
+        return self.current_page.user_data()[0] != 1;
+    }
+
     pub fn scan(&mut self) {
         let mut bad_blocks = [i16::MAX; 40];
         self.first_used_block_index = None;

@@ -10,9 +10,10 @@ use pcf8563::DateTime;
 #[derive(Format, PartialEq)]
 
 pub enum AudioMode {
-    AudioOnly = 0,
-    AudioOrThermal = 1,
-    AudioAndThermal = 2,
+    Disabled = 0,
+    AudioOnly = 1,
+    AudioOrThermal = 2,
+    AudioAndThermal = 3,
 }
 // impl PartialEq for AudioMode {
 //     fn eq(&self, other: &Self) -> bool {
@@ -31,9 +32,10 @@ impl TryFrom<u8> for AudioMode {
         use AudioMode::*;
 
         match value {
-            0 => Ok(AudioOnly),
-            1 => Ok(AudioOrThermal),
-            2 => Ok(AudioAndThermal),
+            0 => Ok(Disabled),
+            1 => Ok(AudioOnly),
+            2 => Ok(AudioOrThermal),
+            3 => Ok(AudioAndThermal),
             _ => Err(()),
         }
     }
@@ -50,8 +52,186 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
-    pub is_audio_device: bool,
     pub audio_mode: AudioMode,
+}
+
+impl DeviceConfigInner {
+    pub fn is_continuous_recorder(&self) -> bool {
+        self.is_continuous_recorder
+            || (self.start_recording_time.0
+                && self.end_recording_time.0
+                && self.start_recording_time == self.end_recording_time)
+    }
+
+    pub fn is_audio_device(&self) -> bool {
+        return self.audio_mode != AudioMode::Disabled;
+    }
+
+    pub fn time_is_in_recording_window(
+        &self,
+        date_time_utc: &NaiveDateTime,
+        window: &Option<(NaiveDateTime, NaiveDateTime)>,
+    ) -> bool {
+        if self.is_continuous_recorder() {
+            info!("Continuous recording mode enabled");
+            return true;
+        }
+        let (start_time, end_time) =
+            window.unwrap_or(self.next_or_current_recording_window(date_time_utc));
+        let starts_in = start_time - *date_time_utc;
+        let starts_in_hours = starts_in.num_hours();
+        let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
+        let ends_in = end_time - *date_time_utc;
+        let ends_in_hours = ends_in.num_hours();
+        let ends_in_mins = ends_in.num_minutes() - (ends_in_hours * 60);
+        let window = end_time - start_time;
+        let window_hours = window.num_hours();
+        let window_mins = window.num_minutes() - (window_hours * 60);
+        if start_time > *date_time_utc && end_time > *date_time_utc {
+            info!(
+                "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
+                starts_in_hours,
+                starts_in_mins,
+                ends_in_hours,
+                ends_in_mins,
+                window_hours,
+                window_mins
+            );
+        } else if end_time > *date_time_utc {
+            info!(
+                "Recording will end in {}h{}m, window duration {}h{}m",
+                ends_in_hours, ends_in_mins, window_hours, window_mins
+            );
+        }
+        *date_time_utc >= start_time && *date_time_utc <= end_time
+    }
+    pub fn next_or_current_recording_window(
+        &self,
+        now_utc: &NaiveDateTime,
+    ) -> (NaiveDateTime, NaiveDateTime) {
+        let (is_absolute_start, mut start_offset) = self.start_recording_time;
+        let (is_absolute_end, mut end_offset) = self.end_recording_time;
+
+        if is_absolute_end && end_offset < 0 {
+            end_offset = 86_400 + end_offset;
+        }
+        if is_absolute_start && start_offset < 0 {
+            start_offset = 86_400 + start_offset;
+        }
+        let (window_start, window_end) = if !is_absolute_start || !is_absolute_end {
+            let (lat, lng) = self.location;
+            let altitude = self.location_altitude;
+            let yesterday_utc = *now_utc - Duration::days(1);
+            let (_, yesterday_sunset) = sun_times(
+                yesterday_utc.date(),
+                lat as f64,
+                lng as f64,
+                altitude.unwrap_or(0.0) as f64,
+            )
+            .unwrap();
+            let yesterday_sunset =
+                yesterday_sunset.naive_utc() + Duration::seconds(start_offset as i64);
+            let (today_sunrise, today_sunset) = sun_times(
+                now_utc.date(),
+                lat as f64,
+                lng as f64,
+                altitude.unwrap_or(0.0) as f64,
+            )
+            .unwrap();
+            let today_sunrise = today_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
+            let today_sunset = today_sunset.naive_utc() + Duration::seconds(start_offset as i64);
+            let tomorrow_utc = *now_utc + Duration::days(1);
+            let (tomorrow_sunrise, tomorrow_sunset) = sun_times(
+                tomorrow_utc.date(),
+                lat as f64,
+                lng as f64,
+                altitude.unwrap_or(0.0) as f64,
+            )
+            .unwrap();
+            let tomorrow_sunrise =
+                tomorrow_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
+            let tomorrow_sunset =
+                tomorrow_sunset.naive_utc() + Duration::seconds(start_offset as i64);
+
+            if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
+                let two_days_from_now_utc = *now_utc + Duration::days(2);
+                let (two_days_sunrise, _) = sun_times(
+                    two_days_from_now_utc.date(),
+                    lat as f64,
+                    lng as f64,
+                    altitude.unwrap_or(0.0) as f64,
+                )
+                .unwrap();
+                let two_days_sunrise =
+                    two_days_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
+                (Some(tomorrow_sunset), Some(two_days_sunrise))
+            } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
+                || (*now_utc < today_sunset && *now_utc > today_sunrise)
+            {
+                (Some(today_sunset), Some(tomorrow_sunrise))
+            } else if *now_utc < tomorrow_sunset
+                && *now_utc < today_sunrise
+                && *now_utc > yesterday_sunset
+            {
+                (Some(yesterday_sunset), Some(today_sunrise))
+            } else {
+                panic!("Unable to calculate relative time window");
+            }
+        } else {
+            (None, None)
+        };
+
+        let mut start_time = if !is_absolute_start {
+            window_start.unwrap()
+        } else {
+            NaiveDateTime::new(
+                now_utc.date(),
+                NaiveTime::from_num_seconds_from_midnight_opt(start_offset as u32, 0).unwrap(),
+            )
+        };
+        let mut end_time = if !is_absolute_end {
+            window_end.unwrap()
+        } else {
+            NaiveDateTime::new(
+                now_utc.date(),
+                NaiveTime::from_num_seconds_from_midnight_opt(end_offset as u32, 0).unwrap(),
+            )
+        };
+
+        if is_absolute_start || is_absolute_end {
+            let start_minus_one_day = start_time - Duration::days(1);
+            let mut start_plus_one_day = start_time + Duration::days(1);
+            let mut end_minus_one_day = end_time - Duration::days(1);
+            let end_plus_one_day = end_time + Duration::days(1);
+
+            if start_minus_one_day > end_minus_one_day {
+                end_minus_one_day = end_minus_one_day + Duration::days(1);
+            }
+            if start_plus_one_day > end_plus_one_day {
+                start_plus_one_day = start_time;
+            }
+            if end_minus_one_day > *now_utc {
+                if is_absolute_start {
+                    start_time = start_minus_one_day;
+                }
+                if is_absolute_end {
+                    end_time = end_minus_one_day;
+                }
+            }
+            if end_time < start_time && is_absolute_end {
+                end_time = end_plus_one_day;
+            }
+            if *now_utc > end_time {
+                if is_absolute_start {
+                    start_time = start_plus_one_day;
+                }
+                if is_absolute_end {
+                    end_time = end_plus_one_day;
+                }
+            }
+        }
+        (start_time, end_time)
+    }
 }
 
 pub struct DeviceConfig {
@@ -88,8 +268,7 @@ impl Default for DeviceConfig {
                 end_recording_time: (false, 0),
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
-                is_audio_device: false,
-                audio_mode: AudioMode::try_from(0).ok().unwrap(),
+                audio_mode: AudioMode::Disabled,
             },
             motion_detection_mask: DetectionMask::new(None),
             cursor_position: 0,
@@ -98,94 +277,28 @@ impl Default for DeviceConfig {
 }
 
 impl DeviceConfig {
-    pub fn load_existing_minimal_config_from_flash() -> Option<(
-        bool,
-        AudioMode,
-        f32,
-        f32,
-        Option<f32>,
-        (bool, i32),
-        (bool, i32),
-        bool,
-    )> {
-        let slice = read_device_config_from_rp2040_flash();
-        let device_config = DeviceConfig::from_bytes_minimal(slice);
-        device_config
-    }
-
-    pub fn from_bytes_minimal(
-        bytes: &[u8],
-    ) -> Option<(
-        bool,
-        AudioMode,
-        f32,
-        f32,
-        Option<f32>,
-        (bool, i32),
-        (bool, i32),
-        bool,
-    )> {
-        let mut cursor = Cursor::new(bytes);
-        let device_id = cursor.read_u32();
-        if device_id == u32::MAX {
-            // Device config is uninitialised in flash
-            return None;
-        }
-        let is_audio_device = cursor.read_bool();
-        let audio_mode = AudioMode::try_from(cursor.read_u8())
-            .ok()
-            .unwrap_or(AudioMode::AudioOnly);
-        //.unwrap();
-        let latitude = cursor.read_f32();
-        let longitude = cursor.read_f32();
-        cursor.set_position(cursor.position() + 1 + 8);
-
-        let has_location_altitude = cursor.read_bool();
-        let location_altitude = cursor.read_f32();
-        let location_altitude = has_location_altitude.then_some(location_altitude);
-
-        cursor.set_position(cursor.position() + 1 + 4);
-        // let has_location_timestamp = cursor.read_bool();
-        // let location_timestamp = cursor.read_u64();
-        // let location_timestamp = has_location_timestamp.then_some(location_timestamp);
-        // let has_location_altitude = cursor.read_bool();
-        // let location_altitude = cursor.read_f32();
-        // let location_altitude = has_location_altitude.then_some(location_altitude);
-        // let has_location_accuracy = cursor.read_bool();
-        // let location_accuracy = cursor.read_f32();
-        // let location_accuracy = has_location_accuracy.then_some(location_accuracy);
-
-        let start_recording_time = (cursor.read_bool(), cursor.read_i32());
-        let end_recording_time = (cursor.read_bool(), cursor.read_i32());
-        let is_continuous_recorder = cursor.read_bool();
-        return Some((
-            is_audio_device,
-            audio_mode,
-            latitude,
-            longitude,
-            location_altitude,
-            start_recording_time,
-            end_recording_time,
-            is_continuous_recorder,
-        ));
-    }
     pub fn load_existing_config_from_flash() -> Option<DeviceConfig> {
         let slice = read_device_config_from_rp2040_flash();
         let device_config = DeviceConfig::from_bytes(slice);
         device_config
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Option<DeviceConfig> {
+    pub fn load_existing_inner_config_from_flash() -> Option<(DeviceConfigInner, usize)> {
+        let slice = read_device_config_from_rp2040_flash();
+        let device_config = DeviceConfig::inner_from_bytes(slice);
+        device_config
+    }
+
+    pub fn inner_from_bytes(bytes: &[u8]) -> Option<(DeviceConfigInner, usize)> {
         let mut cursor = Cursor::new(bytes);
         let device_id = cursor.read_u32();
         if device_id == u32::MAX {
             // Device config is uninitialised in flash
             return None;
         }
-        let is_audio_device = cursor.read_bool();
         let audio_mode = AudioMode::try_from(cursor.read_u8())
             .ok()
-            .unwrap_or(AudioMode::AudioOnly);
+            .unwrap_or(AudioMode::Disabled);
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -211,8 +324,35 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
+
+        Some((
+            DeviceConfigInner {
+                device_id,
+                device_name,
+                location: (latitude, longitude),
+                location_altitude,
+                location_timestamp,
+                location_accuracy,
+                start_recording_time,
+                end_recording_time,
+                is_continuous_recorder,
+                use_low_power_mode,
+                audio_mode,
+            },
+            cursor.position(),
+        ))
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Option<DeviceConfig> {
+        let inner = Self::inner_from_bytes(bytes);
+
+        if inner.is_none() {
+            // Device config is uninitialised in flash
+            return None;
+        }
+        let (inner, mut cursor_pos) = inner.unwrap();
         // let mask_length = cursor.read_i32();
-        let mut cursor_pos = cursor.position();
+        let mut cursor = Cursor::new(bytes);
+        cursor.set_position(cursor_pos);
         let mut motion_detection_mask;
         motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
         let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
@@ -225,20 +365,7 @@ impl DeviceConfig {
         }
 
         Some(DeviceConfig {
-            config_inner: DeviceConfigInner {
-                device_id,
-                device_name,
-                location: (latitude, longitude),
-                location_altitude,
-                location_timestamp,
-                location_accuracy,
-                start_recording_time,
-                end_recording_time,
-                is_continuous_recorder,
-                use_low_power_mode,
-                is_audio_device,
-                audio_mode,
-            },
+            config_inner: inner,
             motion_detection_mask,
             cursor_position: cursor_pos,
         })
@@ -271,28 +398,7 @@ impl DeviceConfig {
         &self,
         now_utc: &NaiveDateTime,
     ) -> (NaiveDateTime, NaiveDateTime) {
-        let (is_absolute_start, mut start_offset) = self.config_inner.start_recording_time;
-        let (is_absolute_end, mut end_offset) = self.config_inner.end_recording_time;
-
-        if is_absolute_end && end_offset < 0 {
-            end_offset = 86_400 + end_offset;
-        }
-        if is_absolute_start && start_offset < 0 {
-            start_offset = 86_400 + start_offset;
-        }
-        let (lat, lng) = self.config_inner.location;
-        let altitude = self.config_inner.location_altitude;
-
-        next_or_current_recording_window_non(
-            is_absolute_start,
-            start_offset,
-            is_absolute_end,
-            end_offset,
-            lat,
-            lng,
-            altitude,
-            now_utc,
-        )
+        self.config_inner.next_or_current_recording_window(now_utc)
     }
 
     pub fn time_is_in_daylight(&self, date_time_utc: &NaiveDateTime) -> bool {
@@ -313,20 +419,8 @@ impl DeviceConfig {
         date_time_utc: &NaiveDateTime,
         window: &Option<(NaiveDateTime, NaiveDateTime)>,
     ) -> bool {
-        if self.is_continuous_recorder() {
-            info!("Continuous recording mode enabled");
-            return true;
-        }
-        let (start_time, end_time) =
-            window.unwrap_or(self.next_or_current_recording_window(date_time_utc));
-        time_is_in_recording_window_non(start_time, end_time, date_time_utc, window)
-    }
-
-    pub fn is_continuous_recorder(&self) -> bool {
-        self.config_inner.is_continuous_recorder
-            || (self.config_inner.start_recording_time.0
-                && self.config_inner.end_recording_time.0
-                && self.config_inner.start_recording_time == self.config_inner.end_recording_time)
+        self.config_inner
+            .time_is_in_recording_window(date_time_utc, window)
     }
 }
 
@@ -357,160 +451,4 @@ pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
     }
     let naive_datetime = NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());
     naive_datetime
-}
-
-pub fn time_is_in_recording_window_non(
-    start_time: NaiveDateTime,
-    end_time: NaiveDateTime,
-    date_time_utc: &NaiveDateTime,
-    window: &Option<(NaiveDateTime, NaiveDateTime)>,
-) -> bool {
-    let starts_in = start_time - *date_time_utc;
-    let starts_in_hours = starts_in.num_hours();
-    let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
-    let ends_in = end_time - *date_time_utc;
-    let ends_in_hours = ends_in.num_hours();
-    let ends_in_mins = ends_in.num_minutes() - (ends_in_hours * 60);
-    let window = end_time - start_time;
-    let window_hours = window.num_hours();
-    let window_mins = window.num_minutes() - (window_hours * 60);
-    if start_time > *date_time_utc && end_time > *date_time_utc {
-        info!(
-            "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
-            starts_in_hours, starts_in_mins, ends_in_hours, ends_in_mins, window_hours, window_mins
-        );
-    } else if end_time > *date_time_utc {
-        info!(
-            "Recording will end in {}h{}m, window duration {}h{}m",
-            ends_in_hours, ends_in_mins, window_hours, window_mins
-        );
-    }
-    *date_time_utc >= start_time && *date_time_utc <= end_time
-}
-
-pub fn next_or_current_recording_window_non(
-    is_absolute_start: bool,
-    mut start_offset: i32,
-    is_absolute_end: bool,
-    mut end_offset: i32,
-    lat: f32,
-    lng: f32,
-    altitude: Option<f32>,
-    now_utc: &NaiveDateTime,
-) -> (NaiveDateTime, NaiveDateTime) {
-    if is_absolute_end && end_offset < 0 {
-        end_offset = 86_400 + end_offset;
-    }
-    if is_absolute_start && start_offset < 0 {
-        start_offset = 86_400 + start_offset;
-    }
-    let (window_start, window_end) = if !is_absolute_start || !is_absolute_end {
-        let yesterday_utc = *now_utc - Duration::days(1);
-        let (_, yesterday_sunset) = sun_times(
-            yesterday_utc.date(),
-            lat as f64,
-            lng as f64,
-            altitude.unwrap_or(0.0) as f64,
-        )
-        .unwrap();
-        let yesterday_sunset =
-            yesterday_sunset.naive_utc() + Duration::seconds(start_offset as i64);
-        let (today_sunrise, today_sunset) = sun_times(
-            now_utc.date(),
-            lat as f64,
-            lng as f64,
-            altitude.unwrap_or(0.0) as f64,
-        )
-        .unwrap();
-        let today_sunrise = today_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-        let today_sunset = today_sunset.naive_utc() + Duration::seconds(start_offset as i64);
-        let tomorrow_utc = *now_utc + Duration::days(1);
-        let (tomorrow_sunrise, tomorrow_sunset) = sun_times(
-            tomorrow_utc.date(),
-            lat as f64,
-            lng as f64,
-            altitude.unwrap_or(0.0) as f64,
-        )
-        .unwrap();
-        let tomorrow_sunrise = tomorrow_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-        let tomorrow_sunset = tomorrow_sunset.naive_utc() + Duration::seconds(start_offset as i64);
-
-        if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
-            let two_days_from_now_utc = *now_utc + Duration::days(2);
-            let (two_days_sunrise, _) = sun_times(
-                two_days_from_now_utc.date(),
-                lat as f64,
-                lng as f64,
-                altitude.unwrap_or(0.0) as f64,
-            )
-            .unwrap();
-            let two_days_sunrise =
-                two_days_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-            (Some(tomorrow_sunset), Some(two_days_sunrise))
-        } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
-            || (*now_utc < today_sunset && *now_utc > today_sunrise)
-        {
-            (Some(today_sunset), Some(tomorrow_sunrise))
-        } else if *now_utc < tomorrow_sunset
-            && *now_utc < today_sunrise
-            && *now_utc > yesterday_sunset
-        {
-            (Some(yesterday_sunset), Some(today_sunrise))
-        } else {
-            panic!("Unable to calculate relative time window");
-        }
-    } else {
-        (None, None)
-    };
-
-    let mut start_time = if !is_absolute_start {
-        window_start.unwrap()
-    } else {
-        NaiveDateTime::new(
-            now_utc.date(),
-            NaiveTime::from_num_seconds_from_midnight_opt(start_offset as u32, 0).unwrap(),
-        )
-    };
-    let mut end_time = if !is_absolute_end {
-        window_end.unwrap()
-    } else {
-        NaiveDateTime::new(
-            now_utc.date(),
-            NaiveTime::from_num_seconds_from_midnight_opt(end_offset as u32, 0).unwrap(),
-        )
-    };
-
-    if is_absolute_start || is_absolute_end {
-        let start_minus_one_day = start_time - Duration::days(1);
-        let mut start_plus_one_day = start_time + Duration::days(1);
-        let mut end_minus_one_day = end_time - Duration::days(1);
-        let end_plus_one_day = end_time + Duration::days(1);
-
-        if start_minus_one_day > end_minus_one_day {
-            end_minus_one_day = end_minus_one_day + Duration::days(1);
-        }
-        if start_plus_one_day > end_plus_one_day {
-            start_plus_one_day = start_time;
-        }
-        if end_minus_one_day > *now_utc {
-            if is_absolute_start {
-                start_time = start_minus_one_day;
-            }
-            if is_absolute_end {
-                end_time = end_minus_one_day;
-            }
-        }
-        if end_time < start_time && is_absolute_end {
-            end_time = end_plus_one_day;
-        }
-        if *now_utc > end_time {
-            if is_absolute_start {
-                start_time = start_plus_one_day;
-            }
-            if is_absolute_end {
-                end_time = end_plus_one_day;
-            }
-        }
-    }
-    (start_time, end_time)
 }

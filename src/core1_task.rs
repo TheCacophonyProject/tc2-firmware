@@ -354,7 +354,6 @@ pub fn core_1_task(
             &mut timer,
             existing_config,
         );
-    clear_flash_alarm();
 
     if woken_by_alarm {
         event_logger.log_event(
@@ -376,16 +375,16 @@ pub fn core_1_task(
     }
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
-    if device_config.config().is_audio_device {
-        if let AudioMode::AudioOnly = device_config.config().audio_mode {
-            shared_i2c.disable_alarm(&mut delay);
-            sio.fifo.write_blocking(Core1Task::RequestReset.into());
-            loop {
-                // Wait to be reset
-                nop();
-            }
+    if let AudioMode::AudioOnly = device_config.config().audio_mode {
+        shared_i2c.disable_alarm(&mut delay);
+        info!("Is audio device restarting");
+        sio.fifo.write_blocking(Core1Task::RequestReset.into());
+        loop {
+            // Wait to be reset
+            nop();
         }
     }
+
     if !device_config.use_low_power_mode() {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
         maybe_offload_events(
@@ -428,6 +427,12 @@ pub fn core_1_task(
         should_offload
     };
 
+    let is_cptv = flash_storage.has_cptv_files(false);
+    info!(
+        "Last file is cptv? {} has files? {}",
+        is_cptv,
+        flash_storage.has_files_to_offload()
+    );
     let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
@@ -460,33 +465,31 @@ pub fn core_1_task(
         }
     }
 
-    let mut record_audio: bool = false;
+    let record_audio: bool;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
     clear_flash_alarm();
-    if device_config.config().is_audio_device {
-        match device_config.config().audio_mode {
-            AudioMode::AudioAndThermal => {
-                record_audio = true;
-                if let Ok(next_alarm) = schedule_audio_rec(
-                    &mut delay,
-                    &synced_date_time,
-                    &mut shared_i2c,
-                    &mut flash_storage,
-                    &mut timer,
-                    &mut event_logger,
-                    &device_config,
-                ) {
-                    next_audio_alarm = Some(next_alarm);
-                    info!("Setting a pending audio alarm");
-                } else {
-                    error!("Couldn't schedule alarm");
-                }
-
-                //schedule an alarm if one in the future is not set
+    match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal => {
+            record_audio = true;
+            if let Ok(next_alarm) = schedule_audio_rec(
+                &mut delay,
+                &synced_date_time,
+                &mut shared_i2c,
+                &mut flash_storage,
+                &mut timer,
+                &mut event_logger,
+                &device_config,
+            ) {
+                next_audio_alarm = Some(next_alarm);
+                info!("Setting a pending audio alarm");
+            } else {
+                error!("Couldn't schedule alarm");
             }
-            _ => record_audio = false,
+
+            //schedule an alarm if one in the future is not set
         }
+        _ => record_audio = false,
     }
 
     // Unset the is_recording flag on attiny on startup
@@ -523,12 +526,17 @@ pub fn core_1_task(
     let mut logged_flash_storage_nearly_full = false;
     // NOTE: If there are already recordings on the flash memory,
     //  assume we've already made the startup status recording during this recording window.
-    let mut made_startup_status_recording = !has_files_to_offload || did_offload_files;
+
+    let mut made_startup_status_recording =
+        (is_cptv && !has_files_to_offload) || (did_offload_files && is_cptv);
     let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
-    info!("Entering frame loop");
+    info!(
+        "Entering frame loop made start up? {}",
+        made_startup_status_recording
+    );
     loop {
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
@@ -964,6 +972,7 @@ pub fn core_1_task(
                     // If flash storage is nearly full, or we're now outside the recording window,
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
+
                     sio.fifo.write(Core1Task::RequestReset.into());
                     loop {
                         // Wait to be reset
@@ -988,8 +997,9 @@ pub fn core_1_task(
                 match device_config.config().audio_mode {
                     AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                         //just reboot and it will go into audio branch
-                        sio.fifo.write(Core1Task::RequestReset.into());
                         info!("Reset as thermal finished and time for audio");
+                        sio.fifo.write(Core1Task::RequestReset.into());
+
                         loop {
                             nop();
                         }
