@@ -68,7 +68,6 @@ pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 12;
 const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 125_000_000;
 
 // got funny results at 150 for aduio seems to work better at 125
-const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
@@ -113,12 +112,6 @@ fn main() -> ! {
     let mut config = DeviceConfig::load_existing_inner_config_from_flash();
     let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
 
-    let freq = if is_audio {
-        ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
-    } else {
-        //for some reason audio comes out faster than expected when using this clock
-        ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz()
-    };
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
