@@ -13,7 +13,7 @@ before_script:
 
 script:
   - cargo build --release
-  - sha256sum ./target/thumbv6m-none-eabi/release/tc2-firmware > ./target/thumbv6m-none-eabi/release/tc2-firmware.sha256
+  - sha256sum ./target/thumbv6m-none-eabi/release/tc2-firmware | cut -d ' ' -f 1 > ./target/thumbv6m-none-eabi/release/tc2-firmware.sha256
 
 deploy:
   provider: releases
