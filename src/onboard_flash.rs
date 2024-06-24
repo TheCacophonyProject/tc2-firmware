@@ -392,7 +392,6 @@ impl OnboardFlash {
 
                 is_last = self.current_page.is_last_page_for_file();
                 if is_last {
-                    info!("Is last{}", is_last);
                     if only_last || is_cptv.unwrap() {
                         return is_cptv.unwrap();
                     }

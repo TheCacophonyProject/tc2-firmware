@@ -36,6 +36,8 @@ use crate::rp2040_flash::{
     clear_flash_alarm, read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
 };
 
+const dev_mode: bool = false;
+
 pub fn audio_task(
     i2c_config: I2CConfig,
     clock_freq: u32,
@@ -322,7 +324,7 @@ pub fn audio_task(
                 pio1,
                 sm1,
             );
-            let mut duration = 60;
+            let mut duration = if dev_mode { 10 } else { 60 };
             if !do_recording && take_test_rec {
                 duration = 10;
             }
@@ -374,6 +376,7 @@ pub fn audio_task(
         if do_recording && !take_test_rec {
             shared_i2c.clear_alarm(&mut delay);
             reschedule = true;
+            info!("CLearing alarm");
             clear_flash_alarm();
         } else {
             info!("taken test recoridng clearing status");
@@ -385,7 +388,7 @@ pub fn audio_task(
         //if audio requested from thermal, the alarm will be re scheduled there
         let _ = shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
         info!("Audio taken in thermal window clearing flag");
-        watchdog.start(100.micros());
+        // watchdog.start(100.micros());
         loop {
             nop();
         }
@@ -578,7 +581,9 @@ pub fn offload(
             wake_if_asleep = pi_waking;
         }
     }
-
+    if dev_mode {
+        return Ok((Some(device_config), false));
+    }
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
@@ -675,11 +680,14 @@ pub fn schedule_audio_rec(
     let short_window: u64 = 5 * 60;
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
-    let wake_in;
+    let mut wake_in;
     if r <= short_chance {
         wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
     } else {
         wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
+    }
+    if dev_mode {
+        wake_in = 120;
     }
     let current_time = synced_date_time.get_adjusted_dt(timer);
     let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);

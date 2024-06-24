@@ -526,9 +526,10 @@ pub fn core_1_task(
     let mut logged_flash_storage_nearly_full = false;
     // NOTE: If there are already recordings on the flash memory,
     //  assume we've already made the startup status recording during this recording window.
-
+    //if has files
     let mut made_startup_status_recording =
-        (is_cptv && !has_files_to_offload) || (did_offload_files && is_cptv);
+        (is_cptv && has_files_to_offload) || (is_cptv && did_offload_files);
+
     let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
     // Enable raw frame transfers to pi – if not already enabled.
@@ -701,7 +702,7 @@ pub fn core_1_task(
                 // (when we do our once a minute checks) when we're *not* trying to start a recording.
                 let is_inside_recording_window = if !dev_mode {
                     device_config.time_is_in_recording_window(
-                        &synced_date_time.date_time_utc,
+                        &synced_date_time.get_adjusted_dt(&timer),
                         &current_recording_window,
                     )
                 } else {
@@ -942,9 +943,11 @@ pub fn core_1_task(
             // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
             // is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
             // never shut down.
-            is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
+            is_daytime =
+                device_config.time_is_in_daylight(&synced_date_time.get_adjusted_dt(&timer));
             let is_outside_recording_window = if !dev_mode {
-                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
+                !device_config
+                    .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(&timer), &None)
             } else {
                 // !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
 

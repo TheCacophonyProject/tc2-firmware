@@ -186,7 +186,6 @@ pub fn offload_flash_storage_and_events(
         }
 
         let mut attempts = 0;
-        info!("SENDING A PART");
         'transfer_part: loop {
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
