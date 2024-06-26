@@ -136,19 +136,26 @@ pub fn audio_task(
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
     let mut synced_date_time = SyncedDateTime::default();
-    match shared_i2c.get_datetime(&mut delay) {
+    let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
+
+    match shared_i2c.get_datetime_lots(&mut delay) {
         Ok(now) => {
-            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
-            synced_date_time.set(get_naive_datetime(now), &timer);
+            synced_date_time.set(now, &timer);
         }
-        Err(_) => error!("Unable to get DateTime from RTC"),
+        Err(e) => {
+            // should take recording now
+            event_logger.log_event(
+                LoggerEvent::new(LoggerEventKind::RtcCommError, 2206224000000000),
+                &mut flash_storage,
+            );
+            panic!("Unable to get DateTime from RTC {}", e)
+        }
     }
 
     let scheduled: bool =
         alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
     let mut reschedule = !scheduled;
 
-    let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
     watchdog.feed();
 
     let mut should_wake = false;

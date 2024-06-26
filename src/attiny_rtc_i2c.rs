@@ -1,7 +1,9 @@
 use crate::bsp::pac::I2C1;
+use crate::device_config::get_naive_datetime;
 use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
 use byteorder::{BigEndian, ByteOrder};
-use chrono::{NaiveDateTime, Timelike};
+use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
+
 use cortex_m::delay::Delay;
 use crc::{Algorithm, Crc};
 use defmt::{error, info, warn, Format};
@@ -524,6 +526,54 @@ impl SharedI2C {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn get_datetime_lots(&mut self, delay: &mut Delay) -> Result<NaiveDateTime, &str> {
+        let num_attempts = 10;
+        let mut dts: [Option<NaiveDateTime>; 10] = [None; 10];
+        let mut counts = [0; 10];
+        let mut index = 0;
+        for i in 0..num_attempts {
+            if let Ok(now) = self.get_datetime(delay) {
+                let now = get_naive_datetime(now);
+                info!(
+                    "Got dt of {}/{}/{} {}:{} ",
+                    now.year(),
+                    now.day(),
+                    now.month(),
+                    now.hour(),
+                    now.minute()
+                );
+                let mut found = false;
+                for z in 0..index {
+                    let diff = now - dts[z].unwrap();
+                    if diff.num_minutes() < 30 {
+                        counts[z] += 1;
+                        info!("Agrees with index {} counts is {}", z, counts[z]);
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    if index > dts.len() {
+                        return Err(&"Datetime never agrees");
+                    }
+                    info!("Could not find a match adding another option at {}", index);
+                    dts[index] = Some(now);
+                    counts[index] = 1;
+                    index += 1;
+                }
+            }
+        }
+
+        let mut max_index = 0;
+        for i in 1..index {
+            if counts[i] > counts[max_index] {
+                max_index = i;
+            }
+        }
+
+        return Ok(dts[index - 1].unwrap());
     }
 
     pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, &str> {

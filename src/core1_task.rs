@@ -261,17 +261,6 @@ pub fn core_1_task(
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
 
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
-            synced_date_time.set(get_naive_datetime(now), &timer);
-            break;
-        } else {
-            warn!("Failed getting date from RTC, retrying");
-            delay.delay_ms(10);
-        }
-    }
-
     let mut pi_spi = ExtSpiTransfers::new(
         pins.pi_mosi,
         pins.pi_cs,
@@ -313,6 +302,26 @@ pub fn core_1_task(
     let mut event_logger = EventLogger::new(&mut flash_storage);
     if event_logger.has_events_to_offload() {
         info!("There are {} event(s) to offload", event_logger.count());
+    }
+
+    loop {
+        // NOTE: Keep retrying until we get a datetime from RTC.
+        match shared_i2c.get_datetime_lots(&mut delay) {
+            Ok(now) => {
+                synced_date_time.set(now, &timer);
+                break;
+            }
+            Err(e) => {
+                // should take recording now
+                event_logger.log_event(
+                    LoggerEvent::new(LoggerEventKind::RtcCommError, 2206224000000000),
+                    &mut flash_storage,
+                );
+
+                warn!("Failed getting date from RTC, retrying");
+                delay.delay_ms(10);
+            }
+        }
     }
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
