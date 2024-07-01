@@ -37,7 +37,7 @@ use crate::rp2040_flash::{
 };
 
 const dev_mode: bool = false;
-
+pub const MAX_GAP_MIN: u8 = 60;
 pub fn audio_task(
     i2c_config: I2CConfig,
     clock_freq: u32,
@@ -138,9 +138,9 @@ pub fn audio_task(
     let mut synced_date_time = SyncedDateTime::default();
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
 
-    match shared_i2c.get_datetime_lots(&mut delay) {
+    match shared_i2c.get_datetime(&mut delay) {
         Ok(now) => {
-            synced_date_time.set(now, &timer);
+            synced_date_time.set(get_naive_datetime(now), &timer);
         }
         Err(e) => {
             // should take recording now
@@ -171,7 +171,7 @@ pub fn audio_task(
                 }
             }
         }
-        (_) => {}
+        _ => {}
     }
     should_wake = should_wake
         || should_offload_audio_recordings(
@@ -271,7 +271,7 @@ pub fn audio_task(
                 let synced = synced_date_time.get_adjusted_dt(timer);
                 let until_alarm =
                     (alarm_dt - synced_date_time.get_adjusted_dt(timer)).num_minutes();
-                if until_alarm <= 0 || until_alarm > 60 {
+                if until_alarm <= 0 || until_alarm > MAX_GAP_MIN as i64 {
                     info!(
                         "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
                         alarm_day, alarm_hours, alarm_minutes, until_alarm
@@ -337,7 +337,7 @@ pub fn audio_task(
             }
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::StartedRecording,
+                    LoggerEventKind::StartedAudioRecording,
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
                 &mut flash_storage,

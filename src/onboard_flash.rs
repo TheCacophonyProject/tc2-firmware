@@ -379,11 +379,15 @@ impl OnboardFlash {
                 //find first used page
                 self.read_page(block_index, page_index).unwrap();
                 self.read_page_from_cache(block_index);
-                info!("Reading page {}:{} ", block_index, page_index,);
                 page_index -= 1;
                 if !self.current_page.page_is_used() {
                     continue;
                 }
+                info!(
+                    "Reading first non empty page {}:{} ",
+                    block_index,
+                    page_index + 1,
+                );
 
                 if is_cptv.is_none() {
                     //first page

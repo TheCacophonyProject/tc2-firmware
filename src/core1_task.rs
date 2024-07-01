@@ -20,7 +20,7 @@ use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::rp2040_flash::{clear_flash_alarm, read_alarm_from_rp2040_flash};
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
-use chrono::{Duration, NaiveDateTime, Timelike};
+use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
 
 use core::cell::RefCell;
 use core::ops::Add;
@@ -38,7 +38,7 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{get_alarm_dt, schedule_audio_rec};
+use crate::core0_audio::{get_alarm_dt, schedule_audio_rec, MAX_GAP_MIN};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -179,7 +179,7 @@ fn is_frame_telemetry_is_valid(
 // NOTE: Important: If we start using dormant states again, the timer will be incorrect
 pub struct SyncedDateTime {
     pub date_time_utc: NaiveDateTime,
-    timer_offset: Instant,
+    pub timer_offset: Instant,
 }
 
 impl Default for SyncedDateTime {
@@ -306,13 +306,12 @@ pub fn core_1_task(
 
     loop {
         // NOTE: Keep retrying until we get a datetime from RTC.
-        match shared_i2c.get_datetime_lots(&mut delay) {
+        match shared_i2c.get_datetime(&mut delay) {
             Ok(now) => {
-                synced_date_time.set(now, &timer);
+                synced_date_time.set(get_naive_datetime(now), &timer);
                 break;
             }
             Err(e) => {
-                // should take recording now
                 event_logger.log_event(
                     LoggerEvent::new(LoggerEventKind::RtcCommError, 2206224000000000),
                     &mut flash_storage,
@@ -323,6 +322,7 @@ pub fn core_1_task(
             }
         }
     }
+    let startup_date_time_utc: NaiveDateTime = synced_date_time.date_time_utc.clone();
 
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
@@ -438,7 +438,7 @@ pub fn core_1_task(
 
     let is_cptv = flash_storage.has_cptv_files(false);
     info!(
-        "Last file is cptv? {} has files? {}",
+        "Has cptv files? {} has files? {}",
         is_cptv,
         flash_storage.has_files_to_offload()
     );
@@ -460,45 +460,65 @@ pub fn core_1_task(
         false
     };
 
-    let startup_date_time_utc;
-
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
-            synced_date_time.set(get_naive_datetime(now), &timer);
-            startup_date_time_utc = synced_date_time.date_time_utc.clone();
-            break;
-        } else {
-            warn!("Failed getting date from RTC, retrying");
-            delay.delay_ms(10);
-        }
-    }
-
     let record_audio: bool;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
-    clear_flash_alarm();
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal => {
+            let alarm_time = read_alarm_from_rp2040_flash();
             record_audio = true;
-            if let Ok(next_alarm) = schedule_audio_rec(
-                &mut delay,
-                &synced_date_time,
-                &mut shared_i2c,
-                &mut flash_storage,
-                &mut timer,
-                &mut event_logger,
-                &device_config,
-            ) {
-                next_audio_alarm = Some(next_alarm);
-                info!("Setting a pending audio alarm");
-            } else {
-                error!("Couldn't schedule alarm");
+
+            let scheduled: bool =
+                alarm_time[0] != u8::MAX && alarm_time[1] != u8::MAX && alarm_time[2] != u8::MAX;
+            let mut schedule_alarm = true;
+            if scheduled {
+                info!("Alarm scheduled");
+                match get_alarm_dt(
+                    synced_date_time.get_adjusted_dt(&timer),
+                    alarm_time[0],
+                    alarm_time[1],
+                    alarm_time[2],
+                ) {
+                    Ok(alarm_dt) => {
+                        let synced = synced_date_time.get_adjusted_dt(&timer);
+                        let until_alarm =
+                            (alarm_dt - synced_date_time.get_adjusted_dt(&timer)).num_minutes();
+                        if until_alarm <= MAX_GAP_MIN as i64 {
+                            info!(
+                                "Alarm already scheduled for {} {}:{}",
+                                alarm_time[0], alarm_time[1], alarm_time[1]
+                            );
+                        } else {
+                            info!("Alarm is missed");
+                            schedule_alarm = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if schedule_alarm {
+                if let Ok(next_alarm) = schedule_audio_rec(
+                    &mut delay,
+                    &synced_date_time,
+                    &mut shared_i2c,
+                    &mut flash_storage,
+                    &mut timer,
+                    &mut event_logger,
+                    &device_config,
+                ) {
+                    next_audio_alarm = Some(next_alarm);
+                    info!("Setting a pending audio alarm");
+                } else {
+                    error!("Couldn't schedule alarm");
+                }
             }
 
             //schedule an alarm if one in the future is not set
         }
-        _ => record_audio = false,
+        _ => {
+            clear_flash_alarm();
+            record_audio = false
+        }
     }
 
     // Unset the is_recording flag on attiny on startup
@@ -930,9 +950,10 @@ pub fn core_1_task(
                 );
             }
             let sync_rtc_start_real = timer.get_counter();
-            synced_date_time = match shared_i2c.get_datetime(&mut delay) {
+
+            let new_synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
-                Err(err_str) => {
+                Err(e) => {
                     event_logger.log_event(
                         LoggerEvent::new(
                             LoggerEventKind::RtcCommError,
@@ -940,10 +961,40 @@ pub fn core_1_task(
                         ),
                         &mut flash_storage,
                     );
-                    error!("Unable to get DateTime from RTC: {}", err_str);
-                    synced_date_time
+                    error!("Unable to get DateTime from RTC: {}", e);
+                    SyncedDateTime::default()
                 }
             };
+
+            let prev_dt = synced_date_time.get_adjusted_dt(&timer);
+            let diff = prev_dt - new_synced_date_time.date_time_utc;
+
+            if diff > Duration::minutes(30) {
+                error!(
+                    "Got new dt of {}/{}/{} {}:{}  which differs lots from old {}/{}/{} {}:{} ",
+                    new_synced_date_time.date_time_utc.year(),
+                    new_synced_date_time.date_time_utc.day(),
+                    new_synced_date_time.date_time_utc.month(),
+                    new_synced_date_time.date_time_utc.hour(),
+                    new_synced_date_time.date_time_utc.minute(),
+                    prev_dt.year(),
+                    prev_dt.day(),
+                    prev_dt.month(),
+                    prev_dt.hour(),
+                    prev_dt.minute()
+                );
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::RTCTime(
+                            new_synced_date_time.date_time_utc.timestamp_micros() as u64,
+                        ),
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
+            } else {
+                synced_date_time = new_synced_date_time;
+            }
             info!(
                 "RTC Sync time took {}µs",
                 (timer.get_counter() - sync_rtc_start_real).to_micros()
@@ -1158,15 +1209,19 @@ pub fn core_1_task(
             // don't have too many stalls trying to communicate via I2C with the RTC.
 
             let mut incremented_datetime = synced_date_time.date_time_utc.clone();
+
             let frames_elapsed = if frame_header_is_valid {
                 get_frames_elapsed(&frame_telemetry, &prev_frame_telemetry)
             } else {
                 1
             };
-
-            incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
-            if incremented_datetime > synced_date_time.date_time_utc {
-                synced_date_time.set(incremented_datetime, &timer);
+            if frames_elapsed > 100 {
+                warn!("Got {} elapsed frames, ignoring", frames_elapsed);
+            } else {
+                incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
+                if incremented_datetime > synced_date_time.date_time_utc {
+                    synced_date_time.set(incremented_datetime, &timer);
+                }
             }
 
             // Spend the same time as we would otherwise use querying the RTC to keep frame-times
@@ -1193,9 +1248,13 @@ pub fn core_1_task(
             let cur_time = synced_date_time.get_adjusted_dt(&timer);
 
             info!(
-                "Audio recording is pending because time {}:{} is after {}:{} ",
+                "Audio recording is pending because time {}:{} from {}:{} and timer {:?} startup {:?} is after {}:{} ",
                 cur_time.hour(),
                 cur_time.minute(),
+                synced_date_time.date_time_utc.hour(),
+                synced_date_time.date_time_utc.minute(),
+                timer.get_counter().ticks(),
+                synced_date_time.timer_offset.ticks(),
                 next_audio_alarm.unwrap().hour(),
                 next_audio_alarm.unwrap().minute()
             )
@@ -1205,6 +1264,7 @@ pub fn core_1_task(
             if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
                 if !is_recording {
                     info!("Taking audio recording");
+                    delay.delay_ms(2000);
                     //make audio rec now
                     let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
                     sio.fifo.write(Core1Task::RequestReset.into());

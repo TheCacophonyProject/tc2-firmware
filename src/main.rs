@@ -140,6 +140,7 @@ fn main() -> ! {
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
+    delay.delay_ms(1500);
     let sio = Sio::new(peripherals.SIO);
 
     let pins = rp2040_hal::gpio::Pins::new(
@@ -381,7 +382,8 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new(); //39060
     let mut fb1 = FrameBuffer::new(); //39060
-    let mut core1_stack: Stack<44940> = Stack::new(); //180000
+
+    let mut core1_stack: Stack<44900> = Stack::new(); //180000
                                                       //258.12 out of a total of 260.49536
                                                       //leaves 2.37536KB
 
@@ -446,4 +448,3 @@ pub fn thermal_code(
         watchdog,
     );
 }
-use crate::rp2040_flash::{clear_flash_alarm, read_alarm_from_rp2040_flash};
