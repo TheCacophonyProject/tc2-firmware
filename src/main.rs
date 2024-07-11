@@ -109,7 +109,8 @@ fn main() -> ! {
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let is_audio = read_is_audio_from_rp2040_flash();
+    //let is_audio = read_is_audio_from_rp2040_flash();
+    let is_audio = false;
 
     let freq = if is_audio {
         ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
