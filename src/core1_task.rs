@@ -1093,9 +1093,13 @@ pub fn core_1_task(
                 1
             };
 
-            incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
-            if incremented_datetime > synced_date_time.date_time_utc {
-                synced_date_time.set(incremented_datetime, &timer);
+            if frames_elapsed > 100 {
+                warn!("Got {} elapsed frames, ignoring", frames_elapsed);
+            } else {
+                incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
+                if incremented_datetime > synced_date_time.date_time_utc {
+                    synced_date_time.set(incremented_datetime, &timer);
+                }
             }
 
             // Spend the same time as we would otherwise use querying the RTC to keep frame-times
