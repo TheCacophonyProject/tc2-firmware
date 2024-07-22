@@ -3,6 +3,7 @@ const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 64;
 const MAX_VOLUME: u8 = 64;
+use defmt::{error, info, warn};
 
 //this is ported from
 //https://github.com/ArmDeveloperEcosystem/microphone-library-for-pico/blob/main/src/pdm_microphone.c
@@ -43,6 +44,7 @@ impl PDMFilter {
         if hp_hz != 0.0 {
             self.hp_alpha = (self.fs as f32 * 256.0 / (2.0 * PI * hp_hz + self.fs as f32)) as u32;
         }
+
         let sinc = [1u16; PDM_DECIMATION as usize];
         let mut sinc_out = [0u16; PDM_DECIMATION as usize * 2 - 1];
 
@@ -67,7 +69,10 @@ impl PDMFilter {
         if self.div_const == 0 {
             self.div_const = 1;
         }
-
+        info!(
+            "Set alphas lp {} hp {} syv const {} div const {} sum {}",
+            self.lp_alpha, self.hp_alpha, self.sub_const, self.div_const, sum
+        );
         for s in 0..SINCN {
             let offset: usize = (s * PDM_DECIMATION) as usize;
 
@@ -102,8 +107,6 @@ impl PDMFilter {
             let z0 = filter_table_mono_64(&self.lut, &data[index..index + 8], 0);
             let z1 = filter_table_mono_64(&self.lut, &data[index..index + 8], 1);
             let z2 = filter_table_mono_64(&self.lut, &data[index..index + 8], 2);
-            // println!("z0 {} z1 {} z2 {}", z0, z1, z2);
-
             let mut z: i64 = self.coef[1] as i64 + z2 as i64 - self.sub_const as i64;
 
             self.coef[1] = self.coef[0] + z1 as u32;
@@ -117,7 +120,6 @@ impl PDMFilter {
             z = oldz * volume as i64;
 
             z = round_div(z, self.div_const as i64);
-
             z = satural_lh(z, -32700 as i64, 32700 as i64);
 
             if (saveout) {
@@ -150,16 +152,16 @@ fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
 
 // apply weights on each bit of input data
 fn filter_table_mono_64(lut: &[u32], data: &[u8], s: u8) -> u32 {
-    let s_offset = s as usize * 256 * 8;
-
-    return lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8) as usize]
-        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 1) as usize]
-        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 2) as usize]
-        + lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8 + 3) as usize]
-        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 4) as usize]
-        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 5) as usize]
-        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 6) as usize]
-        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 7) as usize];
+    let s_offset: usize = s as usize * 256 * 8;
+    // because of endiness the first byte of a 32 bit is at index 3, 2, 1 .. 0
+    return lut[s_offset + data[3] as usize * 8]
+        + lut[s_offset + data[2] as usize * 8 + 1]
+        + lut[s_offset + data[1] as usize * 8 + 2]
+        + lut[s_offset + data[0] as usize * 8 + 3]
+        + lut[s_offset + data[7] as usize * 8 + 4]
+        + lut[s_offset + data[6] as usize * 8 + 5]
+        + lut[s_offset + data[5] as usize * 8 + 6]
+        + lut[s_offset + data[4] as usize * 8 + 7];
 }
 fn convolve(
     signal: &[u16],
