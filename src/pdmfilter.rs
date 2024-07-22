@@ -46,39 +46,22 @@ impl PDMFilter {
         let sinc = [1u16; PDM_DECIMATION as usize];
         let mut sinc_out = [0u16; PDM_DECIMATION as usize * 2 - 1];
 
-        let mut sinc2 = [0u16; PDM_DECIMATION as usize * 3 - 2];
-        convolve(
+        let mut sinc2 = [0u16; PDM_DECIMATION as usize * 3];
+        _ = convolve(
             &sinc,
             PDM_DECIMATION as usize,
             &sinc,
             PDM_DECIMATION as usize,
             sinc_out.as_mut(),
         );
-        convolve(
+        let sum = convolve(
             &sinc_out,
             PDM_DECIMATION as usize * 2 - 1,
             &sinc,
             PDM_DECIMATION as usize,
-            sinc2.as_mut(),
+            sinc2[1..].as_mut(),
         );
-        let mut sum: u32 = 0;
-        let mut coef = [0u32; ((PDM_DECIMATION * SINCN) as usize + 2)];
-        for j in 0..SINCN {
-            for i in 0..PDM_DECIMATION {
-                // seems like this shouldn't happen...
-                if (j * PDM_DECIMATION + i) as usize >= sinc2.len() {
-                    continue;
-                    // coef[(j * PDM_DECIMATION + i) as usize] = 0;
-                } else {
-                    coef[(j * PDM_DECIMATION + i + 1) as usize] =
-                        sinc2[(j * PDM_DECIMATION + i) as usize] as u32;
-                    sum += sinc2[(j * PDM_DECIMATION + i) as usize] as u32;
-                }
-                // if j >= 1 {
-                // break;?
-                // }
-            }
-        }
+
         self.sub_const = sum >> 1;
         self.div_const = self.sub_const * MAX_VOLUME as u32 / 32768 / FILTER_GAIN as u32;
         if self.div_const == 0 {
@@ -89,17 +72,19 @@ impl PDMFilter {
             let offset: usize = (s * PDM_DECIMATION) as usize;
 
             for c in 0..256u32 {
-                for d in 0..8 as usize {
+                for d in 0..(PDM_DECIMATION / 8) as usize {
+                    // (j * PDM_DECIMATION + i) as usize] as u32;
+
                     let coef_offset = offset + d * 8;
                     self.lut[((s as usize * 256 * 8) + c as usize * 8 + d) as usize] = (c >> 7)
-                        * coef[coef_offset]
-                        + ((c >> 6) & 0x01) * coef[coef_offset + 1]
-                        + ((c >> 5) & 0x01) * coef[coef_offset + 2]
-                        + ((c >> 4) & 0x01) * coef[coef_offset + 3]
-                        + ((c >> 3) & 0x01) * coef[coef_offset + 4]
-                        + ((c >> 2) & 0x01) * coef[coef_offset + 5]
-                        + ((c >> 1) & 0x01) * coef[coef_offset + 6]
-                        + ((c) & 0x01) * coef[coef_offset + 7];
+                        * sinc2[coef_offset] as u32
+                        + ((c >> 6) & 0x01) * sinc2[coef_offset + 1] as u32
+                        + ((c >> 5) & 0x01) * sinc2[coef_offset + 2] as u32
+                        + ((c >> 4) & 0x01) * sinc2[coef_offset + 3] as u32
+                        + ((c >> 3) & 0x01) * sinc2[coef_offset + 4] as u32
+                        + ((c >> 2) & 0x01) * sinc2[coef_offset + 5] as u32
+                        + ((c >> 1) & 0x01) * sinc2[coef_offset + 6] as u32
+                        + ((c) & 0x01) * sinc2[coef_offset + 7] as u32;
                 }
             }
         }
@@ -113,7 +98,7 @@ impl PDMFilter {
 
         for i in (0..=data.len() - 8).step_by(PDM_DECIMATION as usize >> 3) {
             let index = i as usize;
-            // 3 stages?
+            // 3 polyphase FIR?
             let z0 = filter_table_mono_64(&self.lut, &data[index..index + 8], 0);
             let z1 = filter_table_mono_64(&self.lut, &data[index..index + 8], 1);
             let z2 = filter_table_mono_64(&self.lut, &data[index..index + 8], 2);
@@ -167,18 +152,24 @@ fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
 fn filter_table_mono_64(lut: &[u32], data: &[u8], s: u8) -> u32 {
     let s_offset = s as usize * 256 * 8;
 
-    return lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8) as usize]
-        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 1) as usize]
-        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 2) as usize]
-        + lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8 + 3) as usize]
-        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 4) as usize]
-        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 5) as usize]
-        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 6) as usize]
-        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7) as usize];
+    return lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8) as usize]
+        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 1) as usize]
+        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 2) as usize]
+        + lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8 + 3) as usize]
+        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 4) as usize]
+        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 5) as usize]
+        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 6) as usize]
+        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 7) as usize];
 }
-fn convolve(signal: &[u16], signal_len: usize, kernel: &[u16], kernel_len: usize, out: &mut [u16]) {
+fn convolve(
+    signal: &[u16],
+    signal_len: usize,
+    kernel: &[u16],
+    kernel_len: usize,
+    out: &mut [u16],
+) -> u32 {
     let outlen = signal_len + kernel_len - 1;
-
+    let mut sum = 0u32;
     for n in 0..outlen {
         let mut kmin: usize = 0;
         if n >= kernel_len - 1 {
@@ -196,5 +187,7 @@ fn convolve(signal: &[u16], signal_len: usize, kernel: &[u16], kernel_len: usize
         }
 
         out[n] = acc;
+        sum += acc as u32;
     }
+    return sum;
 }
