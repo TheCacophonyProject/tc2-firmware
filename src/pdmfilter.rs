@@ -154,14 +154,14 @@ fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
 fn filter_table_mono_64(lut: &[u32], data: &[u8], s: u8) -> u32 {
     let s_offset: usize = s as usize * 256 * 8;
     // because of endiness the first byte of a 32 bit is at index 3, 2, 1 .. 0
-    return lut[s_offset + data[3] as usize * 8]
-        + lut[s_offset + data[2] as usize * 8 + 1]
-        + lut[s_offset + data[1] as usize * 8 + 2]
-        + lut[s_offset + data[0] as usize * 8 + 3]
-        + lut[s_offset + data[7] as usize * 8 + 4]
-        + lut[s_offset + data[6] as usize * 8 + 5]
-        + lut[s_offset + data[5] as usize * 8 + 6]
-        + lut[s_offset + data[4] as usize * 8 + 7];
+    return lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8) as usize]
+        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 1) as usize]
+        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 2) as usize]
+        + lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8 + 3) as usize]
+        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 4) as usize]
+        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 5) as usize]
+        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 6) as usize]
+        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7) as usize];
 }
 fn convolve(
     signal: &[u16],
