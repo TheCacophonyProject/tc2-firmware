@@ -36,7 +36,7 @@ impl PDMFilter {
     }
     pub fn init(&mut self) {
         let lp_hz: f32 = self.fs as f32 / 2.0;
-        let hp_hz: f32 = 20.0;
+        let hp_hz: f32 = 40.0;
         if lp_hz != 0.0 {
             self.lp_alpha = (lp_hz * 256.0 / (lp_hz + self.fs as f32 / (2.0 * PI))) as u32;
         }
