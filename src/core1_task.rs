@@ -486,11 +486,14 @@ pub fn core_1_task(
                         if until_alarm <= MAX_GAP_MIN as i64 {
                             info!(
                                 "Alarm already scheduled for {} {}:{}",
-                                alarm_time[0], alarm_time[1], alarm_time[1]
+                                alarm_dt.day(),
+                                alarm_dt.hour(),
+                                alarm_dt.minute()
                             );
+                            next_audio_alarm = Some(alarm_dt);
+                            schedule_alarm = false;
                         } else {
                             info!("Alarm is missed");
-                            schedule_alarm = true;
                         }
                     }
                     _ => {}
@@ -512,15 +515,20 @@ pub fn core_1_task(
                     error!("Couldn't schedule alarm");
                 }
             }
-
-            //schedule an alarm if one in the future is not set
         }
         _ => {
             clear_flash_alarm();
             record_audio = false
         }
     }
-
+    if record_audio {
+        info!(
+            "Alarm scheduled for {} {}:{}",
+            next_audio_alarm.unwrap().day(),
+            next_audio_alarm.unwrap().hour(),
+            next_audio_alarm.unwrap().minute()
+        );
+    }
     // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
         .set_recording_flag(&mut delay, false)
