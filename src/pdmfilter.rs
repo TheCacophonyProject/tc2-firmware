@@ -48,7 +48,7 @@ impl PDMFilter {
         let mut sinc_out = [0u16; PDM_DECIMATION as usize * 2 - 1];
 
         let mut sinc2 = [0u16; PDM_DECIMATION as usize * 3];
-        _ = convolve(
+        let _ = convolve(
             &sinc,
             PDM_DECIMATION as usize,
             &sinc,
