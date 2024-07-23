@@ -856,19 +856,19 @@ pub fn core_1_task(
                         && motion_detection.as_ref().unwrap().was_false_positive()
                     // && cptv_stream.num_frames <= 100
                     {
-                        // error!("Discarding as a false-positive");
-                        // cptv_stream.discard(
-                        //     &mut flash_storage,
-                        //     cptv_start_block_index,
-                        //     cptv_end_block_index,
-                        // );
-                        event_logger.log_event(
-                            LoggerEvent::new(
-                                LoggerEventKind::WouldDiscardAsFalsePositive,
-                                synced_date_time.get_timestamp_micros(&timer),
-                            ),
+                        info!("Discarding as a false-positive");
+                        cptv_stream.discard(
                             &mut flash_storage,
+                            cptv_start_block_index,
+                            cptv_end_block_index,
                         );
+                        // event_logger.log_event(
+                        //     LoggerEvent::new(
+                        //         LoggerEventKind::WouldDiscardAsFalsePositive,
+                        //         synced_date_time.get_timestamp_micros(&timer),
+                        //     ),
+                        //     &mut flash_storage,
+                        // );
                     }
                     if making_status_recording {
                         making_status_recording = false;

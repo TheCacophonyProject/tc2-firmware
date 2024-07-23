@@ -63,12 +63,12 @@ use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 12;
-pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1;
-const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 125_000_000;
+pub const FIRMWARE_VERSION: u32 = 13;
+pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version. // TODO Check against minor version also.
+                                                    // const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 
 // got funny results at 150 for aduio seems to work better at 125
-const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
