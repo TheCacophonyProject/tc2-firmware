@@ -74,11 +74,8 @@ impl PDMFilter {
         // );
         for s in 0..SINCN {
             let offset: usize = (s * PDM_DECIMATION) as usize;
-
             for c in 0..256u32 {
                 for d in 0..8 {
-                    // (j * PDM_DECIMATION + i) as usize] as u32;
-
                     let coef_offset = offset + d * 8;
                     self.lut[((s as usize * 256 * 8) + c as usize * 8 + d) as usize] = (c >> 7)
                         * sinc2[coef_offset] as u32
