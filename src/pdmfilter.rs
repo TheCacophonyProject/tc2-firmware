@@ -76,7 +76,7 @@ impl PDMFilter {
             let offset: usize = (s * PDM_DECIMATION) as usize;
 
             for c in 0..256u32 {
-                for d in 0..(PDM_DECIMATION / 8) as usize {
+                for d in 0..8 {
                     // (j * PDM_DECIMATION + i) as usize] as u32;
 
                     let coef_offset = offset + d * 8;
