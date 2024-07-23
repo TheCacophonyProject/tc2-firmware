@@ -3,7 +3,6 @@ const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
 const FILTER_GAIN: u8 = 64;
 const MAX_VOLUME: u8 = 64;
-use defmt::{error, info, warn};
 
 //this is ported from
 //https://github.com/ArmDeveloperEcosystem/microphone-library-for-pico/blob/main/src/pdm_microphone.c
@@ -69,10 +68,10 @@ impl PDMFilter {
         if self.div_const == 0 {
             self.div_const = 1;
         }
-        info!(
-            "Set alphas lp {} hp {} syv const {} div const {} sum {}",
-            self.lp_alpha, self.hp_alpha, self.sub_const, self.div_const, sum
-        );
+        // info!(
+        //     "Set alphas lp {} hp {} sub const {} div const {} sum {}",
+        //     self.lp_alpha, self.hp_alpha, self.sub_const, self.div_const, sum
+        // );
         for s in 0..SINCN {
             let offset: usize = (s * PDM_DECIMATION) as usize;
 
