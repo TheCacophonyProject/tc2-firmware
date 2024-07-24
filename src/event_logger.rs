@@ -32,6 +32,9 @@ pub enum LoggerEventKind {
     AudioRecordingFailed,
     RTCTime(u64),
     StartedAudioRecording,
+    ThermalMode,
+    AudioMode,
+    RecordingNotFinished,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -61,6 +64,9 @@ impl Into<u16> for LoggerEventKind {
             AudioRecordingFailed => 21,
             RTCTime(_) => 22,
             StartedAudioRecording => 23,
+            ThermalMode => 22,
+            AudioMode => 25,
+            RecordingNotFinished => 26,
         }
     }
 }
@@ -94,6 +100,9 @@ impl TryFrom<u16> for LoggerEventKind {
             21 => Ok(AudioRecordingFailed),
             22 => Ok(RTCTime(0)),
             23 => Ok(StartedAudioRecording),
+            24 => Ok(ThermalMode),
+            25 => Ok(AudioMode),
+            26 => Ok(RecordingNotFinished),
             _ => Err(()),
         }
     }

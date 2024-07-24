@@ -215,15 +215,6 @@ pub fn offload_flash_storage_and_events(
         // Give spi peripheral back to flash storage.
         if let Some(spi) = pi_spi.disable() {
             flash_storage.take_spi(spi, resets, clock_freq.Hz());
-            if is_last {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::OffloadedRecording,
-                        time.get_timestamp_micros(&timer),
-                    ),
-                    flash_storage,
-                );
-            }
         }
         if !success {
             info!("NOT success so breaking");
@@ -241,6 +232,15 @@ pub fn offload_flash_storage_and_events(
     }
     if success {
         info!("Completed file offload, transferred {} files", file_count);
+        if file_count > 0 {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedRecording,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
+        }
         // TODO: Some validation from the raspberry pi that the transfer completed
         //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
 

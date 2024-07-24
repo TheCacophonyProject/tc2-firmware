@@ -130,11 +130,6 @@ pub fn audio_task(
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
-    // Unset the is_recording flag on attiny on startup
-    let _ = shared_i2c
-        .set_recording_flag(&mut delay, false)
-        .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-
     let mut synced_date_time = SyncedDateTime::default();
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
 
@@ -151,6 +146,29 @@ pub fn audio_task(
             panic!("Unable to get DateTime from RTC {}", e)
         }
     }
+
+    event_logger.log_event(
+        LoggerEvent::new(
+            LoggerEventKind::AudioMode,
+            synced_date_time.get_timestamp_micros(&timer),
+        ),
+        &mut flash_storage,
+    );
+    // Unset the is_recording flag on attiny on startup
+    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+        if is_recording {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::RecordingNotFinished,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+        }
+    }
+    let _ = shared_i2c
+        .set_recording_flag(&mut delay, false)
+        .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
     let scheduled: bool =
         alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
@@ -572,7 +590,6 @@ pub fn audio_task(
 pub fn offload(
     i2c: &mut SharedI2C,
     clock_freq: u32,
-
     flash_storage: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
     timer: &mut Timer,
@@ -614,6 +631,16 @@ pub fn offload(
                     timer,
                     Some(device_config),
                 );
+
+            if device_config_was_updated {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::SavedNewConfig,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+            }
 
             if offload_flash_storage_and_events(
                 flash_storage,
