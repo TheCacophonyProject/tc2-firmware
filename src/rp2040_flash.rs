@@ -59,38 +59,38 @@ pub fn read_is_audio_from_rp2040_flash() -> bool {
     }
 }
 
-//use the last second sector for writing rp2040 alarm time because the rtc doesn't give the correct time
-//4096 - 8192
-pub fn read_alarm_from_rp2040_flash() -> &'static [u8] {
-    let mut addr = FLASH_XIP_BASE + FLASH_END;
-    if addr % 256 != 0 {
-        addr = 256 * (1 + (addr / 256));
-    }
-    unsafe { slice::from_raw_parts(addr as *const u8, 256usize) }
-}
-pub fn clear_flash_alarm() {
-    write_alarm_schedule_to_rp2040_flash(u8::MAX, u8::MAX, u8::MAX, u8::MAX);
-}
-#[inline(never)]
-#[link_section = ".data.ram_func"]
+// //use the last second sector for writing rp2040 alarm time because the rtc doesn't give the correct time
+// //4096 - 8192
+// pub fn read_alarm_from_rp2040_flash() -> &'static [u8] {
+//     let mut addr = FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE * 2;
+//     if addr % 256 != 0 {
+//         addr = 256 * (1 + (addr / 256));
+//     }
+//     unsafe { slice::from_raw_parts(addr as *const u8, 256usize) }
+// }
+// pub fn clear_flash_alarm() {
+//     write_alarm_schedule_to_rp2040_flash(u8::MAX, u8::MAX, u8::MAX, u8::MAX);
+// }
+// #[inline(never)]
+// #[link_section = ".data.ram_func"]
 
-pub fn write_alarm_schedule_to_rp2040_flash(
-    alarm_day: u8,
-    alarm_hours: u8,
-    alarm_minutes: u8,
-    mode: u8,
-) {
-    let data = &[alarm_day, alarm_hours, alarm_minutes, mode];
-    let addr = FLASH_END;
+// pub fn write_alarm_schedule_to_rp2040_flash(
+//     alarm_day: u8,
+//     alarm_hours: u8,
+//     alarm_minutes: u8,
+//     mode: u8,
+// ) {
+//     let data = &[alarm_day, alarm_hours, alarm_minutes, mode];
+//     let addr = FLASH_END - FLASH_USER_SIZE * 2;
 
-    unsafe {
-        cortex_m::interrupt::free(|_cs| {
-            rom_data::connect_internal_flash();
-            rom_data::flash_exit_xip();
-            rom_data::flash_range_erase(addr, SECTOR_SIZE, BLOCK_SIZE, SECTOR_ERASE);
-            rom_data::flash_range_program(addr, data.as_ptr(), 256);
-            rom_data::flash_flush_cache(); // Get the XIP working again
-            rom_data::flash_enter_cmd_xip(); // Start XIP back up
-        });
-    }
-}
+//     unsafe {
+//         cortex_m::interrupt::free(|_cs| {
+//             rom_data::connect_internal_flash();
+//             rom_data::flash_exit_xip();
+//             rom_data::flash_range_erase(addr, SECTOR_SIZE, BLOCK_SIZE, SECTOR_ERASE);
+//             rom_data::flash_range_program(addr, data.as_ptr(), 256);
+//             rom_data::flash_flush_cache(); // Get the XIP working again
+//             rom_data::flash_enter_cmd_xip(); // Start XIP back up
+//         });
+//     }
+// }

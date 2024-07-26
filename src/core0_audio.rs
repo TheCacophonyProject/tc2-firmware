@@ -9,7 +9,10 @@ use crate::core1_sub_tasks::{
 use crate::core1_task::Core1Pins;
 use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime};
 use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
+use crate::event_logger::{
+    clear_audio_alarm, get_audio_alarm, write_audio_alarm, EventLogger, LoggerEvent,
+    LoggerEventKind,
+};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
@@ -32,9 +35,9 @@ use rp2040_hal::pio::PIOExt;
 
 use crate::onboard_flash::extend_lifetime_generic_mut;
 
-use crate::rp2040_flash::{
-    clear_flash_alarm, read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
-};
+// use crate::rp2040_flash::{
+//     clear_flash_alarm, read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
+// };
 
 const dev_mode: bool = false;
 pub const MAX_GAP_MIN: u8 = 60;
@@ -64,19 +67,6 @@ pub fn audio_task(
     let mut device_config = DeviceConfig::load_existing_config_from_flash().unwrap();
 
     watchdog.feed();
-    //this isn't reliable so use alarm stored in flash
-    // let mut alarm_hours = shared_i2c.get_alarm_hours();
-    // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
-    let flash_alarm = read_alarm_from_rp2040_flash();
-    let alarm_day = flash_alarm[0];
-    let alarm_hours = flash_alarm[1];
-    let alarm_minutes = flash_alarm[2];
-    let alarm_mode = flash_alarm[3];
-
-    info!(
-        "Alarm day {} hours {} minutes {} in mode {}",
-        alarm_day, alarm_hours, alarm_minutes, alarm_mode
-    );
 
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
@@ -147,6 +137,43 @@ pub fn audio_task(
         }
     }
 
+    //this isn't reliable so use alarm stored in flash
+    // let mut alarm_hours = shared_i2c.get_alarm_hours();
+    // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
+    let flash_alarm = get_audio_alarm(&mut flash_storage);
+    let mut scheduled = false;
+    let mut alarm_date_time: Option<NaiveDateTime> = None;
+    if let Some(flash_alarm) = flash_alarm {
+        let alarm_day = flash_alarm[0];
+        let alarm_hours = flash_alarm[1];
+        let alarm_minutes = flash_alarm[2];
+        let alarm_mode = flash_alarm[3];
+        scheduled = alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
+
+        info!(
+            "Alarm day {} hours {} minutes {} in mode {}",
+            alarm_day, alarm_hours, alarm_minutes, alarm_mode
+        );
+        if scheduled {
+            match get_alarm_dt(
+                synced_date_time.get_adjusted_dt(timer),
+                alarm_day,
+                alarm_hours,
+                alarm_minutes,
+            ) {
+                Ok(alarm) => {
+                    alarm_date_time = Some(alarm);
+                }
+                Err(_) => {
+                    error!(
+                        "Could not get alarm dt for {} {} {}",
+                        alarm_day, alarm_hours, alarm_minutes
+                    );
+                }
+            }
+        }
+    }
+
     event_logger.log_event(
         LoggerEvent::new(
             LoggerEventKind::AudioMode,
@@ -170,8 +197,6 @@ pub fn audio_task(
         .set_recording_flag(&mut delay, false)
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
-    let scheduled: bool =
-        alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
     let mut reschedule = !scheduled;
 
     watchdog.feed();
@@ -254,7 +279,7 @@ pub fn audio_task(
                 // }
                 if reboot {
                     let _ = shared_i2c.disable_alarm(&mut delay);
-                    clear_flash_alarm();
+                    clear_audio_alarm(&mut flash_storage);
                     info!("Restarting as should be in thermal mode");
                     watchdog.start(100.micros());
                     loop {
@@ -279,39 +304,25 @@ pub fn audio_task(
     );
     if !alarm_triggered && scheduled {
         // check we haven't missed the alarm somehow
-        match get_alarm_dt(
-            synced_date_time.get_adjusted_dt(timer),
-            alarm_day,
-            alarm_hours,
-            alarm_minutes,
-        ) {
-            Ok(alarm_dt) => {
-                let synced = synced_date_time.get_adjusted_dt(timer);
-                let until_alarm =
-                    (alarm_dt - synced_date_time.get_adjusted_dt(timer)).num_minutes();
-                if until_alarm <= 0 || until_alarm > MAX_GAP_MIN as i64 {
-                    info!(
-                        "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
-                        alarm_day, alarm_hours, alarm_minutes, until_alarm
-                    );
+        if let Some(alarm) = alarm_date_time {
+            let synced = synced_date_time.get_adjusted_dt(timer);
+            let until_alarm = (alarm - synced_date_time.get_adjusted_dt(timer)).num_minutes();
+            if until_alarm <= 0 || until_alarm > MAX_GAP_MIN as i64 {
+                info!(
+                    "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
+                    alarm.day(),
+                    alarm.hour(),
+                    alarm.minute(),
+                    until_alarm
+                );
 
-                    // should take recording now
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::Rp2040MissedAudioAlarm(
-                                alarm_dt.timestamp_micros() as u64
-                            ),
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        &mut flash_storage,
-                    );
-                    do_recording = true;
-                }
-            }
-            Err(_) => {
-                error!(
-                    "Could not get alarm dt for {} {} {}",
-                    alarm_day, alarm_hours, alarm_minutes
+                // should take recording now
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::Rp2040MissedAudioAlarm(alarm.timestamp_micros() as u64),
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
                 );
                 do_recording = true;
             }
@@ -402,7 +413,7 @@ pub fn audio_task(
             shared_i2c.clear_alarm(&mut delay);
             reschedule = true;
             info!("CLearing alarm");
-            clear_flash_alarm();
+            clear_audio_alarm(&mut flash_storage);
         } else {
             info!("taken test recoridng clearing status");
             let _ = shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
@@ -434,41 +445,22 @@ pub fn audio_task(
             &mut event_logger,
             &device_config,
         ) {
-            alarm_time = Some(scheduled_time);
+            alarm_date_time = Some(scheduled_time);
         } else {
             error!("Couldn't schedule alarm will restart");
-            clear_flash_alarm();
+            clear_audio_alarm(&mut flash_storage);
             watchdog.start(100.micros());
             loop {
                 nop();
             }
         }
-    } else {
-        match get_alarm_dt(
-            synced_date_time.get_adjusted_dt(timer),
-            alarm_day,
-            alarm_hours,
-            alarm_minutes,
-        ) {
-            Ok(alarm_dt) => {
-                alarm_time = Some(alarm_dt);
-            }
-            Err(_) => {
-                alarm_time = None;
-                should_sleep = false;
-                error!(
-                    "Could not get alarm dt for {} {}",
-                    alarm_hours, alarm_minutes
-                )
-            }
-        }
     }
-    if alarm_time.is_some() {
+    if let Some(alarm) = alarm_date_time {
         info!(
             "Recording scheduled for the {} at {}:{} ",
-            alarm_time.as_mut().unwrap().day(),
-            alarm_time.as_mut().unwrap().time().hour(),
-            alarm_time.as_mut().unwrap().time().minute()
+            alarm.day(),
+            alarm.time().hour(),
+            alarm.time().minute()
         );
     }
 
@@ -498,10 +490,9 @@ pub fn audio_task(
         if should_sleep {
             if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                 if pi_is_powered_down {
-                    if alarm_time.is_some() {
-                        let until_alarm = (alarm_time.unwrap()
-                            - synced_date_time.get_adjusted_dt(timer))
-                        .num_minutes();
+                    if let Some(alarm_time) = alarm_date_time {
+                        let until_alarm =
+                            (alarm_time - synced_date_time.get_adjusted_dt(timer)).num_minutes();
 
                         if until_alarm < 1 {
                             // otherwise the alarm could trigger  between here and sleeping
@@ -726,6 +717,7 @@ pub fn schedule_audio_rec(
     let current_time = synced_date_time.get_adjusted_dt(timer);
     let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);
     let mut alarm_mode = 0u8;
+
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
             let (start, end) = device_config.next_or_current_recording_window(&current_time);
@@ -760,7 +752,6 @@ pub fn schedule_audio_rec(
         synced_date_time.date_time_utc.time().minute()
     );
 
-    let wakeup = synced_date_time.date_time_utc + chrono::Duration::seconds(wake_in as i64);
     if let Err(err) = i2c.enable_alarm(delay) {
         error!("Failed to enable alarm");
         return Err(());
@@ -776,7 +767,8 @@ pub fn schedule_audio_rec(
                     flash_storage,
                 );
 
-                write_alarm_schedule_to_rp2040_flash(
+                write_audio_alarm(
+                    flash_storage,
                     wakeup.day() as u8,
                     wakeup.hour() as u8,
                     wakeup.minute() as u8,

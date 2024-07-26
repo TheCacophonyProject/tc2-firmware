@@ -1,7 +1,7 @@
 // TODO: Essentially we want to log an error code and a timestamp for each error/event to flash storage.
 //  There would be a maximum number of errors we can store before we run out of memory.  Timestamp can
 //  be in 32bit seconds past a given epoch (let's say Jan 1 2023).  Is a 1 second granularity enough?
-use crate::onboard_flash::OnboardFlash;
+use crate::{onboard_flash::OnboardFlash, rp2040_flash::FLASH_END};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::NaiveDateTime;
 use core::ops::Range;
@@ -123,7 +123,7 @@ impl LoggerEvent {
         NaiveDateTime::from_timestamp_nanos(self.timestamp as i64)
     }
 }
-pub const MAX_EVENTS_IN_LOGGER: usize = 1024;
+pub const MAX_EVENTS_IN_LOGGER: usize = 1024 - 4 * 64; //leave last page for config stuff
 
 const EVENT_CODE_LENGTH: usize = 2;
 const EVENT_TIMESTAMP_LENGTH: usize = 8;
@@ -131,6 +131,7 @@ const EVENT_PAYLOAD_LENGTH: usize = 8;
 const EVENT_LENGTH: usize = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH;
 
 const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: isize = 2048 - 4;
+const FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX: isize = 2047;
 pub struct EventLogger {
     next_event_index: Option<usize>,
 }
@@ -189,7 +190,7 @@ impl EventLogger {
         let page = ((event_index % 256) / 4) as isize;
         let page_offset = (event_index % 4) * 64; // Allocate 64 bytes for each event
 
-        if block >= 2048 {
+        if block >= FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX {
             None
         } else if flash_storage.read_page(block, page).is_ok() {
             let event = flash_storage
@@ -209,9 +210,9 @@ impl EventLogger {
     }
 
     pub fn clear(&mut self, flash_storage: &mut OnboardFlash) {
-        if self.has_events_to_offload() {
+        if true || self.has_events_to_offload() {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
-            let end_block_index = 2048;
+            let end_block_index = FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX;
             for block_index in start_block_index..end_block_index {
                 if flash_storage.bad_blocks.contains(&(block_index as i16)) {
                     info!("Skipping erase of bad block {}", block_index);
@@ -313,5 +314,41 @@ impl EventLogger {
         } else {
             warn!("Event log full");
         }
+    }
+}
+
+//write some audio config into flash storage instead of rp240 flash
+//rp2040 flash was causing some slow downs in the code after every write
+const AUDIO_BLOCK: isize = 2047;
+const AUDIO_PAGE: isize = 0;
+pub fn clear_audio_alarm(flash_storage: &mut OnboardFlash) {
+    let _ = flash_storage.erase_block(AUDIO_BLOCK);
+}
+
+pub fn write_audio_alarm(
+    flash_storage: &mut OnboardFlash,
+    alarm_day: u8,
+    alarm_hours: u8,
+    alarm_minutes: u8,
+    mode: u8,
+) {
+    // 4 blocks per page, 64 pages per block.
+    let _ = flash_storage.erase_block(AUDIO_BLOCK);
+    let page_offset = 0;
+    let mut event_data = [0u8; 18];
+    event_data[0..4].copy_from_slice(&[alarm_day, alarm_hours, alarm_minutes, mode]);
+    info!("Writing event data {}", event_data);
+    flash_storage.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset as u16);
+}
+
+pub fn get_audio_alarm(flash_storage: &mut OnboardFlash) -> Option<[u8; 4]> {
+    // 4 blocks per page, 64 pages per block.
+    let page_offset = 0;
+    if flash_storage.read_page(AUDIO_BLOCK, AUDIO_PAGE).is_ok() {
+        let event = flash_storage
+            .read_event_from_cache_at_column_offset_spi(AUDIO_BLOCK, page_offset as isize);
+        return Some(event[0..4].try_into().unwrap());
+    } else {
+        None
     }
 }

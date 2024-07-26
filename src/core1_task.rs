@@ -12,12 +12,15 @@ use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
+use crate::event_logger::{
+    clear_audio_alarm, get_audio_alarm, write_audio_alarm, EventLogger, LoggerEvent,
+    LoggerEventKind,
+};
+
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
-use crate::rp2040_flash::{clear_flash_alarm, read_alarm_from_rp2040_flash};
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
@@ -416,6 +419,95 @@ pub fn core_1_task(
         }
     }
 
+    let record_audio: bool;
+    let mut audio_pending: bool = false;
+    let mut next_audio_alarm: Option<NaiveDateTime> = None;
+    // let alarm_time = get_audio_alarm(&mut flash_storage);
+    // info!("Reading audio alarm time is {}", alarm_time);
+    // write_audio_alarm(&mut flash_storage, 26, 16, 5, 1);
+    // let alarm_time = get_audio_alarm(&mut flash_storage).unwrap();
+    // info!("(2)Reading audio alarm time is {}", alarm_time);
+    // let alarm_dt = get_alarm_dt(
+    //     synced_date_time.date_time_utc,
+    //     alarm_time[0],
+    //     alarm_time[1],
+    //     alarm_time[2],
+    // )
+    // .ok()
+    // .unwrap();
+    // info!(
+    //     "Alarm already scheduled for {} {}:{}",
+    //     alarm_dt.day(),
+    //     alarm_dt.hour(),
+    //     alarm_dt.minute()
+    // );
+    // loop {
+    //     nop();
+    // }
+    match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal => {
+            let alarm_time = get_audio_alarm(&mut flash_storage);
+            record_audio = true;
+            let mut schedule_alarm = true;
+
+            if let Some(alarm_time) = alarm_time {
+                let scheduled: bool = alarm_time[0] != u8::MAX
+                    && alarm_time[1] != u8::MAX
+                    && alarm_time[2] != u8::MAX;
+                if alarm_time[3] == 1 {
+                    //means the alarm was to be in thermal mode so need to schedule audio rec
+                    schedule_alarm = true;
+                } else if scheduled {
+                    match get_alarm_dt(
+                        synced_date_time.date_time_utc,
+                        alarm_time[0],
+                        alarm_time[1],
+                        alarm_time[2],
+                    ) {
+                        Ok(alarm_dt) => {
+                            let synced = synced_date_time.date_time_utc;
+                            let until_alarm = (alarm_dt - synced).num_minutes();
+                            if until_alarm <= MAX_GAP_MIN as i64 {
+                                info!(
+                                    "Alarm already scheduled for {} {}:{}",
+                                    alarm_dt.day(),
+                                    alarm_dt.hour(),
+                                    alarm_dt.minute()
+                                );
+                                next_audio_alarm = Some(alarm_dt);
+                                schedule_alarm = false;
+                            } else {
+                                info!("Alarm is missed");
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if schedule_alarm {
+                if let Ok(next_alarm) = schedule_audio_rec(
+                    &mut delay,
+                    &synced_date_time,
+                    &mut shared_i2c,
+                    &mut flash_storage,
+                    &mut timer,
+                    &mut event_logger,
+                    &device_config,
+                ) {
+                    next_audio_alarm = Some(next_alarm);
+                    info!("Setting a pending audio alarm");
+                } else {
+                    error!("Couldn't schedule alarm");
+                }
+            }
+        }
+        _ => {
+            info!("CLEARING");
+            clear_audio_alarm(&mut flash_storage);
+            record_audio = false
+        }
+    }
+
     if !device_config.use_low_power_mode() {
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
         maybe_offload_events(
@@ -482,66 +574,6 @@ pub fn core_1_task(
         false
     };
 
-    let record_audio: bool;
-    let mut audio_pending: bool = false;
-    let mut next_audio_alarm: Option<NaiveDateTime> = None;
-    match device_config.config().audio_mode {
-        AudioMode::AudioAndThermal => {
-            let alarm_time = read_alarm_from_rp2040_flash();
-            record_audio = true;
-
-            let scheduled: bool =
-                alarm_time[0] != u8::MAX && alarm_time[1] != u8::MAX && alarm_time[2] != u8::MAX;
-            let mut schedule_alarm = true;
-            if scheduled {
-                info!("Alarm scheduled");
-                match get_alarm_dt(
-                    synced_date_time.date_time_utc,
-                    alarm_time[0],
-                    alarm_time[1],
-                    alarm_time[2],
-                ) {
-                    Ok(alarm_dt) => {
-                        let synced = synced_date_time.date_time_utc;
-                        let until_alarm = (alarm_dt - synced).num_minutes();
-                        if until_alarm <= MAX_GAP_MIN as i64 {
-                            info!(
-                                "Alarm already scheduled for {} {}:{}",
-                                alarm_dt.day(),
-                                alarm_dt.hour(),
-                                alarm_dt.minute()
-                            );
-                            next_audio_alarm = Some(alarm_dt);
-                            schedule_alarm = false;
-                        } else {
-                            info!("Alarm is missed");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if schedule_alarm {
-                if let Ok(next_alarm) = schedule_audio_rec(
-                    &mut delay,
-                    &synced_date_time,
-                    &mut shared_i2c,
-                    &mut flash_storage,
-                    &mut timer,
-                    &mut event_logger,
-                    &device_config,
-                ) {
-                    next_audio_alarm = Some(next_alarm);
-                    info!("Setting a pending audio alarm");
-                } else {
-                    error!("Couldn't schedule alarm");
-                }
-            }
-        }
-        _ => {
-            clear_flash_alarm();
-            record_audio = false
-        }
-    }
     if record_audio {
         info!(
             "Alarm scheduled for {} {}:{}",
