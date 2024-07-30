@@ -18,7 +18,7 @@ pub enum LoggerEventKind {
     ToldRpiToSleep,
     GotRpiPoweredDown,
     GotRpiPoweredOn,
-    ToldRpiToWake,
+    ToldRpiToWake(u64),
     LostSync,
     SetAlarm(u64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
     GotPowerOnTimeout,
@@ -51,7 +51,7 @@ impl Into<u16> for LoggerEventKind {
             ToldRpiToSleep => 7,
             GotRpiPoweredDown => 8,
             GotRpiPoweredOn => 9,
-            ToldRpiToWake => 10,
+            ToldRpiToWake(_) => 10,
             LostSync => 11,
             SetAlarm(_) => 12,
             GotPowerOnTimeout => 13,
@@ -88,7 +88,7 @@ impl TryFrom<u16> for LoggerEventKind {
             7 => Ok(ToldRpiToSleep),
             8 => Ok(GotRpiPoweredDown),
             9 => Ok(GotRpiPoweredOn),
-            10 => Ok(ToldRpiToWake),
+            10 => Ok(ToldRpiToWake(0)),
             11 => Ok(LostSync),
             12 => Ok(SetAlarm(0)),
             13 => Ok(GotPowerOnTimeout),
@@ -123,7 +123,7 @@ impl LoggerEvent {
     }
 
     pub fn timestamp(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_nanos(self.timestamp as i64)
+        NaiveDateTime::from_timestamp_micros(self.timestamp as i64)
     }
 }
 pub const MAX_EVENTS_IN_LOGGER: usize = 1024 - 4 * 64; //leave last page for config stuff
@@ -302,6 +302,8 @@ impl EventLogger {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
                 } else if let LoggerEventKind::RTCTime(alarm_time) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
+                } else if let LoggerEventKind::ToldRpiToWake(reason) = event.event {
+                    LittleEndian::write_u64(&mut event_data[10..18], reason);
                 }
                 // Write to the end of the flash storage.
                 // We can do up to 4 partial page writes per page, so in a block of 64 pages we get 256 entries.

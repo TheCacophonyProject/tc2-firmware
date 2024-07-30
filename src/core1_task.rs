@@ -409,7 +409,7 @@ pub fn core_1_task(
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
     if let AudioMode::AudioOnly = device_config.config().audio_mode {
-        shared_i2c.disable_alarm(&mut delay);
+        let _ = shared_i2c.disable_alarm(&mut delay);
         info!("Is audio device restarting");
         sio.fifo.write_blocking(Core1Task::RequestReset.into());
         loop {
@@ -501,13 +501,19 @@ pub fn core_1_task(
             }
         }
         _ => {
-            info!("CLEARING");
             clear_audio_alarm(&mut flash_storage);
             record_audio = false
         }
     }
 
     if !device_config.use_low_power_mode() {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::ToldRpiToWake(3),
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
         wake_raspberry_pi(&mut shared_i2c, &mut delay);
         maybe_offload_events(
             &mut pi_spi,
@@ -531,6 +537,15 @@ pub fn core_1_task(
     let should_offload = (has_files_to_offload
         && !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None))
         || flash_storage.is_too_full_to_start_new_recordings();
+    if should_offload {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::ToldRpiToWake(1),
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
     let should_offload = if !should_offload {
         let previous_offload_time = event_logger
             .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
@@ -545,7 +560,18 @@ pub fn core_1_task(
             } else {
                 Duration::minutes(0)
             };
-        has_files_to_offload && duration_since_prev_offload > Duration::hours(24)
+        if has_files_to_offload && duration_since_prev_offload > Duration::hours(24) {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(2),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+            true
+        } else {
+            false
+        }
     } else {
         should_offload
     };
@@ -1217,6 +1243,13 @@ pub fn core_1_task(
                     (timer.get_counter() - check_power_down_state_start).to_micros()
                 );
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::ToldRpiToWake(4),
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
                 wake_raspberry_pi(&mut shared_i2c, &mut delay);
             }
 

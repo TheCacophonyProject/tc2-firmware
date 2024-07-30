@@ -211,19 +211,37 @@ pub fn audio_task(
                 //this means end of thermal window so should offload recordings
                 if is_cptv {
                     should_wake = true;
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::ToldRpiToWake(5),
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
                 }
             }
         }
         _ => {}
     }
-    should_wake = should_wake
-        || should_offload_audio_recordings(
+    if !should_wake {
+        let wake_up = should_offload_audio_recordings(
             &mut flash_storage,
             &mut event_logger,
             &mut delay,
             &mut shared_i2c,
             synced_date_time.date_time_utc,
         );
+        if wake_up {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(6),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+        }
+        should_wake = wake_up;
+    };
 
     let mut do_recording = alarm_triggered;
 
@@ -519,7 +537,7 @@ pub fn audio_task(
                         &mut pi_spi,
                         timer,
                         &mut event_logger,
-                        should_wake,
+                        false,
                         device_config,
                         &mut delay,
                         &synced_date_time,
@@ -586,6 +604,13 @@ pub fn offload(
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(5),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
             wake_raspberry_pi(i2c, delay);
             awake = true;
             watchdog.start(8388607.micros());
