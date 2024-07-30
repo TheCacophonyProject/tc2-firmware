@@ -29,6 +29,8 @@ pub fn maybe_offload_events(
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
     clock_freq: u32,
+    time: &SyncedDateTime,
+
     mut watchdog: Option<&mut bsp::hal::Watchdog>,
 ) {
     if event_logger.has_events_to_offload() {
@@ -64,7 +66,13 @@ pub fn maybe_offload_events(
                             if attempts > 100 {
                                 warn!("Failed sending logger event to raspberry pi");
                                 success = false;
-
+                                event_logger.log_event(
+                                    LoggerEvent::new(
+                                        LoggerEventKind::LostSync,
+                                        time.get_timestamp_micros(&timer),
+                                    ),
+                                    flash_storage,
+                                );
                                 break 'transfer_event;
                             }
                             //takes tc2-agent about this long to poll again will always fail otherwise
@@ -140,6 +148,7 @@ pub fn offload_flash_storage_and_events(
         event_logger,
         flash_storage,
         clock_freq,
+        time,
         if watchdog.is_some() {
             Some(watchdog.as_mut().unwrap())
         } else {
