@@ -64,6 +64,7 @@ pub fn maybe_offload_events(
                             if attempts > 100 {
                                 warn!("Failed sending logger event to raspberry pi");
                                 success = false;
+
                                 break 'transfer_event;
                             }
                             //takes tc2-agent about this long to poll again will always fail otherwise
@@ -97,7 +98,7 @@ pub fn maybe_offload_events(
 }
 
 //feels like should be longer but seems to work
-const TIME_BETWEEN_TRANSFER: u64 = 1000;
+const TIME_BETWEEN_TRANSFER: u64 = 1500;
 
 pub fn offload_flash_storage_and_events(
     flash_storage: &mut OnboardFlash,
@@ -195,6 +196,13 @@ pub fn offload_flash_storage_and_events(
                 attempts += 1;
                 if attempts > 100 {
                     success = false;
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::LostSync,
+                            time.get_timestamp_micros(&timer),
+                        ),
+                        flash_storage,
+                    );
                     break 'transfer_part;
                 }
                 //takes tc2-agent about this long to poll again will fail a lot otherwise
