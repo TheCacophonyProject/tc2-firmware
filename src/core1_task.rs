@@ -13,8 +13,7 @@ use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{
-    clear_audio_alarm, get_audio_alarm, write_audio_alarm, EventLogger, LoggerEvent,
-    LoggerEventKind,
+    clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind,
 };
 
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
@@ -519,6 +518,7 @@ pub fn core_1_task(
             &mut event_logger,
             &mut flash_storage,
             clock_freq,
+            &synced_date_time,
             None,
         );
     }
@@ -981,7 +981,8 @@ pub fn core_1_task(
         }
 
         let one_min_check_start = timer.get_counter();
-        let expected_rtc_sync_time_us = 3500;
+        // let expected_rtc_sync_time_us = 3500;
+        let expected_rtc_sync_time_us = 4200; //using slower clock speed
 
         //INFO  RTC Sync time took 1350µs
         if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
@@ -1011,7 +1012,7 @@ pub fn core_1_task(
             }
             let sync_rtc_start_real = timer.get_counter();
 
-            let new_synced_date_time = match shared_i2c.get_datetime(&mut delay) {
+            synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
                 Err(e) => {
                     event_logger.log_event(
@@ -1022,39 +1023,10 @@ pub fn core_1_task(
                         &mut flash_storage,
                     );
                     error!("Unable to get DateTime from RTC: {}", e);
-                    SyncedDateTime::default()
+                    synced_date_time
                 }
             };
 
-            let prev_dt = synced_date_time.date_time_utc;
-            let diff = prev_dt - new_synced_date_time.date_time_utc;
-
-            if diff > Duration::minutes(30) {
-                error!(
-                    "Got new dt of {}/{}/{} {}:{}  which differs lots from old {}/{}/{} {}:{} ",
-                    new_synced_date_time.date_time_utc.year(),
-                    new_synced_date_time.date_time_utc.day(),
-                    new_synced_date_time.date_time_utc.month(),
-                    new_synced_date_time.date_time_utc.hour(),
-                    new_synced_date_time.date_time_utc.minute(),
-                    prev_dt.year(),
-                    prev_dt.day(),
-                    prev_dt.month(),
-                    prev_dt.hour(),
-                    prev_dt.minute()
-                );
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::RTCTime(
-                            new_synced_date_time.date_time_utc.timestamp_micros() as u64,
-                        ),
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    &mut flash_storage,
-                );
-            } else {
-                synced_date_time = new_synced_date_time;
-            }
             info!(
                 "RTC Sync time took {}µs",
                 (timer.get_counter() - sync_rtc_start_real).to_micros()

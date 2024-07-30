@@ -208,7 +208,7 @@ pub fn audio_task(
                 .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(timer), &None);
             if !in_window {
                 let is_cptv = flash_storage.has_cptv_files(true);
-                info!("last is cptv? {}", is_cptv);
+                //this means end of thermal window so should offload recordings
                 if is_cptv {
                     should_wake = true;
                 }
@@ -265,18 +265,6 @@ pub fn audio_task(
                     reboot = !device_config.config().is_audio_device()
                 }
 
-                // match device_config.config().audio_mode {
-                //     AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                //         //thermal alarm check the time represents next thermal start time
-                //         let (start, end) = device_config
-                //             .next_or_current_recording_window(&synced_date_time.get_adjusted_dt(timer));
-                //         if start.hour() != alarm_hours as u32 || start.minute() != alarm_minutes as u32 {
-                //             //config may of changed so reset the alarm
-                //             reschedule = true;
-                //         }
-                //     }
-                //     _ => (),
-                // }
                 if reboot {
                     let _ = shared_i2c.disable_alarm(&mut delay);
                     clear_audio_alarm(&mut flash_storage);
@@ -412,7 +400,6 @@ pub fn audio_task(
         if do_recording && !take_test_rec {
             shared_i2c.clear_alarm(&mut delay);
             reschedule = true;
-            info!("CLearing alarm");
             clear_audio_alarm(&mut flash_storage);
         } else {
             info!("taken test recoridng clearing status");
@@ -501,7 +488,6 @@ pub fn audio_task(
                             if until_alarm <= 0 {
                                 watchdog.start(100.micros());
                                 loop {
-                                    // Wait to be reset and become thermal device
                                     nop();
                                 }
                             }
@@ -545,7 +531,6 @@ pub fn audio_task(
                                 info!("Config updated restarting");
                                 watchdog.start(100.micros());
                                 loop {
-                                    // Wait to be reset and become thermal device
                                     nop();
                                 }
                             }
@@ -554,7 +539,6 @@ pub fn audio_task(
                             warn!("Restarting as failed to offload");
                             watchdog.start(100.micros());
                             loop {
-                                // Wait to be reset and become thermal device
                                 nop();
                             }
                         }

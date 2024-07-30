@@ -68,7 +68,7 @@ pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the atti
                                                     // const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 
 // got funny results at 150 for aduio seems to work better at 125
-const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];

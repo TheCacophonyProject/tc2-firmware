@@ -29,13 +29,14 @@ pub fn maybe_offload_events(
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
     clock_freq: u32,
+    time: &SyncedDateTime,
     mut watchdog: Option<&mut bsp::hal::Watchdog>,
-) {
+) -> bool {
+    let mut success = true;
     if event_logger.has_events_to_offload() {
         let event_indices = event_logger.event_range();
         let total_events = event_indices.end;
         warn!("Transferring {} events", total_events);
-        let mut success = true;
         let mut counter = timer.get_counter();
         'transfer_all_events: for event_index in event_indices {
             if watchdog.is_some() {
@@ -92,8 +93,17 @@ pub fn maybe_offload_events(
                 "Clear events took {}µs",
                 (timer.get_counter() - start).to_micros()
             );
+        } else {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::FileOffloadFailed,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
         }
     }
+    return success;
 }
 
 //feels like should be longer but seems to work
@@ -139,6 +149,7 @@ pub fn offload_flash_storage_and_events(
         event_logger,
         flash_storage,
         clock_freq,
+        time,
         if watchdog.is_some() {
             Some(watchdog.as_mut().unwrap())
         } else {
@@ -147,7 +158,6 @@ pub fn offload_flash_storage_and_events(
     );
     // do some offloading.
     let mut file_count = 0;
-    info!("BEGIN OFFLOAD");
     flash_storage.begin_offload();
     let mut file_start = true;
     let mut part_count = 0;
@@ -156,7 +166,6 @@ pub fn offload_flash_storage_and_events(
 
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
-    info!("CYCLE PARTS");
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
         flash_storage.get_file_part()
     {
@@ -218,6 +227,13 @@ pub fn offload_flash_storage_and_events(
         }
         if !success {
             info!("NOT success so breaking");
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::FileOffloadFailed,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
             break;
         }
 

@@ -359,7 +359,7 @@ impl SharedI2C {
 
     pub fn get_is_recording(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         let res = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok((state & 4) == 4),
+            Ok(state) => Ok((state & Tc2AgentState::RECORDING) == Tc2AgentState::RECORDING),
             Err(e) => Err(e),
         };
         return res;
@@ -376,9 +376,9 @@ impl SharedI2C {
         match state {
             Ok(mut state) => {
                 if is_recording {
-                    state |= 4;
+                    state |= Tc2AgentState::RECORDING;
                 } else {
-                    state &= !4u8;
+                    state &= !Tc2AgentState::RECORDING;
                 }
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
                     Ok(_) => Ok(()),

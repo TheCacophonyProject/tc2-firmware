@@ -35,6 +35,7 @@ pub enum LoggerEventKind {
     ThermalMode,
     AudioMode,
     RecordingNotFinished,
+    FileOffloadFailed,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -64,9 +65,10 @@ impl Into<u16> for LoggerEventKind {
             AudioRecordingFailed => 21,
             RTCTime(_) => 22,
             StartedAudioRecording => 23,
-            ThermalMode => 22,
+            ThermalMode => 24,
             AudioMode => 25,
             RecordingNotFinished => 26,
+            FileOffloadFailed => 27,
         }
     }
 }
@@ -103,6 +105,7 @@ impl TryFrom<u16> for LoggerEventKind {
             24 => Ok(ThermalMode),
             25 => Ok(AudioMode),
             26 => Ok(RecordingNotFinished),
+            27 => Ok(FileOffloadFailed),
             _ => Err(()),
         }
     }

@@ -368,13 +368,8 @@ impl OnboardFlash {
         let mut is_last = false;
         let mut page_index = 0;
         let mut is_cptv: Option<bool> = None;
-        info!(
-            "Checking files from {}:{} current block {}",
-            self.last_used_block_index, self.current_page_index, self.current_block_index
-        );
         //only need to check last used page in a block and first page
         for block_index in (0..=self.last_used_block_index.unwrap()).rev() {
-            info!("READING BLOCK {}", block_index);
             while page_index >= 0 {
                 //find first used page
                 self.read_page(block_index, page_index).unwrap();
@@ -383,11 +378,6 @@ impl OnboardFlash {
                 if !self.current_page.page_is_used() {
                     continue;
                 }
-                info!(
-                    "Reading first non empty page {}:{} ",
-                    block_index,
-                    page_index + 1,
-                );
 
                 if is_cptv.is_none() {
                     //first page
@@ -408,7 +398,6 @@ impl OnboardFlash {
         }
 
         //only one file exists
-        info!("checking 0:0");
         self.read_page(0, 0).unwrap();
         self.read_page_from_cache(0);
         return self.current_page.user_data()[0] != 1;
