@@ -105,7 +105,7 @@ impl LoggerEvent {
     }
 
     pub fn timestamp(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_nanos(self.timestamp as i64)
+        NaiveDateTime::from_timestamp_micros(self.timestamp as i64)
     }
 }
 pub const MAX_EVENTS_IN_LOGGER: usize = 1024;
