@@ -465,6 +465,10 @@ impl SharedI2C {
         }
     }
 
+    pub fn tc2_agent_state(&mut self, delay: &mut Delay) -> Result<u8, Error> {
+        self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)
+    }
+
     pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => Ok((state & Tc2AgentState::TAKE_AUDIO) == Tc2AgentState::TAKE_AUDIO),

@@ -622,15 +622,12 @@ impl OnboardFlash {
                 let length = self.current_page.page_bytes_used();
                 let crc = self.current_page.page_crc();
                 let is_last_page_for_file = self.current_page.is_last_page_for_file();
+                let block = self.current_block_index;
+                let page = self.current_page_index;
                 self.advance_file_cursor(is_last_page_for_file);
                 let spi = self.free_spi().unwrap();
                 Some((
-                    (
-                        &self.current_page.user_data()[0..length],
-                        crc,
-                        self.current_block_index,
-                        self.current_page_index,
-                    ),
+                    (&self.current_page.user_data()[0..length], crc, block, page),
                     is_last_page_for_file,
                     spi,
                 ))
@@ -734,9 +731,12 @@ impl OnboardFlash {
 
     pub fn begin_offload(&mut self) {
         if let Some(block_index) = self.first_used_block_index {
-            self.current_block_index = block_index;
-            self.current_page_index = 0;
+            self.set_current_position(block_index, 0);
         }
+    }
+    pub fn set_current_position(&mut self, block_index: isize, page_index: isize) {
+        self.current_block_index = block_index;
+        self.current_page_index = page_index;
     }
 
     pub fn read_from_cache_at_column_offset(

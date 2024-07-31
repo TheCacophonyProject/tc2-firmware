@@ -274,6 +274,145 @@ pub fn offload_flash_storage_and_events(
     }
 }
 
+pub fn offload_file(
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    resets: &mut RESETS,
+    dma: &mut DMA,
+    clock_freq: u32,
+    shared_i2c: &mut SharedI2C,
+    delay: &mut Delay,
+    timer: &mut Timer,
+    event_logger: &mut EventLogger,
+    time: &SyncedDateTime,
+    mut watchdog: Option<&mut bsp::hal::Watchdog>,
+    start_index: (isize, isize),
+) -> bool {
+    if watchdog.is_some() {
+        watchdog.as_mut().unwrap().disable();
+    }
+
+    if wake_raspberry_pi(shared_i2c, delay) {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::GotRpiPoweredOn,
+                time.get_timestamp_micros(&timer),
+            ),
+            flash_storage,
+        );
+    }
+    if watchdog.is_some() {
+        watchdog.as_mut().unwrap().start(8388607.micros());
+    }
+
+    // do some offloading.
+    let mut file_count = 0;
+    flash_storage.set_current_position(start_index.0, start_index.1);
+    let mut file_start = true;
+    let mut part_count = 0;
+    let mut success: bool = true;
+    let mut counter;
+    let mut last_block: isize = 0;
+    while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+        flash_storage.get_file_part()
+    {
+        if watchdog.is_some() {
+            watchdog.as_mut().unwrap().feed();
+        }
+        pi_spi.enable(spi, resets);
+        let transfer_type = if file_start && !is_last {
+            ExtTransferMessage::BeginFileTransfer
+        } else if !file_start && !is_last {
+            ExtTransferMessage::ResumeFileTransfer
+        } else if is_last {
+            ExtTransferMessage::EndFileTransfer
+        } else if file_start && is_last {
+            ExtTransferMessage::BeginAndEndFileTransfer
+        } else {
+            crate::unreachable!("Invalid file transfer state");
+        };
+
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let current_crc = crc_check.checksum(&part);
+        if current_crc != crc {
+            warn!(
+                "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                part_count, block_index, page_index
+            );
+        }
+        let mut attempts = 0;
+        'transfer_part: loop {
+            if watchdog.is_some() {
+                watchdog.as_mut().unwrap().feed();
+            }
+            let did_transfer =
+                pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+            counter = timer.get_counter();
+            if !did_transfer {
+                attempts += 1;
+                if attempts % 10 == 0 {
+                    info!("Failed {}", attempts);
+                }
+                if attempts > 100 {
+                    success = false;
+                    break 'transfer_part;
+                }
+                //takes tc2-agent about this long to poll again will fail a lot otherwise
+                let time_since = (timer.get_counter() - counter).to_micros();
+                if time_since < TIME_BETWEEN_TRANSFER {
+                    delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                }
+            } else {
+                break 'transfer_part;
+            }
+        }
+
+        // Give spi peripheral back to flash storage.
+        if let Some(spi) = pi_spi.disable() {
+            flash_storage.take_spi(spi, resets, clock_freq.Hz());
+        }
+        if !success {
+            info!("NOT success so breaking");
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::FileOffloadFailed,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
+            break;
+        }
+
+        part_count += 1;
+        if is_last {
+            last_block = block_index;
+            file_count += 1;
+            break;
+        }
+        file_start = false;
+    }
+
+    if success {
+        info!("Completed file offload, transferred {} files", file_count);
+        if file_count > 0 {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedRecording,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
+            info!("Erasing after successful offload");
+            let _ = flash_storage.erase_block_range(start_index.0, last_block);
+        }
+        file_count != 0
+    } else {
+        flash_storage.scan();
+        warn!("File transfer to pi failed");
+        false
+    }
+}
+
 /// Returns `(Option<DeviceConfig>, true)` when config was updated
 pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     flash_storage: &mut OnboardFlash,

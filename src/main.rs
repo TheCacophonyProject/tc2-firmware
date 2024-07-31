@@ -29,6 +29,7 @@ use crate::core1_task::{core_1_task, Core1Pins, Core1Task, SyncedDateTime};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
+use attiny_rtc_i2c::Tc2AgentState;
 use bsp::{
     entry,
     hal::{
@@ -193,32 +194,29 @@ fn main() -> ! {
     }
 
     if is_audio {
-        let in_window;
         let config = config.unwrap().0;
         match config.audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                 let (start_time, end_time) = config.next_or_current_recording_window(&date_time);
 
-                in_window = config.time_is_in_recording_window(&date_time, &None);
+                let in_window = config.time_is_in_recording_window(&date_time, &None);
 
                 info!("Is in window {}", in_window);
                 is_audio = !in_window;
-            }
-            _ => in_window = false,
-        }
-
-        if let AudioMode::AudioAndThermal = config.audio_mode {
-            if in_window {
-                is_audio = false;
-                info!("Checking if agent requested rec");
-                if let Ok(audio_request) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-                    is_audio = audio_request;
-                    info!("Audio request?? {}", audio_request);
-                    if (is_audio) {
-                        info!("Is audio because thermal requested");
+                if in_window {
+                    info!("Checking if agent requested rec");
+                    if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
+                        is_audio = (state
+                            & (Tc2AgentState::TAKE_AUDIO | Tc2AgentState::TEST_AUDIO_RECORDING))
+                            > 0;
+                        info!("Audio request?? {}", state);
+                        if (is_audio) {
+                            info!("Is audio because thermal requested or test rec");
+                        }
                     }
                 }
             }
+            _ => (),
         }
     }
     let (i2c1, unlocked_pin) = shared_i2c.free();

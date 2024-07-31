@@ -230,7 +230,7 @@ impl PdmMicrophone {
         timestamp: u64,
         watchdog: &mut bsp::hal::Watchdog,
         date_time: &SyncedDateTime,
-    ) -> bool {
+    ) -> (bool, (isize, isize)) {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
 
@@ -266,6 +266,7 @@ impl PdmMicrophone {
             flash_storage.payload_buffer =
                 Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
         }
+        let mut file_position = (0, 0);
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
@@ -282,7 +283,7 @@ impl PdmMicrophone {
             let mut cycle = 0;
             let mut audio_buffer = AudioBuffer::new();
             audio_buffer.init(timestamp, adjusted_sr as u16);
-            let start_block_index = flash_storage.start_file(0);
+            file_position = (flash_storage.start_file(0), 0);
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
@@ -297,8 +298,8 @@ impl PdmMicrophone {
                         );
                     }
                     if flash_storage.last_used_block_index.is_some() {
-                        flash_storage.erase_block_range(
-                            start_block_index,
+                        let _ = flash_storage.erase_block_range(
+                            file_position.0,
                             flash_storage.last_used_block_index.unwrap(),
                         );
                     }
@@ -398,7 +399,7 @@ impl PdmMicrophone {
             }
             self.disable();
         }
-        recorded_successfully
+        (recorded_successfully, file_position)
     }
 }
 
