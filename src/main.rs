@@ -175,11 +175,14 @@ fn main() -> ! {
 
     let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
     info!("Got shared i2c");
+
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
+    shared_i2c.eeprom_data(&mut delay);
+
     if !is_audio {
         let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
         if disabled_alarm.is_err() {

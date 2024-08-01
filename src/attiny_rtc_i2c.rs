@@ -27,6 +27,9 @@ pub struct SharedI2C {
     i2c: Option<I2CConfig>,
     rtc: Option<PCF8563<I2CConfig>>,
 }
+const EEPROM_LENGTH: usize = 1 + 1 + 3 + 8 + 4 + 2;
+
+const PAGE_LENGTH: usize = 16;
 
 #[repr(u8)]
 #[derive(Format)]
@@ -84,6 +87,11 @@ const REG_CAMERA_CONNECTION: u8 = 0x03;
 const REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
 //const REG_PI_WAKEUP: u8 = 0x06;
 const REG_TC2_AGENT_STATE: u8 = 0x07;
+
+const EEPROM_ADDRESS: u8 = 0x50;
+// EEPROM_FIRST_BYTE = 0xCA
+// EEPROM_FILE       = "/etc/cacophony/eeprom-data.json"
+// )
 
 pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
     width: 16,
@@ -205,7 +213,7 @@ impl SharedI2C {
         &mut self,
         command: u8,
         value: Option<u8>,
-        payload: &mut [u8; 3],
+        payload: &mut [u8],
     ) -> Result<(), Error> {
         let lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
@@ -726,5 +734,86 @@ impl SharedI2C {
 
     pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x02, delay)
+    }
+
+    fn try_attiny_read_page_command(
+        &mut self,
+        command: u8,
+        delay: &mut Delay,
+        attempts: Option<i32>,
+        payload: &mut [u8],
+    ) -> Result<(), Error> {
+        // let mut payload = [0u8; PAGE_LENGTH];
+        let max_attempts = attempts.unwrap_or(100);
+        let mut num_attempts = 0;
+        loop {
+            match self.attiny_write_read_command(command, None, payload) {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(e) => {
+                    num_attempts += 1;
+                    if num_attempts == max_attempts {
+                        return Err(e);
+                    }
+                    delay.delay_us(500);
+                }
+            }
+        }
+    }
+
+    pub fn eeprom_data(&mut self, delay: &mut Delay) -> Result<EEPROM, ()> {
+        let mut read_length: usize;
+        let mut eeprom_data = [0u8; EEPROM_LENGTH];
+        for i in (0..EEPROM_LENGTH).step_by(PAGE_LENGTH) {
+            read_length = if EEPROM_LENGTH - i < PAGE_LENGTH {
+                EEPROM_LENGTH - i
+            } else {
+                PAGE_LENGTH
+            };
+            let start_i = i * PAGE_LENGTH;
+            self.try_attiny_read_page_command(
+                EEPROM_ADDRESS,
+                delay,
+                None,
+                &mut eeprom_data[start_i..read_length + start_i],
+            );
+        }
+        let mut has_data = false;
+        for data in eeprom_data {
+            if data != 0xFF {
+                has_data = true;
+                break;
+            }
+        }
+        if !has_data {
+            info!("No eep rom data");
+            return Err(());
+        }
+        info!("Got eep rom data {}", eeprom_data);
+        let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
+        if BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]) == crc {
+            return Ok(EEPROM::new(&eeprom_data[1..]));
+        }
+
+        return Err(());
+    }
+}
+
+pub struct EEPROM {
+    version: u8,
+    hardware_version: [u8; 3],
+    id: u64,
+    timestamp: u32,
+}
+
+impl EEPROM {
+    pub fn new(payload: &[u8]) -> EEPROM {
+        EEPROM {
+            version: payload[0],
+            hardware_version: payload[1..4].try_into().unwrap(),
+            id: BigEndian::read_u64(&payload[4..12]),
+            timestamp: BigEndian::read_u32(&payload[12..16]),
+        }
     }
 }
