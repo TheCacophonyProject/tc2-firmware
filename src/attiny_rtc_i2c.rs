@@ -736,6 +736,25 @@ impl SharedI2C {
         self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x02, delay)
     }
 
+    fn attiny_read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), Error> {
+        let lock_pin = self.unlocked_pin.take().unwrap();
+        let is_low = lock_pin.is_low().unwrap_or(false);
+        if is_low {
+            let pin = lock_pin.into_pull_type::<PullUp>();
+
+            let mut request = [command];
+            // let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
+            // BigEndian::write_u16(&mut request[1..=2], crc);
+            let result = self.i2c().write_read(EEPROM_ADDRESS, &request, payload);
+
+            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+            return result;
+        } else {
+            self.unlocked_pin = Some(lock_pin);
+            Err(Error::Abort(1))
+        }
+    }
+
     fn try_attiny_read_page_command(
         &mut self,
         command: u8,
@@ -747,7 +766,7 @@ impl SharedI2C {
         let max_attempts = attempts.unwrap_or(100);
         let mut num_attempts = 0;
         loop {
-            match self.attiny_write_read_command(command, None, payload) {
+            match self.attiny_read_eeprom_command(command, payload) {
                 Ok(_) => {
                     return Ok(());
                 }
@@ -771,13 +790,22 @@ impl SharedI2C {
             } else {
                 PAGE_LENGTH
             };
-            let start_i = i * PAGE_LENGTH;
+            // let start_i = i * PAGE_LENGTH;
+            info!(
+                "Reading data {}:{} with value {} reading {} len {}",
+                i,
+                i + read_length,
+                i,
+                read_length,
+                &mut eeprom_data[i..read_length + i].len()
+            );
             self.try_attiny_read_page_command(
-                EEPROM_ADDRESS,
+                i as u8,
                 delay,
                 None,
-                &mut eeprom_data[start_i..read_length + start_i],
+                &mut eeprom_data[i..read_length + i],
             );
+            info!("After first read {}", &mut eeprom_data[i..read_length + i]);
         }
         let mut has_data = false;
         for data in eeprom_data {
@@ -790,21 +818,30 @@ impl SharedI2C {
             info!("No eep rom data");
             return Err(());
         }
-        info!("Got eep rom data {}", eeprom_data);
+        info!(
+            "Got eep rom data {} {}",
+            eeprom_data,
+            &eeprom_data[..eeprom_data.len() - 2]
+        );
+        if eeprom_data[0] != 0xCA {
+            info!("Incorect first byte");
+            return Err(());
+        }
         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
-        if BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]) == crc {
+        let gotcrc = BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]);
+        if gotcrc == crc {
             return Ok(EEPROM::new(&eeprom_data[1..]));
         }
-
+        info!("CRC FAIL {} got {}", crc, gotcrc);
         return Err(());
     }
 }
 
 pub struct EEPROM {
-    version: u8,
-    hardware_version: [u8; 3],
-    id: u64,
-    timestamp: u32,
+    pub version: u8,
+    pub hardware_version: [u8; 3],
+    pub id: u64,
+    pub timestamp: u32,
 }
 
 impl EEPROM {
