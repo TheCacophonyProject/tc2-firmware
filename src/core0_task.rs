@@ -489,8 +489,7 @@ pub fn frame_acquisition_loop(
                             prev_frame_needs_transfer = false;
                         } else if message == Core1Task::RequestReset.into() {
                             info!("Requested reset");
-                            watchdog.feed();
-                            watchdog.start(8000.micros());
+                            watchdog.start(100.micros());
                             loop {
                                 // Wait until the watchdog timer kills us.
                                 nop();

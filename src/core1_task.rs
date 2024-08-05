@@ -942,8 +942,8 @@ pub fn core_1_task(
                         ),
                         &mut flash_storage,
                     );
-                    if !making_status_recording && true
-                        || motion_detection.as_ref().unwrap().was_false_positive()
+                    if !making_status_recording
+                        && motion_detection.as_ref().unwrap().was_false_positive()
                     // && cptv_stream.num_frames <= 100
                     {
                         info!(
@@ -1049,7 +1049,7 @@ pub fn core_1_task(
 
             synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
-                Err(e) => {
+                Err(err_str) => {
                     event_logger.log_event(
                         LoggerEvent::new(
                             LoggerEventKind::RtcCommError,
@@ -1057,7 +1057,7 @@ pub fn core_1_task(
                         ),
                         &mut flash_storage,
                     );
-                    error!("Unable to get DateTime from RTC: {}", e);
+                    error!("Unable to get DateTime from RTC: {}", err_str);
                     synced_date_time
                 }
             };
@@ -1311,7 +1311,7 @@ pub fn core_1_task(
         //     (one_min_check_end - one_min_check_start).to_micros(),
         //     (frame_transfer_end - frame_transfer_start).to_micros()
         // );
-        if record_audio && made_startup_status_recording {
+        if record_audio {
             if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm.unwrap() {
                 //Should we be checking alarm triggered? or just us ethis and clear alarm
                 audio_pending = true;
