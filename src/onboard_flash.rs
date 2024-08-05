@@ -533,7 +533,7 @@ impl OnboardFlash {
         start_block_index: isize,
         end_block_index: isize,
     ) -> Result<(), &str> {
-        for block_index in start_block_index..end_block_index {
+        for block_index in start_block_index..=end_block_index {
             if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
             } else if !self.erase_block(block_index).is_ok() {

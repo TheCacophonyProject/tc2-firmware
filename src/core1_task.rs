@@ -760,9 +760,9 @@ pub fn core_1_task(
                 // to give more breathing room.
                 if let Some(cptv_stream) = &mut cptv_stream {
                     error!("Ending current recording");
-                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
                     let cptv_start_block_index = cptv_stream.starting_block_index as isize;
                     cptv_stream.finalise(&mut flash_storage);
+                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
 
                     ended_recording = true;
                     let _ = shared_i2c
