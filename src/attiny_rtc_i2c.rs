@@ -727,4 +727,125 @@ impl SharedI2C {
     pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x02, delay)
     }
+
+    fn read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), Error> {
+        let lock_pin = self.unlocked_pin.take().unwrap();
+        let is_low = lock_pin.is_low().unwrap_or(false);
+        if is_low {
+            let pin = lock_pin.into_pull_type::<PullUp>();
+            let result = self.i2c().write_read(EEPROM_ADDRESS, &[command], payload);
+            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+            return result;
+        } else {
+            self.unlocked_pin = Some(lock_pin);
+            Err(Error::Abort(1))
+        }
+    }
+
+    fn try_read_eeprom_command(
+        &mut self,
+        command: u8,
+        delay: &mut Delay,
+        attempts: Option<i32>,
+        payload: &mut [u8],
+    ) -> Result<(), Error> {
+        let max_attempts = attempts.unwrap_or(100);
+        let mut num_attempts = 0;
+        loop {
+            match self.read_eeprom_command(command, payload) {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(e) => {
+                    num_attempts += 1;
+                    if num_attempts == max_attempts {
+                        return Err(e);
+                    }
+                    delay.delay_us(500);
+                }
+            }
+        }
+    }
+
+    pub fn is_audio_device(&mut self, delay: &mut Delay) -> Result<bool, ()> {
+        let page_length: usize = 16;
+
+        let mut read_length: usize;
+        let mut eeprom_data = [0u8; EEPROM_LENGTH];
+
+        for i in (0..EEPROM_LENGTH).step_by(page_length) {
+            read_length = if EEPROM_LENGTH - i < page_length {
+                EEPROM_LENGTH - i
+            } else {
+                page_length
+            };
+            if let Err(e) = self.try_read_eeprom_command(
+                i as u8,
+                delay,
+                None,
+                &mut eeprom_data[i..read_length + i],
+            ) {
+                warn!("Couldn't read eeprom data {}", e);
+                return Err(());
+            }
+            if i == 0 {
+                if eeprom_data[1] == 1 {
+                    // don't think any need to parse as it has no audio info
+                    info!("Need eeprom version 2 ");
+                    return Err(());
+                }
+            }
+        }
+        let has_data = eeprom_data.iter().any(|&x| x != 0xff);
+        if !has_data {
+            info!("No EEPROM data");
+            return Err(());
+        }
+
+        if eeprom_data[0] != 0xCA {
+            info!(
+                "Incorrect first byte got {} should be {}",
+                eeprom_data[0], 0xCA
+            );
+            return Err(());
+        }
+        let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
+        let gotcrc = BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]);
+        if gotcrc == crc {
+            return Ok(eeprom_data[13] > 0);
+        }
+        info!("CRC failed expected {} got {}", crc, gotcrc);
+        return Err(());
+    }
 }
+
+const EEPROM_LENGTH: usize = 1 + 1 + 3 * 4 + 1 + 8 + 4 + 2;
+const EEPROM_ADDRESS: u8 = 0x50;
+
+//not used to save memory
+// #[derive(Format)]
+// pub struct EEPROM {
+//     pub version: u8,
+//     pub hardware_version: [u8; 3],
+//     pub power_version: [u8; 3],
+//     pub touch_version: [u8; 3],
+//     pub mic_version: [u8; 3],
+//     pub audio_only: bool,
+//     pub id: u64,
+//     pub timestamp: u32,
+// }
+
+// impl EEPROM {
+//     pub fn new(payload: &[u8]) -> EEPROM {
+//         EEPROM {
+//             version: payload[0],
+//             hardware_version: payload[1..4].try_into().unwrap(),
+//             power_version: payload[4..7].try_into().unwrap(),
+//             touch_version: payload[7..10].try_into().unwrap(),
+//             mic_version: payload[10..13].try_into().unwrap(),
+//             audio_only: payload[13] > 0,
+//             id: BigEndian::read_u64(&payload[4..12]),
+//             timestamp: BigEndian::read_u32(&payload[12..16]),
+//         }
+//     }
+// }

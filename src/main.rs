@@ -109,7 +109,7 @@ fn main() -> ! {
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let is_audio = read_is_audio_from_rp2040_flash();
+    let mut is_audio = read_is_audio_from_rp2040_flash();
 
     let freq = if is_audio {
         ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
@@ -180,6 +180,12 @@ fn main() -> ! {
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
+
+    if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
+        info!("EEPROM audio device: {}", audio_only);
+        is_audio = is_audio || audio_only;
+    }
+
     if !is_audio {
         let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
         if disabled_alarm.is_err() {
@@ -347,7 +353,7 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<45000> = Stack::new();
+    let mut core1_stack: Stack<44900> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
