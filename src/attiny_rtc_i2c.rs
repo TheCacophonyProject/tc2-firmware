@@ -742,7 +742,7 @@ impl SharedI2C {
         }
     }
 
-    fn try_attiny_read_page_command(
+    fn try_attiny_read_eeprom_command(
         &mut self,
         command: u8,
         delay: &mut Delay,
@@ -773,25 +773,13 @@ impl SharedI2C {
         let mut read_length: usize;
         let mut eeprom_data = [0u8; EEPROM_LENGTH];
 
-        if let Err(e) =
-            self.try_attiny_read_page_command(0u8, delay, None, &mut eeprom_data[0..page_length])
-        {
-            warn!("Couldn't read eeprom data {}", e);
-            return Err(());
-        }
-        let eeprom_version = eeprom_data[1];
-        if eeprom_version == 1 {
-            // don't think any need to parse as it has no audio info
-            info!("Need eeprom version 2 ");
-            return Err(());
-        }
-        for i in (page_length..EEPROM_LENGTH).step_by(page_length) {
+        for i in (0..EEPROM_LENGTH).step_by(page_length) {
             read_length = if EEPROM_LENGTH - i < page_length {
                 EEPROM_LENGTH - i
             } else {
                 page_length
             };
-            if let Err(e) = self.try_attiny_read_page_command(
+            if let Err(e) = self.try_attiny_read_eeprom_command(
                 i as u8,
                 delay,
                 None,
@@ -799,6 +787,13 @@ impl SharedI2C {
             ) {
                 warn!("Couldn't read eeprom data {}", e);
                 return Err(());
+            }
+            if i == 0 {
+                if eeprom_data[1] == 1 {
+                    // don't think any need to parse as it has no audio info
+                    info!("Need eeprom version 2 ");
+                    return Err(());
+                }
             }
         }
         let mut has_data = false;
