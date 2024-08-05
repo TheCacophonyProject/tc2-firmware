@@ -181,9 +181,9 @@ fn main() -> ! {
         shared_i2c.clear_alarm(&mut delay);
     }
 
-    if let Ok(eeprom) = shared_i2c.eeprom_data(&mut delay) {
-        info!("Setting is audio from EEPROM data {}", eeprom);
-        is_audio = is_audio || eeprom.audio_only;
+    if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
+        info!("EEPROM audio device: {}", audio_only);
+        is_audio = is_audio || audio_only;
     }
 
     if !is_audio {
@@ -353,7 +353,7 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<45000> = Stack::new();
+    let mut core1_stack: Stack<44900> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));

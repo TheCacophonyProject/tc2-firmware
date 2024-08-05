@@ -767,7 +767,7 @@ impl SharedI2C {
         }
     }
 
-    pub fn eeprom_data(&mut self, delay: &mut Delay) -> Result<EEPROM, ()> {
+    pub fn is_audio_device(&mut self, delay: &mut Delay) -> Result<bool, ()> {
         let page_length: usize = 16;
 
         let mut read_length: usize;
@@ -818,7 +818,7 @@ impl SharedI2C {
         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
         let gotcrc = BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]);
         if gotcrc == crc {
-            return Ok(EEPROM::new(&eeprom_data[1..]));
+            return Ok(eeprom_data[13] > 0);
         }
         info!("CRC failed expected {} got {}", crc, gotcrc);
         return Err(());
@@ -828,29 +828,30 @@ impl SharedI2C {
 const EEPROM_LENGTH: usize = 1 + 1 + 3 * 4 + 1 + 8 + 4 + 2;
 const EEPROM_ADDRESS: u8 = 0x50;
 
-#[derive(Format)]
-pub struct EEPROM {
-    pub version: u8,
-    pub hardware_version: [u8; 3],
-    pub power_version: [u8; 3],
-    pub touch_version: [u8; 3],
-    pub mic_version: [u8; 3],
-    pub audio_only: bool,
-    pub id: u64,
-    pub timestamp: u32,
-}
+//not used to save memory
+// #[derive(Format)]
+// pub struct EEPROM {
+//     pub version: u8,
+//     pub hardware_version: [u8; 3],
+//     pub power_version: [u8; 3],
+//     pub touch_version: [u8; 3],
+//     pub mic_version: [u8; 3],
+//     pub audio_only: bool,
+//     pub id: u64,
+//     pub timestamp: u32,
+// }
 
-impl EEPROM {
-    pub fn new(payload: &[u8]) -> EEPROM {
-        EEPROM {
-            version: payload[0],
-            hardware_version: payload[1..4].try_into().unwrap(),
-            power_version: payload[4..7].try_into().unwrap(),
-            touch_version: payload[7..10].try_into().unwrap(),
-            mic_version: payload[10..13].try_into().unwrap(),
-            audio_only: payload[13] > 0,
-            id: BigEndian::read_u64(&payload[4..12]),
-            timestamp: BigEndian::read_u32(&payload[12..16]),
-        }
-    }
-}
+// impl EEPROM {
+//     pub fn new(payload: &[u8]) -> EEPROM {
+//         EEPROM {
+//             version: payload[0],
+//             hardware_version: payload[1..4].try_into().unwrap(),
+//             power_version: payload[4..7].try_into().unwrap(),
+//             touch_version: payload[7..10].try_into().unwrap(),
+//             mic_version: payload[10..13].try_into().unwrap(),
+//             audio_only: payload[13] > 0,
+//             id: BigEndian::read_u64(&payload[4..12]),
+//             timestamp: BigEndian::read_u32(&payload[12..16]),
+//         }
+//     }
+// }
