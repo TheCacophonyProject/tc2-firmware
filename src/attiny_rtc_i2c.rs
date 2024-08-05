@@ -810,7 +810,7 @@ impl SharedI2C {
 
         if eeprom_data[0] != 0xCA {
             info!(
-                "Incorect first byte got {} should be {}",
+                "Incorrect first byte got {} should be {}",
                 eeprom_data[0], 0xCA
             );
             return Err(());
