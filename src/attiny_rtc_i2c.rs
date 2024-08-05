@@ -27,9 +27,6 @@ pub struct SharedI2C {
     i2c: Option<I2CConfig>,
     rtc: Option<PCF8563<I2CConfig>>,
 }
-const EEPROM_LENGTH: usize = 1 + 1 + 3 + 8 + 4 + 2;
-
-const PAGE_LENGTH: usize = 16;
 
 #[repr(u8)]
 #[derive(Format)]
@@ -87,11 +84,6 @@ const REG_CAMERA_CONNECTION: u8 = 0x03;
 const REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
 //const REG_PI_WAKEUP: u8 = 0x06;
 const REG_TC2_AGENT_STATE: u8 = 0x07;
-
-const EEPROM_ADDRESS: u8 = 0x50;
-// EEPROM_FIRST_BYTE = 0xCA
-// EEPROM_FILE       = "/etc/cacophony/eeprom-data.json"
-// )
 
 pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
     width: 16,
@@ -213,7 +205,7 @@ impl SharedI2C {
         &mut self,
         command: u8,
         value: Option<u8>,
-        payload: &mut [u8],
+        payload: &mut [u8; 3],
     ) -> Result<(), Error> {
         let lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
@@ -741,12 +733,7 @@ impl SharedI2C {
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
             let pin = lock_pin.into_pull_type::<PullUp>();
-
-            let mut request = [command];
-            // let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
-            // BigEndian::write_u16(&mut request[1..=2], crc);
-            let result = self.i2c().write_read(EEPROM_ADDRESS, &request, payload);
-
+            let result = self.i2c().write_read(EEPROM_ADDRESS, &[command], payload);
             self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
             return result;
         } else {
@@ -762,7 +749,6 @@ impl SharedI2C {
         attempts: Option<i32>,
         payload: &mut [u8],
     ) -> Result<(), Error> {
-        // let mut payload = [0u8; PAGE_LENGTH];
         let max_attempts = attempts.unwrap_or(100);
         let mut num_attempts = 0;
         loop {
@@ -782,30 +768,38 @@ impl SharedI2C {
     }
 
     pub fn eeprom_data(&mut self, delay: &mut Delay) -> Result<EEPROM, ()> {
+        let page_length: usize = 16;
+
         let mut read_length: usize;
         let mut eeprom_data = [0u8; EEPROM_LENGTH];
-        for i in (0..EEPROM_LENGTH).step_by(PAGE_LENGTH) {
-            read_length = if EEPROM_LENGTH - i < PAGE_LENGTH {
+
+        if let Err(e) =
+            self.try_attiny_read_page_command(0u8, delay, None, &mut eeprom_data[0..page_length])
+        {
+            warn!("Couldn't read eeprom data {}", e);
+            return Err(());
+        }
+        let eeprom_version = eeprom_data[1];
+        if eeprom_version == 1 {
+            // don't think any need to parse as it has no audio info
+            info!("Need eeprom version 2 ");
+            return Err(());
+        }
+        for i in (page_length..EEPROM_LENGTH).step_by(page_length) {
+            read_length = if EEPROM_LENGTH - i < page_length {
                 EEPROM_LENGTH - i
             } else {
-                PAGE_LENGTH
+                page_length
             };
-            // let start_i = i * PAGE_LENGTH;
-            info!(
-                "Reading data {}:{} with value {} reading {} len {}",
-                i,
-                i + read_length,
-                i,
-                read_length,
-                &mut eeprom_data[i..read_length + i].len()
-            );
-            self.try_attiny_read_page_command(
+            if let Err(e) = self.try_attiny_read_page_command(
                 i as u8,
                 delay,
                 None,
                 &mut eeprom_data[i..read_length + i],
-            );
-            info!("After first read {}", &mut eeprom_data[i..read_length + i]);
+            ) {
+                warn!("Couldn't read eeprom data {}", e);
+                return Err(());
+            }
         }
         let mut has_data = false;
         for data in eeprom_data {
@@ -815,16 +809,15 @@ impl SharedI2C {
             }
         }
         if !has_data {
-            info!("No eep rom data");
+            info!("No EEPROM data");
             return Err(());
         }
-        info!(
-            "Got eep rom data {} {}",
-            eeprom_data,
-            &eeprom_data[..eeprom_data.len() - 2]
-        );
+
         if eeprom_data[0] != 0xCA {
-            info!("Incorect first byte");
+            info!(
+                "Incorect first byte got {} should be {}",
+                eeprom_data[0], 0xCA
+            );
             return Err(());
         }
         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
@@ -832,14 +825,22 @@ impl SharedI2C {
         if gotcrc == crc {
             return Ok(EEPROM::new(&eeprom_data[1..]));
         }
-        info!("CRC FAIL {} got {}", crc, gotcrc);
+        info!("CRC failed expected {} got {}", crc, gotcrc);
         return Err(());
     }
 }
 
+const EEPROM_LENGTH: usize = 1 + 1 + 3 * 4 + 1 + 8 + 4 + 2;
+const EEPROM_ADDRESS: u8 = 0x50;
+
+#[derive(Format)]
 pub struct EEPROM {
     pub version: u8,
     pub hardware_version: [u8; 3],
+    pub power_version: [u8; 3],
+    pub touch_version: [u8; 3],
+    pub mic_version: [u8; 3],
+    pub audio_only: bool,
     pub id: u64,
     pub timestamp: u32,
 }
@@ -849,6 +850,10 @@ impl EEPROM {
         EEPROM {
             version: payload[0],
             hardware_version: payload[1..4].try_into().unwrap(),
+            power_version: payload[4..7].try_into().unwrap(),
+            touch_version: payload[7..10].try_into().unwrap(),
+            mic_version: payload[10..13].try_into().unwrap(),
+            audio_only: payload[13] > 0,
             id: BigEndian::read_u64(&payload[4..12]),
             timestamp: BigEndian::read_u32(&payload[12..16]),
         }

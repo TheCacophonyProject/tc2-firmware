@@ -109,7 +109,7 @@ fn main() -> ! {
 
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let is_audio = read_is_audio_from_rp2040_flash();
+    let mut is_audio = read_is_audio_from_rp2040_flash();
 
     let freq = if is_audio {
         ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
@@ -175,20 +175,17 @@ fn main() -> ! {
 
     let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
     info!("Got shared i2c");
-    if let Ok(eeprom) = shared_i2c.eeprom_data(&mut delay) {
-        info!(
-            "READ EEPROM v: {} hw: {} id: {} timestmap: {}",
-            eeprom.version, eeprom.hardware_version, eeprom.id, eeprom.timestamp
-        );
-    }
-    loop {
-        // read data
-        nop();
-    }
+
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
+    }
+
+    if let Ok(eeprom) = shared_i2c.eeprom_data(&mut delay) {
+        info!("EEPROM {}", eeprom);
+
+        is_audio = is_audio || eeprom.audio_only;
     }
 
     if !is_audio {
