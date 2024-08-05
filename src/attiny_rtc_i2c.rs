@@ -728,7 +728,7 @@ impl SharedI2C {
         self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x02, delay)
     }
 
-    fn attiny_read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), Error> {
+    fn read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), Error> {
         let lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
@@ -742,7 +742,7 @@ impl SharedI2C {
         }
     }
 
-    fn try_attiny_read_eeprom_command(
+    fn try_read_eeprom_command(
         &mut self,
         command: u8,
         delay: &mut Delay,
@@ -752,7 +752,7 @@ impl SharedI2C {
         let max_attempts = attempts.unwrap_or(100);
         let mut num_attempts = 0;
         loop {
-            match self.attiny_read_eeprom_command(command, payload) {
+            match self.read_eeprom_command(command, payload) {
                 Ok(_) => {
                     return Ok(());
                 }
@@ -779,7 +779,7 @@ impl SharedI2C {
             } else {
                 page_length
             };
-            if let Err(e) = self.try_attiny_read_eeprom_command(
+            if let Err(e) = self.try_read_eeprom_command(
                 i as u8,
                 delay,
                 None,
@@ -796,13 +796,7 @@ impl SharedI2C {
                 }
             }
         }
-        let mut has_data = false;
-        for data in eeprom_data {
-            if data != 0xFF {
-                has_data = true;
-                break;
-            }
-        }
+        let has_data = eeprom_data.iter().any(|&x| x != 0xff);
         if !has_data {
             info!("No EEPROM data");
             return Err(());
