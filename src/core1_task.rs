@@ -548,7 +548,7 @@ pub fn core_1_task(
     }
     let should_offload = if !should_offload {
         let previous_offload_time = event_logger
-            .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
+            .latest_event_of_kind(LoggerEventKind::OffloadedRecording(0), &mut flash_storage)
             .map(|event| event.timestamp());
         let duration_since_prev_offload: Duration =
             if let Some(previous_offload_time) = previous_offload_time {
@@ -759,6 +759,7 @@ pub fn core_1_task(
                 &device_config.motion_detection_mask,
             );
             let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
+            let max_length_in_frames = 60 * 9;
             let status_recording_length_in_frames = 18;
             let motion_detection_triggered_this_frame =
                 this_frame_motion_detection.got_new_trigger();
@@ -854,6 +855,7 @@ pub fn core_1_task(
                     );
                     error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
+                    let start_block = flash_storage.current_block_index;
                     let mut cptv_streamer = CptvStream::new(
                         synced_date_time.get_timestamp_micros(&timer), // Microseconds
                         lepton_version,
@@ -882,7 +884,7 @@ pub fn core_1_task(
 
                     event_logger.log_event(
                         LoggerEvent::new(
-                            LoggerEventKind::StartedRecording,
+                            LoggerEventKind::StartedRecording(start_block as u64),
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
                         &mut flash_storage,
@@ -920,9 +922,9 @@ pub fn core_1_task(
                 // to give more breathing room.
                 if let Some(cptv_stream) = &mut cptv_stream {
                     error!("Ending current recording");
-                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
-                    let cptv_start_block_index = cptv_stream.starting_block_index as isize;
                     cptv_stream.finalise(&mut flash_storage);
+                    let cptv_start_block_index = cptv_stream.starting_block_index as isize;
+                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
 
                     ended_recording = true;
                     let _ = shared_i2c
@@ -931,28 +933,35 @@ pub fn core_1_task(
 
                     event_logger.log_event(
                         LoggerEvent::new(
-                            LoggerEventKind::EndedRecording,
+                            LoggerEventKind::EndedRecording(
+                                (((cptv_end_block_index as u64) << 32)
+                                    | cptv_stream.end_page_index as u64)
+                                    as u64,
+                            ),
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
                         &mut flash_storage,
                     );
-                    if !making_status_recording
-                        && motion_detection.as_ref().unwrap().was_false_positive()
+                    if !making_status_recording && true
+                        || motion_detection.as_ref().unwrap().was_false_positive()
                     // && cptv_stream.num_frames <= 100
                     {
-                        info!("Discarding as a false-positive");
+                        info!(
+                            "Discarding as a false-positive {}- {}",
+                            cptv_start_block_index, cptv_end_block_index
+                        );
                         cptv_stream.discard(
                             &mut flash_storage,
                             cptv_start_block_index,
                             cptv_end_block_index,
                         );
-                        // event_logger.log_event(
-                        //     LoggerEvent::new(
-                        //         LoggerEventKind::WouldDiscardAsFalsePositive,
-                        //         synced_date_time.get_timestamp_micros(&timer),
-                        //     ),
-                        //     &mut flash_storage,
-                        // );
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::WouldDiscardAsFalsePositive,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
                     }
                     if making_status_recording {
                         making_status_recording = false;
@@ -1302,7 +1311,7 @@ pub fn core_1_task(
         //     (one_min_check_end - one_min_check_start).to_micros(),
         //     (frame_transfer_end - frame_transfer_start).to_micros()
         // );
-        if record_audio {
+        if record_audio && made_startup_status_recording {
             if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm.unwrap() {
                 //Should we be checking alarm triggered? or just us ethis and clear alarm
                 audio_pending = true;
@@ -1325,7 +1334,6 @@ pub fn core_1_task(
                 if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
                     if !is_recording {
                         info!("Taking audio recording");
-                        delay.delay_ms(2000);
                         //make audio rec now
                         let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
                         sio.fifo.write(Core1Task::RequestReset.into());

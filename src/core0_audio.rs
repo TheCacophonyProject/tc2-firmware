@@ -39,7 +39,7 @@ use crate::onboard_flash::extend_lifetime_generic_mut;
 //     clear_flash_alarm, read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
 // };
 
-const dev_mode: bool = false;
+const DEV_MODE: bool = false;
 pub const MAX_GAP_MIN: u8 = 60;
 pub fn audio_task(
     i2c_config: I2CConfig,
@@ -180,11 +180,7 @@ pub fn audio_task(
                 let _ = shared_i2c.disable_alarm(&mut delay);
                 clear_audio_alarm(&mut flash_storage);
                 info!("Restarting as should be in thermal mode");
-                watchdog.start(100.micros());
-                loop {
-                    // Wait to be reset and become thermal device
-                    nop();
-                }
+                restart(watchdog);
             }
         }
 
@@ -270,6 +266,7 @@ pub fn audio_task(
                     let is_cptv = flash_storage.has_cptv_files(true);
                     //this means end of thermal window so should offload recordings
                     if is_cptv {
+                        info!("Has cptv files {}", is_cptv);
                         should_wake = true;
                         event_logger.log_event(
                             LoggerEvent::new(
@@ -326,11 +323,7 @@ pub fn audio_task(
             Ok(_) => (),
             Err(()) => {
                 warn!("Restarting as could not offload");
-                watchdog.start(100.micros());
-                loop {
-                    // Wait to be reset and become thermal device
-                    nop();
-                }
+                restart(watchdog);
             }
         }
         info!(
@@ -392,19 +385,21 @@ pub fn audio_task(
                 pio1,
                 sm1,
             );
-            let mut duration = if dev_mode { 10 } else { 60 };
+            let mut duration = 60;
             if !do_recording && take_test_rec {
                 duration = 10;
             }
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::StartedAudioRecording,
+                    LoggerEventKind::StartedAudioRecording(
+                        flash_storage.current_block_index as u64,
+                    ),
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
                 &mut flash_storage,
             );
 
-            let (recorded, pos) = microphone.record_for_n_seconds(
+            let (recorded, pos, end_pos) = microphone.record_for_n_seconds(
                 duration,
                 dma_channels.ch3,
                 dma_channels.ch4,
@@ -430,22 +425,19 @@ pub fn audio_task(
                     &mut flash_storage,
                 );
                 info!("Recording failed restarting and will try again");
-                loop {
-                    nop();
-                }
+                restart(watchdog);
             } else {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::EndedRecording,
+                        LoggerEventKind::EndedRecording(
+                            ((end_pos.0 as u64) << 32) | end_pos.1 as u64,
+                        ),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     &mut flash_storage,
                 );
                 if take_test_rec {
                     info!("taken test recoridng clearing status");
-                    // loop {
-                    // nop();
-                    // }
                     watchdog.feed();
                     let _ = shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
                     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
@@ -465,9 +457,7 @@ pub fn audio_task(
                         file_position,
                     );
 
-                    loop {
-                        nop();
-                    }
+                    restart(watchdog);
                 } else {
                     shared_i2c.clear_alarm(&mut delay);
                     reschedule = true;
@@ -477,10 +467,7 @@ pub fn audio_task(
                         //if audio requested from thermal, the alarm will be re scheduled there
                         let _ = shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
                         info!("Audio taken in thermal window clearing flag");
-                        // watchdog.start(100.micros());
-                        loop {
-                            nop();
-                        }
+                        restart(watchdog);
                     }
                 }
             }
@@ -506,10 +493,7 @@ pub fn audio_task(
         } else {
             error!("Couldn't schedule alarm will restart");
             clear_audio_alarm(&mut flash_storage);
-            watchdog.start(100.micros());
-            loop {
-                nop();
-            }
+            restart(watchdog);
         }
     }
     if let Some(alarm) = alarm_date_time {
@@ -549,10 +533,7 @@ pub fn audio_task(
                             should_sleep = false;
                             info!("Alarm is scheduled in {} so not sleeping", until_alarm);
                             if until_alarm <= 0 {
-                                watchdog.start(100.micros());
-                                loop {
-                                    nop();
-                                }
+                                restart(watchdog);
                             }
                             continue;
                         }
@@ -590,10 +571,7 @@ pub fn audio_task(
                         Ok(_) => (),
                         Err(()) => {
                             warn!("Restarting as failed to offload");
-                            watchdog.start(100.micros());
-                            loop {
-                                nop();
-                            }
+                            restart(watchdog);
                         }
                     }
                 }
@@ -603,15 +581,18 @@ pub fn audio_task(
         let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
         if alarm_triggered {
             info!("Alarm triggered after taking a recording reseeting rp2040");
-            watchdog.start(100.micros());
-            loop {
-                // wait for watchdog to reset rp2040
-                nop();
-            }
+            restart(watchdog);
         }
 
         delay.delay_ms(5 * 1000);
         watchdog.feed();
+    }
+}
+
+fn restart(watchdog: &mut bsp::hal::Watchdog) {
+    watchdog.start(100.micros());
+    loop {
+        nop();
     }
 }
 
@@ -632,15 +613,12 @@ pub fn offload(
             wake_if_asleep = pi_waking;
         }
     }
-    if dev_mode {
-        return Ok(());
-    }
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToWake(5),
+                    LoggerEventKind::ToldRpiToWake(7),
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
                 flash_storage,
@@ -651,8 +629,7 @@ pub fn offload(
         }
         if awake {
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-            if offload_flash_storage_and_events(
+            if !offload_flash_storage_and_events(
                 flash_storage,
                 pi_spi,
                 &mut peripherals.RESETS,
@@ -664,18 +641,10 @@ pub fn offload(
                 event_logger,
                 &synced_date_time,
                 Some(watchdog),
-            ) {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::OffloadedRecording,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    flash_storage,
-                );
-            } else if flash_storage.has_files_to_offload() {
+            ) && flash_storage.has_files_to_offload()
+            {
                 return Err(());
             }
-            return Ok(());
         }
     }
     Ok(())
@@ -730,7 +699,7 @@ pub fn schedule_audio_rec(
     } else {
         wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
     }
-    if dev_mode {
+    if DEV_MODE {
         wake_in = 120;
     }
     let current_time = synced_date_time.get_adjusted_dt(timer);

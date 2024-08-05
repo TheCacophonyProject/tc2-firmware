@@ -386,6 +386,8 @@ pub struct CptvStream<'a> {
     crc_val: u32,
     total_uncompressed: u32,
     pub starting_block_index: u16,
+    pub end_page_index: isize,
+
     pub num_frames: u32,
 }
 
@@ -437,6 +439,7 @@ impl<'a> CptvStream<'a> {
             starting_block_index: starting_block_index as u16,
             cptv_header,
             num_frames: 0,
+            end_page_index: 0,
         }
     }
 
@@ -586,6 +589,9 @@ impl<'a> CptvStream<'a> {
         // and write out to storage.
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
+        if !at_header_location {
+            self.end_page_index = flash_storage.current_page_index;
+        }
         flash_storage.append_file_bytes(
             to_flush,
             num_bytes,

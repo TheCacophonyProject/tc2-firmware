@@ -230,7 +230,7 @@ impl PdmMicrophone {
         timestamp: u64,
         watchdog: &mut bsp::hal::Watchdog,
         date_time: &SyncedDateTime,
-    ) -> (bool, (isize, isize)) {
+    ) -> (bool, (isize, isize), (isize, isize)) {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
 
@@ -267,6 +267,8 @@ impl PdmMicrophone {
                 Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
         }
         let mut file_position = (0, 0);
+        let mut end_position = (0, 0);
+
         // Pull out more samples via dma double_buffering.
         let mut transfer = None;
         let mut address = None;
@@ -384,6 +386,10 @@ impl PdmMicrophone {
                                 }
                             }
                         } else {
+                            end_position = (
+                                flash_storage.current_block_index,
+                                flash_storage.current_page_index,
+                            );
                             if let Err(e) = flash_storage
                                 .append_file_bytes(payload, data_size, true, None, None)
                             {
@@ -399,7 +405,7 @@ impl PdmMicrophone {
             }
             self.disable();
         }
-        (recorded_successfully, file_position)
+        (recorded_successfully, file_position, end_position)
     }
 }
 

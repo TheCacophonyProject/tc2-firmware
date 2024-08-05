@@ -369,7 +369,7 @@ impl OnboardFlash {
         let mut page_index = 0;
         let mut is_cptv: Option<bool> = None;
         //only need to check last used page in a block and first page
-        for block_index in (0..=self.last_used_block_index.unwrap()).rev() {
+        for block_index in (0..=self.last_used_block_index.unwrap() - 1).rev() {
             while page_index >= 0 {
                 //find first used page
                 self.read_page(block_index, page_index).unwrap();
@@ -379,19 +379,19 @@ impl OnboardFlash {
                     continue;
                 }
 
-                if is_cptv.is_none() {
-                    //first page
-                    is_cptv = Some(self.current_page.user_data()[0] != 1);
-                }
-
                 is_last = self.current_page.is_last_page_for_file();
                 if is_last {
+                    self.read_page(block_index + 1, 0).unwrap();
+                    self.read_page_from_cache(block_index + 1);
+                    is_cptv = Some(self.current_page.user_data()[0] != 1);
+                    // info!("Is cptv calculated from {}:{}", block_index + 1, 0);
+
+                    // info!("Is last at {}:{}", block_index, page_index + 1);
                     if only_last || is_cptv.unwrap() {
                         return is_cptv.unwrap();
                     }
                     break;
                 }
-                is_cptv = Some(self.current_page.user_data()[0] != 1);
                 break;
             }
             page_index = 63;
@@ -576,7 +576,7 @@ impl OnboardFlash {
         start_block_index: isize,
         end_block_index: isize,
     ) -> Result<(), &str> {
-        for block_index in start_block_index..end_block_index {
+        for block_index in start_block_index..=end_block_index {
             if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
             } else if !self.erase_block(block_index).is_ok() {

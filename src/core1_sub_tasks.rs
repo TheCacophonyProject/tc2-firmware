@@ -93,10 +93,17 @@ pub fn maybe_offload_events(
                 "Clear events took {}µs",
                 (timer.get_counter() - start).to_micros()
             );
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedLogs,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
         } else {
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::FileOffloadFailed,
+                    LoggerEventKind::LogOffloadFailed,
                     time.get_timestamp_micros(&timer),
                 ),
                 flash_storage,
@@ -163,7 +170,8 @@ pub fn offload_flash_storage_and_events(
     let mut part_count = 0;
     let mut success: bool = true;
     let mut counter = timer.get_counter();
-
+    let mut start_block = 0;
+    let mut start_page = 0;
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
@@ -174,6 +182,8 @@ pub fn offload_flash_storage_and_events(
         }
         pi_spi.enable(spi, resets);
         let transfer_type = if file_start && !is_last {
+            start_block = block_index;
+            start_page = 0;
             ExtTransferMessage::BeginFileTransfer
         } else if !file_start && !is_last {
             ExtTransferMessage::ResumeFileTransfer
@@ -226,7 +236,6 @@ pub fn offload_flash_storage_and_events(
             flash_storage.take_spi(spi, resets, clock_freq.Hz());
         }
         if !success {
-            info!("NOT success so breaking");
             event_logger.log_event(
                 LoggerEvent::new(
                     LoggerEventKind::FileOffloadFailed,
@@ -235,8 +244,26 @@ pub fn offload_flash_storage_and_events(
                 flash_storage,
             );
             break;
+        } else if is_last {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedRecording(
+                        (((start_block as u64) << 32) | start_page as u64) as u64,
+                    ),
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedRecording(
+                        (((block_index as u64) << 32) | page_index as u64) as u64,
+                    ),
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
         }
-
         part_count += 1;
         if is_last {
             file_count += 1;
@@ -249,13 +276,13 @@ pub fn offload_flash_storage_and_events(
     if success {
         info!("Completed file offload, transferred {} files", file_count);
         if file_count > 0 {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::OffloadedRecording,
-                    time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
+            // event_logger.log_event(
+            //     LoggerEvent::new(
+            //         LoggerEventKind::OffloadedRecording(file_count),
+            //         time.get_timestamp_micros(&timer),
+            //     ),
+            //     flash_storage,
+            // );
         }
         // TODO: Some validation from the raspberry pi that the transfer completed
         //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
@@ -395,13 +422,13 @@ pub fn offload_file(
     if success {
         info!("Completed file offload, transferred {} files", file_count);
         if file_count > 0 {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::OffloadedRecording,
-                    time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
+            // event_logger.log_event(
+            //     LoggerEvent::new(
+            //         LoggerEventKind::OffloadedRecording(file_count),
+            //         time.get_timestamp_micros(&timer),
+            //     ),
+            //     flash_storage,
+            // );
             info!("Erasing after successful offload");
             let _ = flash_storage.erase_block_range(start_index.0, last_block);
         }
