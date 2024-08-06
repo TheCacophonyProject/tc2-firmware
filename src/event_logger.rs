@@ -37,8 +37,8 @@ pub enum LoggerEventKind {
     RecordingNotFinished,
     FileOffloadFailed,
     LogOffloadFailed,
-
     OffloadedLogs,
+    CorruptFile,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -74,6 +74,7 @@ impl Into<u16> for LoggerEventKind {
             FileOffloadFailed => 27,
             OffloadedLogs => 28,
             LogOffloadFailed => 29,
+            CorruptFile => 30,
         }
     }
 }
@@ -113,6 +114,7 @@ impl TryFrom<u16> for LoggerEventKind {
             27 => Ok(FileOffloadFailed),
             28 => Ok(OffloadedLogs),
             29 => Ok(LogOffloadFailed),
+            30 => Ok(CorruptFile),
             _ => Err(()),
         }
     }

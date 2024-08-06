@@ -166,111 +166,133 @@ pub fn offload_flash_storage_and_events(
     // do some offloading.
     let mut file_count = 0;
     flash_storage.begin_offload();
-    let mut file_start = true;
-    let mut part_count = 0;
     let mut success: bool = true;
-    let mut counter = timer.get_counter();
-    let mut start_block = 0;
-    let mut start_page = 0;
-    // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-    //  Probably doesn't matter though.
-    while let Some(((part, crc, block_index, page_index), is_last, spi)) =
-        flash_storage.get_file_part()
-    {
-        if watchdog.is_some() {
-            watchdog.as_mut().unwrap().feed();
-        }
-        pi_spi.enable(spi, resets);
-        let transfer_type = if file_start && !is_last {
-            start_block = block_index;
-            start_page = 0;
-            ExtTransferMessage::BeginFileTransfer
-        } else if !file_start && !is_last {
-            ExtTransferMessage::ResumeFileTransfer
-        } else if is_last {
-            ExtTransferMessage::EndFileTransfer
-        } else if file_start && is_last {
-            ExtTransferMessage::BeginAndEndFileTransfer
-        } else {
-            crate::unreachable!("Invalid file transfer state");
-        };
 
-        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-        let current_crc = crc_check.checksum(&part);
-        if current_crc != crc {
-            warn!(
-                "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
-                part_count, block_index, page_index
-            );
-        }
-
-        let mut attempts = 0;
-        'transfer_part: loop {
+    loop {
+        let mut file_start = true;
+        let mut part_count = 0;
+        let mut counter = timer.get_counter();
+        let mut start_block = 0;
+        let mut start_page = 0;
+        let mut file_end = false;
+        // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
+        //  Probably doesn't matter though.
+        while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+            flash_storage.get_file_part()
+        {
+            file_end = is_last;
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
             }
-            let did_transfer =
-                pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-            counter = timer.get_counter();
-            if !did_transfer {
-                attempts += 1;
-                if attempts % 10 == 0 {
-                    info!("Failed {}", attempts);
+            pi_spi.enable(spi, resets);
+            let transfer_type = if file_start && !is_last {
+                start_block = block_index;
+                start_page = 0;
+                ExtTransferMessage::BeginFileTransfer
+            } else if !file_start && !is_last {
+                ExtTransferMessage::ResumeFileTransfer
+            } else if is_last {
+                ExtTransferMessage::EndFileTransfer
+            } else if file_start && is_last {
+                ExtTransferMessage::BeginAndEndFileTransfer
+            } else {
+                crate::unreachable!("Invalid file transfer state");
+            };
+
+            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+            let current_crc = crc_check.checksum(&part);
+            if current_crc != crc {
+                warn!(
+                    "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                    part_count, block_index, page_index
+                );
+            }
+
+            let mut attempts = 0;
+            'transfer_part: loop {
+                if watchdog.is_some() {
+                    watchdog.as_mut().unwrap().feed();
                 }
-                if attempts > 100 {
-                    success = false;
+                let did_transfer =
+                    pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+                counter = timer.get_counter();
+                if !did_transfer {
+                    attempts += 1;
+                    if attempts % 10 == 0 {
+                        info!("Failed {}", attempts);
+                    }
+                    if attempts > 100 {
+                        success = false;
+                        break 'transfer_part;
+                    }
+                    //takes tc2-agent about this long to poll again will fail a lot otherwise
+                    let time_since = (timer.get_counter() - counter).to_micros();
+                    if time_since < TIME_BETWEEN_TRANSFER {
+                        delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                    }
+                } else {
                     break 'transfer_part;
                 }
-                //takes tc2-agent about this long to poll again will fail a lot otherwise
-                let time_since = (timer.get_counter() - counter).to_micros();
-                if time_since < TIME_BETWEEN_TRANSFER {
-                    delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
-                }
+            }
+
+            // Give spi peripheral back to flash storage.
+            if let Some(spi) = pi_spi.disable() {
+                flash_storage.take_spi(spi, resets, clock_freq.Hz());
+            }
+            if !success {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::FileOffloadFailed,
+                        time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+                break;
+            } else if is_last {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::OffloadedRecording(
+                            (((start_block as u64) << 32) | start_page as u64) as u64,
+                        ),
+                        time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::OffloadedRecording(
+                            (((block_index as u64) << 32) | page_index as u64) as u64,
+                        ),
+                        time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
+            }
+            part_count += 1;
+            if is_last {
+                file_count += 1;
+                info!("Offloaded {} file(s)", file_count);
+                file_start = true;
             } else {
-                break 'transfer_part;
+                file_start = false;
             }
         }
-
-        // Give spi peripheral back to flash storage.
-        if let Some(spi) = pi_spi.disable() {
-            flash_storage.take_spi(spi, resets, clock_freq.Hz());
-        }
-        if !success {
+        if !file_end && part_count > 0 {
+            //possible corrupt file
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::FileOffloadFailed,
+                    LoggerEventKind::CorruptFile,
                     time.get_timestamp_micros(&timer),
                 ),
                 flash_storage,
             );
-            break;
-        } else if is_last {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::OffloadedRecording(
-                        (((start_block as u64) << 32) | start_page as u64) as u64,
-                    ),
-                    time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
+            info!(
+                "Corrupt file trying next block {}",
+                flash_storage.current_block_index + 1
             );
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::OffloadedRecording(
-                        (((block_index as u64) << 32) | page_index as u64) as u64,
-                    ),
-                    time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
-        }
-        part_count += 1;
-        if is_last {
-            file_count += 1;
-            info!("Offloaded {} file(s)", file_count);
-            file_start = true;
+            flash_storage.set_current_position(flash_storage.current_block_index + 1, 0);
         } else {
-            file_start = false;
+            break;
         }
     }
     if success {
@@ -340,9 +362,11 @@ pub fn offload_file(
     let mut success: bool = true;
     let mut counter;
     let mut last_block: isize = 0;
+    let mut file_end = false;
     while let Some(((part, crc, block_index, page_index), is_last, spi)) =
         flash_storage.get_file_part()
     {
+        file_end = is_last;
         if watchdog.is_some() {
             watchdog.as_mut().unwrap().feed();
         }
@@ -417,6 +441,16 @@ pub fn offload_file(
             break;
         }
         file_start = false;
+    }
+    if !file_end && part_count > 0 {
+        //possible corrupt file
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::CorruptFile,
+                time.get_timestamp_micros(&timer),
+            ),
+            flash_storage,
+        );
     }
 
     if success {
