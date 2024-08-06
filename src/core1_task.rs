@@ -405,6 +405,19 @@ pub fn core_1_task(
             ),
             &mut flash_storage,
         );
+        //changing from no audio to audio mode and then click test rec quickly
+        let test_rec = shared_i2c
+            .tc2_agent_requested_test_audio_rec(&mut delay)
+            .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+        if let Ok(test_rec) = test_rec {
+            if test_rec {
+                sio.fifo.write_blocking(Core1Task::RequestReset.into());
+                loop {
+                    // Wait to be reset
+                    nop();
+                }
+            }
+        }
     }
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
