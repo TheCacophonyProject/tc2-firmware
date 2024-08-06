@@ -369,7 +369,7 @@ impl OnboardFlash {
         let mut page_index = 0;
         let mut is_cptv: Option<bool> = None;
         //only need to check last used page in a block and first page
-        for block_index in (0..=self.last_used_block_index.unwrap() - 1).rev() {
+        for block_index in (0..=self.last_used_block_index.unwrap()).rev() {
             while page_index >= 0 {
                 //find first used page
                 self.read_page(block_index, page_index).unwrap();
