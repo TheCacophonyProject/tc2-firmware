@@ -812,7 +812,7 @@ impl SharedI2C {
         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
         let gotcrc = BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]);
         if gotcrc == crc {
-            return Ok(eeprom_data[13] > 0);
+            return Ok(eeprom_data[14] > 0);
         }
         info!("CRC failed expected {} got {}", crc, gotcrc);
         return Err(());
