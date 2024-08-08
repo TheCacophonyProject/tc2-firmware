@@ -40,7 +40,9 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{get_alarm_dt, schedule_audio_rec, MAX_GAP_MIN};
+use crate::core0_audio::{
+    check_alarm_and_maybe_clear, get_alarm_dt, schedule_audio_rec, MAX_GAP_MIN,
+};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -486,8 +488,13 @@ pub fn core_1_task(
                                     alarm_dt.hour(),
                                     alarm_dt.minute()
                                 );
-                                next_audio_alarm = Some(alarm_dt);
-                                schedule_alarm = false;
+                                if check_alarm_and_maybe_clear(&alarm_dt, &synced, &device_config) {
+                                    //if window time changed and alarm is after rec window start
+                                    info!("Rescehduling as alarm is after window start");
+                                } else {
+                                    next_audio_alarm = Some(alarm_dt);
+                                    schedule_alarm = false;
+                                }
                             } else {
                                 info!("Alarm is missed");
                             }

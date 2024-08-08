@@ -161,6 +161,16 @@ pub fn audio_task(
         );
     device_config = new_config.unwrap();
 
+    if device_config_was_updated {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::SavedNewConfig,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
+
     if !take_test_rec {
         if device_config_was_updated {
             let reboot;
@@ -182,16 +192,6 @@ pub fn audio_task(
                 info!("Restarting as should be in thermal mode");
                 restart(watchdog);
             }
-        }
-
-        if device_config_was_updated {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::SavedNewConfig,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                &mut flash_storage,
-            );
         }
 
         //this isn't reliable so use alarm stored in flash
@@ -218,7 +218,20 @@ pub fn audio_task(
                     alarm_minutes,
                 ) {
                     Ok(alarm) => {
-                        alarm_date_time = Some(alarm);
+                        if device_config_was_updated {
+                            if check_alarm_and_maybe_clear(
+                                &alarm,
+                                &synced_date_time.get_adjusted_dt(timer),
+                                &device_config,
+                            ) {
+                                //if window time changed and alarm is after rec window start
+                                clear_audio_alarm(&mut flash_storage);
+                                scheduled = false;
+                                info!("Rescehduling as alarm is after window start");
+                            } else {
+                                alarm_date_time = Some(alarm);
+                            }
+                        }
                     }
                     Err(_) => {
                         error!(
@@ -797,4 +810,16 @@ fn should_offload_audio_recordings(
     }
 
     return false;
+}
+
+pub fn check_alarm_and_maybe_clear(
+    alarm: &NaiveDateTime,
+    now: &NaiveDateTime,
+    device_config: &DeviceConfig,
+) -> bool {
+    if device_config.config().audio_mode != AudioMode::AudioOnly {
+        let (start, end) = device_config.next_or_current_recording_window(now);
+        return alarm > &start && &start > now;
+    }
+    false
 }
