@@ -1,4 +1,4 @@
-use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
+use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C, Tc2AgentState};
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
@@ -452,7 +452,12 @@ pub fn audio_task(
                 if take_test_rec {
                     info!("taken test recoridng clearing status");
                     watchdog.feed();
-                    let _ = shared_i2c.tc2_agent_clear_test_audio_rec(&mut delay);
+                    let _ = shared_i2c.tc2_agent_clear_and_set_flag(
+                        &mut delay,
+                        Tc2AgentState::TAKE_AUDIO,
+                        Tc2AgentState::THERMAL_MODE,
+                    );
+
                     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
                     offload_file(
@@ -478,7 +483,11 @@ pub fn audio_task(
 
                     if thermal_requested_audio {
                         //if audio requested from thermal, the alarm will be re scheduled there
-                        let _ = shared_i2c.tc2_agent_clear_take_audio_rec(&mut delay);
+                        let _ = shared_i2c.tc2_agent_clear_and_set_flag(
+                            &mut delay,
+                            Tc2AgentState::TEST_AUDIO_RECORDING,
+                            Tc2AgentState::THERMAL_MODE,
+                        );
                         info!("Audio taken in thermal window clearing flag");
                         restart(watchdog);
                     }
@@ -532,6 +541,16 @@ pub fn audio_task(
                 &mut flash_storage,
             );
             logged_power_down = true;
+        }
+
+        match device_config.config().audio_mode {
+            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                if let Ok(()) = shared_i2c.tc2_agent_request_thermal_mode(&mut delay) {
+                    info!("Going into thermal mode");
+                    restart(watchdog);
+                }
+            }
+            _ => (),
         }
         watchdog.feed();
         if should_sleep {

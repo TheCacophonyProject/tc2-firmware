@@ -197,21 +197,29 @@ fn main() -> ! {
         let config = config.unwrap().0;
         match config.audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                let (start_time, end_time) = config.next_or_current_recording_window(&date_time);
+                if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
+                    if (state & (Tc2AgentState::THERMAL_MODE)) > 0 {
+                        let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
+                        info!("Audio request thermal mode");
+                        //audio mode wants to go in thermal mode
+                        is_audio = false;
+                    } else {
+                        let (start_time, end_time) =
+                            config.next_or_current_recording_window(&date_time);
 
-                let in_window = config.time_is_in_recording_window(&date_time, &None);
-
-                info!("Is in window {}", in_window);
-                is_audio = !in_window;
-                if in_window {
-                    info!("Checking if agent requested rec");
-                    if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
-                        is_audio = (state
-                            & (Tc2AgentState::TAKE_AUDIO | Tc2AgentState::TEST_AUDIO_RECORDING))
-                            > 0;
-                        info!("Audio request?? {}", state);
-                        if (is_audio) {
-                            info!("Is audio because thermal requested or test rec");
+                        let in_window = config.time_is_in_recording_window(&date_time, &None);
+                        info!("Is in window {}", in_window);
+                        is_audio = !in_window;
+                        if in_window {
+                            info!("Checking if agent requested rec");
+                            is_audio = (state
+                                & (Tc2AgentState::TAKE_AUDIO
+                                    | Tc2AgentState::TEST_AUDIO_RECORDING))
+                                > 0;
+                            info!("Audio request?? {}", state);
+                            if (is_audio) {
+                                info!("Is audio because thermal requested or test rec");
+                            }
                         }
                     }
                 }

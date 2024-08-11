@@ -783,6 +783,7 @@ pub fn core_1_task(
             let status_recording_length_in_frames = 18;
             let motion_detection_triggered_this_frame =
                 this_frame_motion_detection.got_new_trigger();
+
             should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
                 && (motion_detection_triggered_this_frame || !made_startup_status_recording)
                 && cptv_stream.is_none(); // wait until lepton stabilises before recording
@@ -911,7 +912,7 @@ pub fn core_1_task(
                     );
 
                     cptv_stream = Some(cptv_streamer);
-                } else {
+                } else if made_startup_status_recording {
                     info!("Would start recording, but outside recording window");
                 }
             }
@@ -1142,18 +1143,19 @@ pub fn core_1_task(
                         logged_told_rpi_to_sleep = true;
                     }
                 }
-                match device_config.config().audio_mode {
-                    AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                        //just reboot and it will go into audio branch
-                        info!("Reset as thermal finished and time for audio");
-                        sio.fifo.write(Core1Task::RequestReset.into());
+                //can relly on audiopending check to restart
+                // match device_config.config().audio_mode {
+                //     AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                //         //just reboot and it will go into audio branch
+                //         info!("Reset as thermal finished and time for audio");
+                //         sio.fifo.write(Core1Task::RequestReset.into());
 
-                        loop {
-                            nop();
-                        }
-                    }
-                    _ => (),
-                }
+                //         loop {
+                //             nop();
+                //         }
+                //     }
+                //     _ => (),
+                // }
                 let check_power_down_state_start = timer.get_counter();
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
@@ -1169,6 +1171,18 @@ pub fn core_1_task(
                             logged_pi_powered_down = true;
                         }
 
+                        match device_config.config().audio_mode {
+                            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                                //just reboot and it will go into audio branch
+                                info!("Reset as thermal finished and time for audio");
+                                sio.fifo.write(Core1Task::RequestReset.into());
+
+                                loop {
+                                    nop();
+                                }
+                            }
+                            _ => (),
+                        }
                         // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if !dev_mode {

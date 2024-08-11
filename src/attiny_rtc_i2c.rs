@@ -39,6 +39,7 @@ pub mod Tc2AgentState {
     pub const TEST_AUDIO_RECORDING: u8 = 1 << 3;
     pub const TAKE_AUDIO: u8 = 1 << 4;
     pub const OFFLOAD: u8 = 1 << 5;
+    pub const THERMAL_MODE: u8 = 1 << 6;
 }
 
 #[repr(u8)]
@@ -469,13 +470,6 @@ impl SharedI2C {
         self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)
     }
 
-    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok((state & Tc2AgentState::TAKE_AUDIO) == Tc2AgentState::TAKE_AUDIO),
-            Err(e) => Err(e),
-        }
-    }
-
     pub fn tc2_agent_requested_test_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
@@ -510,6 +504,44 @@ impl SharedI2C {
         }
     }
 
+    pub fn tc2_agent_clear_and_set_flag(
+        &mut self,
+        delay: &mut Delay,
+        clearFlag: u8,
+        setFlag: u8,
+    ) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let val = (state & !clearFlag) | setFlag;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_requested_thermal_mode(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & Tc2AgentState::THERMAL_MODE) == Tc2AgentState::THERMAL_MODE),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn tc2_agent_request_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, Tc2AgentState::THERMAL_MODE, true)
+    }
+
+    pub fn tc2_agent_clear_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, Tc2AgentState::THERMAL_MODE, false)
+    }
+
+    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & Tc2AgentState::TAKE_AUDIO) == Tc2AgentState::TAKE_AUDIO),
+            Err(e) => Err(e),
+        }
+    }
     pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.tc2_agent_write_flag(delay, Tc2AgentState::TAKE_AUDIO, true)
     }

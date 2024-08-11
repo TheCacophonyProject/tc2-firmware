@@ -360,7 +360,6 @@ pub fn write_audio_alarm(
     let page_offset = 0;
     let mut event_data = [0u8; 18];
     event_data[0..4].copy_from_slice(&[alarm_day, alarm_hours, alarm_minutes, mode]);
-    info!("Writing event data {}", event_data);
     flash_storage.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset as u16);
 }
 
