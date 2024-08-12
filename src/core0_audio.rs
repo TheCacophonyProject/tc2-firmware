@@ -454,7 +454,7 @@ pub fn audio_task(
                     watchdog.feed();
                     let _ = shared_i2c.tc2_agent_clear_and_set_flag(
                         &mut delay,
-                        Tc2AgentState::TAKE_AUDIO,
+                        Tc2AgentState::TEST_AUDIO_RECORDING,
                         Tc2AgentState::THERMAL_MODE,
                     );
 
@@ -485,7 +485,7 @@ pub fn audio_task(
                         //if audio requested from thermal, the alarm will be re scheduled there
                         let _ = shared_i2c.tc2_agent_clear_and_set_flag(
                             &mut delay,
-                            Tc2AgentState::TEST_AUDIO_RECORDING,
+                            Tc2AgentState::TAKE_AUDIO,
                             Tc2AgentState::THERMAL_MODE,
                         );
                         info!("Audio taken in thermal window clearing flag");
