@@ -568,7 +568,7 @@ pub fn core_1_task(
     }
     let should_offload = if !should_offload {
         let previous_offload_time = event_logger
-            .latest_event_of_kind(LoggerEventKind::OffloadedRecording(0), &mut flash_storage)
+            .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
             .map(|event| event.timestamp());
         let duration_since_prev_offload: Duration =
             if let Some(previous_offload_time) = previous_offload_time {
@@ -899,7 +899,7 @@ pub fn core_1_task(
 
                     event_logger.log_event(
                         LoggerEvent::new(
-                            LoggerEventKind::StartedRecording(start_block as u64),
+                            LoggerEventKind::StartedRecording,
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
                         &mut flash_storage,
@@ -948,11 +948,7 @@ pub fn core_1_task(
 
                     event_logger.log_event(
                         LoggerEvent::new(
-                            LoggerEventKind::EndedRecording(
-                                (((cptv_end_block_index as u64) << 32)
-                                    | cptv_stream.end_page_index as u64)
-                                    as u64,
-                            ),
+                            LoggerEventKind::EndedRecording,
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
                         &mut flash_storage,

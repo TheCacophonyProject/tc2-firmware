@@ -379,7 +379,6 @@ pub fn audio_task(
             );
         }
     }
-    let mut file_position = (0, 0);
     if do_recording || take_test_rec {
         watchdog.feed();
         //should of already offloaded but extra safety check
@@ -404,15 +403,13 @@ pub fn audio_task(
             }
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::StartedAudioRecording(
-                        flash_storage.current_block_index as u64,
-                    ),
+                    LoggerEventKind::StartedAudioRecording,
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
                 &mut flash_storage,
             );
 
-            let (recorded, pos, end_pos) = microphone.record_for_n_seconds(
+            let (recorded, file_position, end_pos) = microphone.record_for_n_seconds(
                 duration,
                 dma_channels.ch3,
                 dma_channels.ch4,
@@ -424,7 +421,6 @@ pub fn audio_task(
                 watchdog,
                 &synced_date_time,
             );
-            file_position = pos;
             let _ = shared_i2c
                 .set_recording_flag(&mut delay, false)
                 .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
@@ -442,9 +438,7 @@ pub fn audio_task(
             } else {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::EndedRecording(
-                            ((end_pos.0 as u64) << 32) | end_pos.1 as u64,
-                        ),
+                        LoggerEventKind::EndedRecording,
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     &mut flash_storage,

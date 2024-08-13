@@ -10,11 +10,11 @@ use defmt::{error, info, warn, Format};
 #[derive(Format, Copy, Clone)]
 pub enum LoggerEventKind {
     Rp2040Sleep,
-    OffloadedRecording(u64),
+    OffloadedRecording,
     SavedNewConfig,
     StartedSendingFramesToRpi,
-    StartedRecording(u64),
-    EndedRecording(u64),
+    StartedRecording,
+    EndedRecording,
     ToldRpiToSleep,
     GotRpiPoweredDown,
     GotRpiPoweredOn,
@@ -31,7 +31,7 @@ pub enum LoggerEventKind {
     Rp2040MissedAudioAlarm(u64),
     AudioRecordingFailed,
     RTCTime(u64),
-    StartedAudioRecording(u64),
+    StartedAudioRecording,
     ThermalMode,
     AudioMode,
     RecordingNotFinished,
@@ -46,11 +46,11 @@ impl Into<u16> for LoggerEventKind {
         use LoggerEventKind::*;
         match self {
             Rp2040Sleep => 1,
-            OffloadedRecording(_) => 2,
+            OffloadedRecording => 2,
             SavedNewConfig => 3,
             StartedSendingFramesToRpi => 4,
-            StartedRecording(_) => 5,
-            EndedRecording(_) => 6,
+            StartedRecording => 5,
+            EndedRecording => 6,
             ToldRpiToSleep => 7,
             GotRpiPoweredDown => 8,
             GotRpiPoweredOn => 9,
@@ -67,7 +67,7 @@ impl Into<u16> for LoggerEventKind {
             Rp2040MissedAudioAlarm(_) => 20,
             AudioRecordingFailed => 21,
             RTCTime(_) => 22,
-            StartedAudioRecording(_) => 23,
+            StartedAudioRecording => 23,
             ThermalMode => 24,
             AudioMode => 25,
             RecordingNotFinished => 26,
@@ -86,11 +86,11 @@ impl TryFrom<u16> for LoggerEventKind {
         use LoggerEventKind::*;
         match value {
             1 => Ok(Rp2040Sleep),
-            2 => Ok(OffloadedRecording(0)),
+            2 => Ok(OffloadedRecording),
             3 => Ok(SavedNewConfig),
             4 => Ok(StartedSendingFramesToRpi),
-            5 => Ok(StartedRecording(0)),
-            6 => Ok(EndedRecording(0)),
+            5 => Ok(StartedRecording),
+            6 => Ok(EndedRecording),
             7 => Ok(ToldRpiToSleep),
             8 => Ok(GotRpiPoweredDown),
             9 => Ok(GotRpiPoweredOn),
@@ -107,7 +107,7 @@ impl TryFrom<u16> for LoggerEventKind {
             20 => Ok(Rp2040MissedAudioAlarm(0)),
             21 => Ok(AudioRecordingFailed),
             22 => Ok(RTCTime(0)),
-            23 => Ok(StartedAudioRecording(0)),
+            23 => Ok(StartedAudioRecording),
             24 => Ok(ThermalMode),
             25 => Ok(AudioMode),
             26 => Ok(RecordingNotFinished),
@@ -275,12 +275,11 @@ impl EventLogger {
             let event_bytes = self.event_at_index(event_index, flash_storage);
             if let Some(event_bytes) = event_bytes {
                 let kind = LittleEndian::read_u16(&event_bytes[0..2]);
-                if let Ok(LoggerEventKind::OffloadedRecording(0)) = LoggerEventKind::try_from(kind)
-                {
+                if let Ok(LoggerEventKind::OffloadedRecording) = LoggerEventKind::try_from(kind) {
                     let timestamp = LittleEndian::read_u64(&event_bytes[2..10]);
                     latest_event = Some(LoggerEvent {
                         timestamp,
-                        event: LoggerEventKind::OffloadedRecording(0),
+                        event: LoggerEventKind::OffloadedRecording,
                     });
                 }
             }
@@ -313,14 +312,6 @@ impl EventLogger {
                 } else if let LoggerEventKind::RTCTime(alarm_time) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
                 } else if let LoggerEventKind::ToldRpiToWake(reason) = event.event {
-                    LittleEndian::write_u64(&mut event_data[10..18], reason);
-                } else if let LoggerEventKind::StartedAudioRecording(reason) = event.event {
-                    LittleEndian::write_u64(&mut event_data[10..18], reason);
-                } else if let LoggerEventKind::StartedRecording(reason) = event.event {
-                    LittleEndian::write_u64(&mut event_data[10..18], reason);
-                } else if let LoggerEventKind::EndedRecording(reason) = event.event {
-                    LittleEndian::write_u64(&mut event_data[10..18], reason);
-                } else if let LoggerEventKind::OffloadedRecording(reason) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], reason);
                 }
                 // Write to the end of the flash storage.

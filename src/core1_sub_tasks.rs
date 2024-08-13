@@ -172,8 +172,6 @@ pub fn offload_flash_storage_and_events(
         let mut file_start = true;
         let mut part_count = 0;
         let mut counter = timer.get_counter();
-        let mut start_block = 0;
-        let mut start_page = 0;
         let mut file_end = false;
         // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
         //  Probably doesn't matter though.
@@ -186,8 +184,6 @@ pub fn offload_flash_storage_and_events(
             }
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last {
-                start_block = block_index;
-                start_page = 0;
                 ExtTransferMessage::BeginFileTransfer
             } else if !file_start && !is_last {
                 ExtTransferMessage::ResumeFileTransfer
@@ -248,25 +244,6 @@ pub fn offload_flash_storage_and_events(
                     flash_storage,
                 );
                 break;
-            } else if is_last {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::OffloadedRecording(
-                            (((start_block as u64) << 32) | start_page as u64) as u64,
-                        ),
-                        time.get_timestamp_micros(&timer),
-                    ),
-                    flash_storage,
-                );
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::OffloadedRecording(
-                            (((block_index as u64) << 32) | page_index as u64) as u64,
-                        ),
-                        time.get_timestamp_micros(&timer),
-                    ),
-                    flash_storage,
-                );
             }
             part_count += 1;
             if is_last {
@@ -298,13 +275,13 @@ pub fn offload_flash_storage_and_events(
     if success {
         info!("Completed file offload, transferred {} files", file_count);
         if file_count > 0 {
-            // event_logger.log_event(
-            //     LoggerEvent::new(
-            //         LoggerEventKind::OffloadedRecording(file_count),
-            //         time.get_timestamp_micros(&timer),
-            //     ),
-            //     flash_storage,
-            // );
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedRecording,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
         }
         // TODO: Some validation from the raspberry pi that the transfer completed
         //  without errors, in the form of a hash, and if we have errors, we'd re-transmit.
