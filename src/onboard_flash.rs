@@ -206,6 +206,10 @@ impl Page {
         self.user_metadata_1()[0] == 0
     }
 
+    fn file_start(&self) -> u16 {
+        LittleEndian::read_u16(&self.user_metadata_1()[12..=13])
+    }
+
     fn is_last_page_for_file(&self) -> bool {
         self.user_metadata_1()[1] == 0
     }
@@ -296,8 +300,8 @@ pub struct OnboardFlash {
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
     pub payload_buffer: Option<&'static mut [u8; 2115]>,
+    file_start: Option<u16>,
 }
-
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
 /// We should check for ECC errors after read/writes ourselves
@@ -334,6 +338,7 @@ impl OnboardFlash {
             dma_channel_2: Some(dma_channel_2),
             record_to_flash: should_record,
             payload_buffer: payload_buffer,
+            file_start: None,
         }
     }
     pub fn init(&mut self) {
@@ -696,6 +701,40 @@ impl OnboardFlash {
         }
     }
 
+    pub fn begin_offload_reverse(&mut self) {
+        if let Some(last_block_index) = self.last_used_block_index {
+            for block_index in (0..=last_block_index).rev() {
+                self.current_block_index = block_index;
+                if let Ok(page) = self.last_dirty_page(block_index) {
+                    if self.current_page.is_last_page_for_file() {
+                        let start_block = self.current_page.file_start();
+                        if start_block == u16::MAX {
+                            //not written do something
+                        } else {
+                            self.current_block_index = start_block as isize
+                        }
+                    } else {
+                        //shouldnt happen maybe corrupt file
+                        //should keep cycling back
+                    }
+                }
+            }
+            self.current_page_index = 0;
+        }
+    }
+
+    fn last_dirty_page(&mut self, block_index: isize) -> Result<isize, ()> {
+        for page in (0..64).rev() {
+            self.read_page(block_index, page).unwrap();
+            self.read_page_metadata(0);
+            self.wait_for_all_ready();
+            if self.current_page.page_is_used() {
+                return Ok(page);
+            }
+        }
+        Err(())
+    }
+
     pub fn read_from_cache_at_column_offset(
         &mut self,
         block: isize,
@@ -809,8 +848,10 @@ impl OnboardFlash {
             "Starting file at file block {}, page {}",
             self.current_block_index, self.current_page_index
         );
+        self.file_start = Some(self.current_block_index as u16);
         self.current_block_index
     }
+
     pub fn finish_transfer(
         &mut self,
         block_index: Option<isize>,
@@ -1059,6 +1100,11 @@ impl OnboardFlash {
             {
                 let space = &mut bytes[4..][0x820..=0x83f][10..=11];
                 LittleEndian::write_u16(space, crc);
+            }
+            //need to check datasheet again
+            if is_last {
+                let space = &mut bytes[4..][0x820..=0x83f][12..=13];
+                LittleEndian::write_u16(space, self.file_start.unwrap());
             }
             //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }

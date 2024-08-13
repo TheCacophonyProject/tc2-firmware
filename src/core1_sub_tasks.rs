@@ -147,7 +147,7 @@ pub fn offload_flash_storage_and_events(
     );
     // do some offloading.
     let mut file_count = 0;
-    flash_storage.begin_offload();
+    flash_storage.begin_offload_reverse();
     let mut file_start = true;
     let mut part_count = 0;
     let mut success: bool = true;
