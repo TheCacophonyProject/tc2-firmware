@@ -946,13 +946,6 @@ pub fn core_1_task(
                         .set_recording_flag(&mut delay, false)
                         .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
 
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::EndedRecording,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        &mut flash_storage,
-                    );
                     if !making_status_recording
                         && motion_detection.as_ref().unwrap().was_false_positive()
                     // && cptv_stream.num_frames <= 100
@@ -969,6 +962,14 @@ pub fn core_1_task(
                         event_logger.log_event(
                             LoggerEvent::new(
                                 LoggerEventKind::WouldDiscardAsFalsePositive,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
+                    } else {
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::EndedRecording,
                                 synced_date_time.get_timestamp_micros(&timer),
                             ),
                             &mut flash_storage,

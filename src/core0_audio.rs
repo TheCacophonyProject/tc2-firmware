@@ -644,13 +644,6 @@ pub fn offload(
     if let Ok(mut awake) = i2c.pi_is_awake_and_tc2_agent_is_ready(delay, true) {
         if !awake && wake_if_asleep {
             watchdog.disable();
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToWake(7),
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                flash_storage,
-            );
             wake_raspberry_pi(i2c, delay);
             awake = true;
             watchdog.start(8388607.micros());
