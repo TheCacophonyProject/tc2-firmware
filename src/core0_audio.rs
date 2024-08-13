@@ -530,6 +530,10 @@ pub fn audio_task(
     watchdog.start(8388607.micros());
 
     let mut logged_power_down = false;
+    let boot_thermal = match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => true,
+        _ => false,
+    };
     loop {
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         if !logged_power_down {
@@ -543,15 +547,6 @@ pub fn audio_task(
             logged_power_down = true;
         }
 
-        match device_config.config().audio_mode {
-            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                if let Ok(()) = shared_i2c.tc2_agent_request_thermal_mode(&mut delay) {
-                    info!("Going into thermal mode");
-                    restart(watchdog);
-                }
-            }
-            _ => (),
-        }
         watchdog.feed();
         if should_sleep {
             if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
@@ -607,6 +602,13 @@ pub fn audio_task(
                         }
                     }
                 }
+            }
+        }
+        if boot_thermal && should_sleep {
+            //if we have done eveyrthing and PI is still on go into thermal for preview
+            if let Ok(()) = shared_i2c.tc2_agent_request_thermal_mode(&mut delay) {
+                info!("Going into thermal mode");
+                restart(watchdog);
             }
         }
 
@@ -810,7 +812,6 @@ fn should_offload_audio_recordings(
     i2c: &mut SharedI2C,
     now: NaiveDateTime,
 ) -> bool {
-    let offload_hour = 10;
     let has_files = flash_storage.has_files_to_offload() || event_logger.is_nearly_full();
     if !has_files {
         return false;

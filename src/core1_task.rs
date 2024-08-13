@@ -652,7 +652,8 @@ pub fn core_1_task(
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
-    let mut current_recording_window = None;
+    let mut current_recording_window =
+        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
@@ -803,13 +804,13 @@ pub fn core_1_task(
                         making_status_recording = true;
                     }
                 } else {
-                    if let Some((_, window_end)) = &current_recording_window {
-                        if synced_date_time.date_time_utc + Duration::minutes(1) > *window_end {
-                            warn!("Make shutdown status recording");
-                            should_start_new_recording = true;
-                            made_shutdown_status_recording = true;
-                            making_status_recording = true;
-                        }
+                    if synced_date_time.date_time_utc + Duration::minutes(1)
+                        > current_recording_window.1
+                    {
+                        warn!("Make shutdown status recording");
+                        should_start_new_recording = true;
+                        made_shutdown_status_recording = true;
+                        making_status_recording = true;
                     }
                 }
             }
@@ -838,7 +839,7 @@ pub fn core_1_task(
                 let is_inside_recording_window = if !dev_mode {
                     device_config.time_is_in_recording_window(
                         &synced_date_time.date_time_utc,
-                        &current_recording_window,
+                        &Some(current_recording_window),
                     )
                 } else {
                     // Recording window is 5 minutes from startup time in dev mode.
@@ -847,13 +848,6 @@ pub fn core_1_task(
                 };
 
                 if is_inside_recording_window {
-                    if current_recording_window.is_none() {
-                        current_recording_window = Some(
-                            device_config
-                                .next_or_current_recording_window(&synced_date_time.date_time_utc),
-                        );
-                    }
-
                     // Should we make a 2-second status recording at the beginning or end of the window?
                     if !made_startup_status_recording && !motion_detection_triggered_this_frame {
                         warn!("Make startup status recording");
