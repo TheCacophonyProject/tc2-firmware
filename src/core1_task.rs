@@ -652,7 +652,7 @@ pub fn core_1_task(
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
-    let mut current_recording_window =
+    let current_recording_window =
         device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
