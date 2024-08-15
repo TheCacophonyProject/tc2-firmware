@@ -145,9 +145,162 @@ pub fn offload_flash_storage_and_events(
             None
         },
     );
+    let mut has_file;
+    let mut can_do_reverse;
+    (has_file, can_do_reverse) = flash_storage.begin_offload_reverse();
+    if !can_do_reverse {
+        //old file system will do this once
+        return offload_flash_storage_forward(
+            flash_storage,
+            pi_spi,
+            resets,
+            dma,
+            clock_freq,
+            shared_i2c,
+            delay,
+            timer,
+            event_logger,
+            time,
+            watchdog,
+        );
+    }
     // do some offloading.
     let mut file_count = 0;
-    flash_storage.begin_offload_reverse();
+    let mut success: bool = true;
+    let mut counter = timer.get_counter();
+    // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
+    //  Probably doesn't matter though.
+    let previous_block = Some(10);
+    while has_file {
+        let mut file_start = true;
+        let mut part_count = 0;
+        let mut file_ended = false;
+        while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+            flash_storage.get_file_part()
+        {
+            if watchdog.is_some() {
+                watchdog.as_mut().unwrap().feed();
+            }
+            pi_spi.enable(spi, resets);
+            let transfer_type = if file_start && !is_last {
+                ExtTransferMessage::BeginFileTransfer
+            } else if !file_start && !is_last {
+                ExtTransferMessage::ResumeFileTransfer
+            } else if is_last {
+                ExtTransferMessage::EndFileTransfer
+            } else if file_start && is_last {
+                ExtTransferMessage::BeginAndEndFileTransfer
+            } else {
+                crate::unreachable!("Invalid file transfer state");
+            };
+
+            if file_start {
+                info!("Offload start is {}:{}", block_index, page_index)
+            }
+            if is_last {
+                info!("Got last file {}:{}", block_index, page_index);
+            }
+            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+            let current_crc = crc_check.checksum(&part);
+            if current_crc != crc {
+                // warn!(
+                //     "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                //     part_count, block_index, page_index
+                // );
+            }
+
+            let mut attempts = 0;
+            'transfer_part: loop {
+                if watchdog.is_some() {
+                    watchdog.as_mut().unwrap().feed();
+                }
+                let did_transfer =
+                    pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
+                counter = timer.get_counter();
+                if !did_transfer {
+                    attempts += 1;
+                    if attempts > 100 {
+                        success = false;
+                        break 'transfer_part;
+                    }
+                    //takes tc2-agent about this long to poll again will fail a lot otherwise
+                    let time_since = (timer.get_counter() - counter).to_micros();
+                    if time_since < TIME_BETWEEN_TRANSFER {
+                        delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                    }
+                } else {
+                    break 'transfer_part;
+                }
+            }
+
+            // Give spi peripheral back to flash storage.
+            if let Some(spi) = pi_spi.disable() {
+                flash_storage.take_spi(spi, resets, clock_freq.Hz());
+                if is_last {
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::OffloadedRecording,
+                            time.get_timestamp_micros(&timer),
+                        ),
+                        flash_storage,
+                    );
+                }
+            }
+            if !success {
+                break;
+            }
+
+            part_count += 1;
+            if is_last {
+                file_count += 1;
+                info!("Offloaded {} file(s)", file_count);
+                let _ = flash_storage.erase_last_file();
+                file_ended = true;
+            }
+            file_start = false;
+        }
+        if !success {
+            break;
+        }
+
+        if !file_ended {
+            info!("In complete file {}:0 erasing", flash_storage.file_start);
+            if let Err(e) = flash_storage.erase_last_file() {
+                info!("Nothing to erase?? {}", e);
+            }
+        }
+        (has_file, can_do_reverse) = flash_storage.begin_offload_reverse();
+        delay.delay_ms(1000);
+    }
+    if success {
+        info!(
+            "Completed file offload, transferred {} files start {} previous is {}",
+            file_count, flash_storage.file_start, flash_storage.previous_file_start
+        );
+        file_count != 0
+    } else {
+        flash_storage.scan();
+        warn!("File transfer to pi failed");
+        false
+    }
+}
+
+pub fn offload_flash_storage_forward(
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    resets: &mut RESETS,
+    dma: &mut DMA,
+    clock_freq: u32,
+    shared_i2c: &mut SharedI2C,
+    delay: &mut Delay,
+    timer: &mut Timer,
+    event_logger: &mut EventLogger,
+    time: &SyncedDateTime,
+    mut watchdog: Option<&mut bsp::hal::Watchdog>,
+) -> bool {
+    // do some offloading.
+    let mut file_count = 0;
+    flash_storage.begin_offload();
     let mut file_start = true;
     let mut part_count = 0;
     let mut success: bool = true;
@@ -174,6 +327,12 @@ pub fn offload_flash_storage_and_events(
             crate::unreachable!("Invalid file transfer state");
         };
 
+        if file_start {
+            info!("Offload start is {}:{}", block_index, page_index)
+        }
+        // if is_last {
+        //     info!("Got last file {}:{}", block_index, page_index);
+        // }
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let current_crc = crc_check.checksum(&part);
         if current_crc != crc {

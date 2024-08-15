@@ -296,12 +296,8 @@ impl PdmMicrophone {
                             true,
                         );
                     }
-                    if flash_storage.last_used_block_index.is_some() {
-                        flash_storage.erase_block_range(
-                            start_block_index,
-                            flash_storage.last_used_block_index.unwrap(),
-                        );
-                    }
+                    let _ = flash_storage.erase_last_file();
+
                     break;
                 }
                 // When a transfer is done we immediately enqueue the buffers again.

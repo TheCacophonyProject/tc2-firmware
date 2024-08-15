@@ -14,6 +14,7 @@
 use crate::bsp::pac::SPI1;
 use crate::rp2040_flash::PAGE_SIZE;
 use byteorder::{ByteOrder, LittleEndian};
+use core::char::MAX;
 use core::mem;
 use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
@@ -206,8 +207,22 @@ impl Page {
         self.user_metadata_1()[0] == 0
     }
 
-    fn file_start(&self) -> u16 {
-        LittleEndian::read_u16(&self.user_metadata_1()[12..=13])
+    pub fn file_start(&self) -> Option<u16> {
+        let start = LittleEndian::read_u16(&self.user_metadata_1()[12..=13]);
+        if start == u16::MAX {
+            None
+        } else {
+            Some(start)
+        }
+    }
+
+    pub fn previous_file_start(&self) -> Option<(u16)> {
+        let block = LittleEndian::read_u16(&self.user_metadata_1()[14..=15]);
+        if block == u16::MAX {
+            None
+        } else {
+            Some(block)
+        }
     }
 
     fn is_last_page_for_file(&self) -> bool {
@@ -292,6 +307,7 @@ pub struct OnboardFlash {
     pub current_page_index: isize,
     pub current_block_index: isize,
     pub last_used_block_index: Option<isize>,
+    pub previous_file_start: Option<u16>,
     pub first_used_block_index: Option<isize>,
     pub bad_blocks: [i16; 40],
     pub current_page: Page,
@@ -300,7 +316,7 @@ pub struct OnboardFlash {
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
     pub payload_buffer: Option<&'static mut [u8; 2115]>,
-    file_start: Option<u16>,
+    pub file_start: Option<u16>,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -329,6 +345,7 @@ impl OnboardFlash {
             spi: None,
             first_used_block_index: None,
             last_used_block_index: None,
+            // previous_file_index: None,
             bad_blocks: [i16::MAX; 40],
             current_page_index: 0,
             current_block_index: 0,
@@ -339,6 +356,7 @@ impl OnboardFlash {
             record_to_flash: should_record,
             payload_buffer: payload_buffer,
             file_start: None,
+            previous_file_start: None,
         }
     }
     pub fn init(&mut self) {
@@ -385,7 +403,7 @@ impl OnboardFlash {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
-            self.read_page(block_index, 0).unwrap();
+            self.read_page(block_index, 1).unwrap();
             self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.is_part_of_bad_block() {
@@ -403,9 +421,14 @@ impl OnboardFlash {
                     if self.last_used_block_index.is_none() && self.first_used_block_index.is_some()
                     {
                         self.last_used_block_index = Some(block_index - 1);
+                        self.file_start = self.prev_page.file_start();
+
                         self.current_block_index = block_index;
                         self.current_page_index = 0;
-                        println!("Setting next starting block index {}", block_index);
+                        println!(
+                            "Setting next starting block index {} last used is {}",
+                            block_index, self.last_used_block_index
+                        );
                     }
                 } else {
                     let address = OnboardFlash::get_address(block_index, 0);
@@ -515,6 +538,7 @@ impl OnboardFlash {
         }
         self.first_used_block_index = None;
         self.last_used_block_index = None;
+        self.file_start = None;
         self.current_page_index = 0;
         self.current_block_index = 0;
     }
@@ -533,12 +557,28 @@ impl OnboardFlash {
         }
     }
 
-    pub fn erase_block_range(
-        &mut self,
-        start_block_index: isize,
-        end_block_index: isize,
-    ) -> Result<(), &str> {
-        for block_index in start_block_index..=end_block_index {
+    pub fn erase_last_file(&mut self) -> Result<(), &str> {
+        //havent started a file
+        //haven't used a block
+        //havent written to file yet
+
+        let (start, end) = (self.file_start, self.last_used_block_index);
+
+        if start.is_none()
+            || self.last_used_block_index.is_none()
+            || self.last_used_block_index.unwrap() < start.unwrap() as isize
+        {
+            // self.last_used_block_index = self.previous_file_index;
+            info!(
+                "Nothing to erase start {} last used block {}",
+                start, self.last_used_block_index
+            );
+            return Err("File hasn't been written too");
+        }
+        let start_block_index = start.unwrap() as isize;
+        info!("Erasing last file {}:0 to {}", start_block_index, end);
+
+        for block_index in start_block_index..=end.unwrap() {
             if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
             } else if !self.erase_block(block_index).is_ok() {
@@ -546,6 +586,9 @@ impl OnboardFlash {
                 return Err("Block erase failed");
             }
         }
+        self.file_start = self.previous_file_start;
+        self.previous_file_start = None;
+        info!("Set file start {}", self.file_start);
         if start_block_index == 0 {
             self.first_used_block_index = None;
             self.last_used_block_index = None;
@@ -584,15 +627,21 @@ impl OnboardFlash {
                 let length = self.current_page.page_bytes_used();
                 let crc = self.current_page.page_crc();
                 let is_last_page_for_file = self.current_page.is_last_page_for_file();
+                if is_last_page_for_file {
+                    info!(
+                        "Got last file {}:{} file start is {} previous file start is {}",
+                        self.current_block_index,
+                        self.current_page_index,
+                        self.current_page.file_start(),
+                        self.current_page.previous_file_start()
+                    );
+                }
+                let block = self.current_block_index;
+                let page = self.current_page_index;
                 self.advance_file_cursor(is_last_page_for_file);
                 let spi = self.free_spi().unwrap();
                 Some((
-                    (
-                        &self.current_page.user_data()[0..length],
-                        crc,
-                        self.current_block_index,
-                        self.current_page_index,
-                    ),
+                    (&self.current_page.user_data()[0..length], crc, block, page),
                     is_last_page_for_file,
                     spi,
                 ))
@@ -671,10 +720,10 @@ impl OnboardFlash {
             // that the file spans as temporarily corrupt, so this file doesn't get read and
             // send to the raspberry pi
             //Err(&"unrecoverable data corruption error")
-            warn!(
-                "unrecoverable data corruption error at {}:{} - should relocate? {}",
-                block, page, should_relocate
-            );
+            // warn!(
+            //     "unrecoverable data corruption error at {}:{} - should relocate? {}",
+            //     block, page, should_relocate
+            // );
             Ok(())
         }
     }
@@ -701,32 +750,43 @@ impl OnboardFlash {
         }
     }
 
-    pub fn begin_offload_reverse(&mut self) {
+    pub fn begin_offload_reverse(&mut self) -> (bool, bool) {
         if let Some(last_block_index) = self.last_used_block_index {
-            for block_index in (0..=last_block_index).rev() {
-                self.current_block_index = block_index;
-                if let Ok(page) = self.last_dirty_page(block_index) {
-                    if self.current_page.is_last_page_for_file() {
-                        let start_block = self.current_page.file_start();
-                        if start_block == u16::MAX {
-                            //not written do something
-                        } else {
-                            self.current_block_index = start_block as isize
-                        }
-                    } else {
-                        //shouldnt happen maybe corrupt file
-                        //should keep cycling back
-                    }
+            info!("Offload reverse last used {}", self.last_used_block_index);
+            self.read_page(last_block_index, 0).unwrap();
+            self.read_page_metadata(last_block_index);
+            self.wait_for_all_ready();
+            if self.current_page.page_is_used() {
+                info!("Page used {}:{}", last_block_index, 0);
+                if let Some(start_block) = self.current_page.file_start() {
+                    self.current_block_index = start_block as isize;
+                    self.current_page_index = 0;
+                    self.file_start = Some(self.current_block_index as u16);
+                    self.previous_file_start = self.current_page.previous_file_start();
+                    info!(
+                        "Set file start to {}:{} and previous {}",
+                        self.current_block_index, 0, self.previous_file_start
+                    );
+                    return (true, true);
+                } else {
+                    //do something old file system only need to offload them once
+                    return (true, false);
                 }
+            } else {
+                //this shouldn't happen either
+                warn!("Last used block is empty {}:{}", last_block_index, 0);
+                return (false, true);
             }
-            self.current_page_index = 0;
+        } else {
+            (false, true)
         }
     }
 
     fn last_dirty_page(&mut self, block_index: isize) -> Result<isize, ()> {
         for page in (0..64).rev() {
+            info!("Looking for dirty page at {}:{}", block_index, page);
             self.read_page(block_index, page).unwrap();
-            self.read_page_metadata(0);
+            self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.page_is_used() {
                 return Ok(page);
@@ -841,12 +901,13 @@ impl OnboardFlash {
         info!("Device id {:x}", id);
     }
     pub fn start_file(&mut self, start_page: isize) -> isize {
-        // We always start writing a new file at page 1, reserving page 0 for when we come back
+        // CPTV always start writing a new file at page 1, reserving page 0 for when we come back
         // and write the header once we've finished writing the file.
+        self.previous_file_start = self.file_start;
         self.current_page_index = start_page;
         warn!(
-            "Starting file at file block {}, page {}",
-            self.current_block_index, self.current_page_index
+            "Starting file at file block {}, page {} previous is {}",
+            self.current_block_index, self.current_page_index, self.previous_file_start
         );
         self.file_start = Some(self.current_block_index as u16);
         self.current_block_index
@@ -895,6 +956,7 @@ impl OnboardFlash {
                     self.last_used_block_index = Some(b);
                 }
             }
+
             if block_index.is_none() && page_index.is_none() {
                 self.advance_file_cursor(is_last);
             }
@@ -1101,10 +1163,14 @@ impl OnboardFlash {
                 let space = &mut bytes[4..][0x820..=0x83f][10..=11];
                 LittleEndian::write_u16(space, crc);
             }
-            //need to check datasheet again
-            if is_last {
-                let space = &mut bytes[4..][0x820..=0x83f][12..=13];
-                LittleEndian::write_u16(space, self.file_start.unwrap());
+            //write file start block
+            let space = &mut bytes[4..][0x820..=0x83f][12..=13];
+            LittleEndian::write_u16(space, self.file_start.unwrap());
+            if self.file_start.unwrap() > 0 {
+                // if let Some(previous_start_block) = self.previous_file_start {
+                //write previous file start could just write on first page if it matters
+                let space = &mut bytes[4..][0x820..=0x83f][14..=15];
+                LittleEndian::write_u16(space, self.previous_file_start.unwrap() as u16);
             }
             //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }
@@ -1127,6 +1193,9 @@ impl OnboardFlash {
         // TODO: Check ECC status, mark and relocate block if needed.
         //info!("Status after program {:#010b}", status.inner);
         if !status.program_failed() {
+            if self.first_used_block_index.is_none() {
+                self.first_used_block_index = Some(b);
+            }
             if self.first_used_block_index.is_none() {
                 self.first_used_block_index = Some(b);
             }
