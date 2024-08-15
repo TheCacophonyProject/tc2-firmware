@@ -145,25 +145,8 @@ pub fn offload_flash_storage_and_events(
             None
         },
     );
-    let mut has_file;
-    let mut can_do_reverse;
-    (has_file, can_do_reverse) = flash_storage.begin_offload_reverse();
-    if !can_do_reverse {
-        //old file system will do this once
-        return offload_flash_storage_forward(
-            flash_storage,
-            pi_spi,
-            resets,
-            dma,
-            clock_freq,
-            shared_i2c,
-            delay,
-            timer,
-            event_logger,
-            time,
-            watchdog,
-        );
-    }
+    let mut has_file = flash_storage.begin_offload_reverse();
+
     // do some offloading.
     let mut file_count = 0;
     let mut success: bool = true;
@@ -203,10 +186,10 @@ pub fn offload_flash_storage_and_events(
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let current_crc = crc_check.checksum(&part);
             if current_crc != crc {
-                // warn!(
-                //     "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
-                //     part_count, block_index, page_index
-                // );
+                warn!(
+                    "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                    part_count, block_index, page_index
+                );
             }
 
             let mut attempts = 0;
@@ -264,13 +247,21 @@ pub fn offload_flash_storage_and_events(
         }
 
         if !file_ended {
-            info!("In complete file {}:0 erasing", flash_storage.file_start);
+            info!(
+                "Incomplete file at block {} erasing",
+                flash_storage.file_start
+            );
             if let Err(e) = flash_storage.erase_last_file() {
-                info!("Nothing to erase?? {}", e);
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::EmptyErase,
+                        time.get_timestamp_micros(&timer),
+                    ),
+                    flash_storage,
+                );
             }
         }
-        (has_file, can_do_reverse) = flash_storage.begin_offload_reverse();
-        delay.delay_ms(1000);
+        has_file = flash_storage.begin_offload_reverse();
     }
     if success {
         info!(
@@ -285,6 +276,7 @@ pub fn offload_flash_storage_and_events(
     }
 }
 
+//old code just used when moving old files
 pub fn offload_flash_storage_forward(
     flash_storage: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
@@ -330,9 +322,6 @@ pub fn offload_flash_storage_forward(
         if file_start {
             info!("Offload start is {}:{}", block_index, page_index)
         }
-        // if is_last {
-        //     info!("Got last file {}:{}", block_index, page_index);
-        // }
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let current_crc = crc_check.checksum(&part);
         if current_crc != crc {

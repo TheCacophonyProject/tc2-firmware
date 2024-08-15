@@ -30,6 +30,7 @@ pub enum LoggerEventKind {
     AttinyCommError,
     Rp2040MissedAudioAlarm(u64),
     AudioRecordingFailed,
+    EmptyErase,
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -57,6 +58,7 @@ impl Into<u16> for LoggerEventKind {
             AttinyCommError => 19,
             Rp2040MissedAudioAlarm(_) => 20,
             AudioRecordingFailed => 21,
+            EmptyErase => 22,
         }
     }
 }
@@ -88,6 +90,7 @@ impl TryFrom<u16> for LoggerEventKind {
             19 => Ok(AttinyCommError),
             20 => Ok(Rp2040MissedAudioAlarm(0)),
             21 => Ok(AudioRecordingFailed),
+            22 => Ok(EmptyErase),
             _ => Err(()),
         }
     }

@@ -750,49 +750,57 @@ impl OnboardFlash {
         }
     }
 
-    pub fn begin_offload_reverse(&mut self) -> (bool, bool) {
+    pub fn begin_offload_reverse(&mut self) -> bool {
         if let Some(last_block_index) = self.last_used_block_index {
-            info!("Offload reverse last used {}", self.last_used_block_index);
-            self.read_page(last_block_index, 0).unwrap();
-            self.read_page_metadata(last_block_index);
-            self.wait_for_all_ready();
-            if self.current_page.page_is_used() {
-                info!("Page used {}:{}", last_block_index, 0);
-                if let Some(start_block) = self.current_page.file_start() {
-                    self.current_block_index = start_block as isize;
-                    self.current_page_index = 0;
-                    self.file_start = Some(self.current_block_index as u16);
-                    self.previous_file_start = self.current_page.previous_file_start();
-                    info!(
-                        "Set file start to {}:{} and previous {}",
-                        self.current_block_index, 0, self.previous_file_start
-                    );
-                    return (true, true);
-                } else {
-                    //do something old file system only need to offload them once
-                    return (true, false);
-                }
-            } else {
-                //this shouldn't happen either
-                warn!("Last used block is empty {}:{}", last_block_index, 0);
-                return (false, true);
+            if let Some(file_start) = self.file_start {
+                self.current_block_index = file_start as isize;
+                self.current_page_index = 0;
+                self.previous_file_start = self.current_page.previous_file_start();
+                info!(
+                    "Set file start to {}:{} and previous {}",
+                    self.current_block_index, 0, self.previous_file_start
+                );
+                return true;
             }
-        } else {
-            (false, true)
+            //old file system should only happen once
+            self.current_block_index = self.find_start(last_block_index);
+            self.current_page_index = 0;
+            self.file_start = Some(self.current_block_index as u16);
+            info!(
+                "Searched for file start found {}:{}",
+                self.current_block_index, self.last_used_block_index
+            );
+            return true;
         }
+        return false;
     }
 
-    fn last_dirty_page(&mut self, block_index: isize) -> Result<isize, ()> {
+    pub fn find_start(&mut self, file_block_index: isize) -> isize {
+        if file_block_index == 0 {
+            return 0;
+        }
+        //find previous last page for file
+        for block_index in (1..=file_block_index - 1).rev() {
+            if let Some(last_page) = self.last_dirty_page(block_index) {
+                if self.current_page.is_last_page_for_file() {
+                    return block_index + 1;
+                }
+            }
+        }
+        return 0;
+    }
+
+    fn last_dirty_page(&mut self, block_index: isize) -> Option<isize> {
         for page in (0..64).rev() {
             info!("Looking for dirty page at {}:{}", block_index, page);
             self.read_page(block_index, page).unwrap();
             self.read_page_metadata(block_index);
             self.wait_for_all_ready();
             if self.current_page.page_is_used() {
-                return Ok(page);
+                return Some(page);
             }
         }
-        Err(())
+        None
     }
 
     pub fn read_from_cache_at_column_offset(
