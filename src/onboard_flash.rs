@@ -1199,6 +1199,9 @@ impl OnboardFlash {
         // TODO: Check ECC status, mark and relocate block if needed.
         //info!("Status after program {:#010b}", status.inner);
         if !status.program_failed() {
+            if self.first_used_block_index.is_none() {
+                self.first_used_block_index = Some(b);
+            }
             if self.last_used_block_index.is_none() {
                 self.last_used_block_index = Some(b);
             } else if let Some(last_used_block_index) = self.last_used_block_index {
