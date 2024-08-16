@@ -237,6 +237,9 @@ pub fn offload_flash_storage_and_events(
             if is_last {
                 file_count += 1;
                 info!("Offloaded {} file(s)", file_count);
+                if watchdog.is_some() {
+                    watchdog.as_mut().unwrap().feed();
+                }
                 let _ = flash_storage.erase_last_file();
                 file_ended = true;
             }
@@ -251,6 +254,9 @@ pub fn offload_flash_storage_and_events(
                 "Incomplete file at block {} erasing",
                 flash_storage.file_start
             );
+            if watchdog.is_some() {
+                watchdog.as_mut().unwrap().feed();
+            }
             if let Err(e) = flash_storage.erase_last_file() {
                 event_logger.log_event(
                     LoggerEvent::new(
