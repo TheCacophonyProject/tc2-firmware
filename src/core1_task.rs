@@ -490,10 +490,7 @@ pub fn core_1_task(
     let mut making_status_recording = false;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
-    info!(
-        "Entering frame loop {} has files {} did offload {}",
-        made_startup_status_recording, has_files_to_offload, did_offload_files
-    );
+    info!("Entering frame loop");
     loop {
         let input = sio.fifo.read_blocking();
         crate::assert_eq!(
@@ -763,11 +760,6 @@ pub fn core_1_task(
                 // to give more breathing room.
                 if let Some(cptv_stream) = &mut cptv_stream {
                     let cptv_start_block_index = cptv_stream.starting_block_index as isize;
-                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
-                    error!(
-                        "Ending current recording start block {} end block{}",
-                        cptv_start_block_index, cptv_end_block_index
-                    );
 
                     if !making_status_recording
                         && motion_detection.as_ref().unwrap().was_false_positive()
@@ -775,7 +767,7 @@ pub fn core_1_task(
                     {
                         info!(
                             "Discarding as a false-positive {}:{} ",
-                            cptv_start_block_index, cptv_end_block_index
+                            cptv_start_block_index, flash_storage.last_used_block_index
                         );
                         let _ = flash_storage.erase_last_file();
                         event_logger.log_event(
@@ -787,6 +779,10 @@ pub fn core_1_task(
                         );
                     } else {
                         cptv_stream.finalise(&mut flash_storage);
+                        error!(
+                            "Ending current recording start block {} end block{}",
+                            cptv_start_block_index, flash_storage.last_used_block_index
+                        );
                     }
 
                     ended_recording = true;
