@@ -177,12 +177,6 @@ pub fn offload_flash_storage_and_events(
                 crate::unreachable!("Invalid file transfer state");
             };
 
-            if file_start {
-                info!("Offload start is {}:{}", block_index, page_index)
-            }
-            if is_last {
-                info!("Got last file {}:{}", block_index, page_index);
-            }
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let current_crc = crc_check.checksum(&part);
             if current_crc != crc {

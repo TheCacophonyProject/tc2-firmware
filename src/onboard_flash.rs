@@ -316,7 +316,7 @@ pub struct OnboardFlash {
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
     pub payload_buffer: Option<&'static mut [u8; 2115]>,
-    pub file_start: Option<u16>,
+    pub file_start: Option<u16>, //start of currently writing file, or last written
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
