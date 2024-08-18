@@ -626,15 +626,7 @@ impl OnboardFlash {
                 let length = self.current_page.page_bytes_used();
                 let crc = self.current_page.page_crc();
                 let is_last_page_for_file = self.current_page.is_last_page_for_file();
-                // if is_last_page_for_file {
-                //     info!(
-                //         "Got last file {}:{} file start is {} previous file start is {}",
-                //         self.current_block_index,
-                //         self.current_page_index,
-                //         self.current_page.file_start(),
-                //         self.current_page.previous_file_start()
-                //     );
-                // }
+
                 let block = self.current_block_index;
                 let page = self.current_page_index;
                 self.advance_file_cursor(is_last_page_for_file);

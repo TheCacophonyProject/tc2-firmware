@@ -153,7 +153,7 @@ pub fn offload_flash_storage_and_events(
     let mut counter = timer.get_counter();
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
-    let previous_block = Some(10);
+
     while has_file {
         let mut file_start = true;
         let mut part_count = 0;
