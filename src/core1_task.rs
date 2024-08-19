@@ -401,7 +401,7 @@ pub fn core_1_task(
     let should_offload = (has_files_to_offload
         && !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None))
         || flash_storage.is_too_full_to_start_new_recordings()
-        || (has_files_to_offload && flash_storage.file_start.is_none());
+        || (has_files_to_offload && flash_storage.file_start_block.is_none());
     //means old file system offload once
     let should_offload = if !should_offload {
         let previous_offload_time = event_logger

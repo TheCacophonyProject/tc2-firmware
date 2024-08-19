@@ -177,6 +177,12 @@ pub fn offload_flash_storage_and_events(
                 crate::unreachable!("Invalid file transfer state");
             };
 
+            if file_start {
+                info!("Offload start is {}:{}", block_index, page_index)
+            }
+            if is_last {
+                info!("Got last file {}:{}", block_index, page_index);
+            }
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let current_crc = crc_check.checksum(&part);
             if current_crc != crc {
@@ -246,7 +252,7 @@ pub fn offload_flash_storage_and_events(
         if !file_ended {
             info!(
                 "Incomplete file at block {} erasing",
-                flash_storage.file_start
+                flash_storage.file_start_block
             );
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
@@ -254,7 +260,7 @@ pub fn offload_flash_storage_and_events(
             if let Err(e) = flash_storage.erase_last_file() {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::EmptyErase,
+                        LoggerEventKind::ErasePartialOrCorruptRecording,
                         time.get_timestamp_micros(&timer),
                     ),
                     flash_storage,
@@ -266,7 +272,7 @@ pub fn offload_flash_storage_and_events(
     if success {
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
-            file_count, flash_storage.file_start, flash_storage.previous_file_start
+            file_count, flash_storage.file_start_block, flash_storage.previous_file_start_block
         );
         file_count != 0
     } else {
