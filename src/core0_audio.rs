@@ -672,7 +672,7 @@ fn should_offload_audio_recordings(
         info!("Offloading as logger is nearly full");
         return true;
     }
-    if flash_storage.file_start_block.is_none() {
+    if flash_storage.file_start_block_index.is_none() {
         //one off
         info!("Offloading as previous file system version");
         return true;

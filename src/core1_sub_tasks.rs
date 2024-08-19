@@ -252,7 +252,7 @@ pub fn offload_flash_storage_and_events(
         if !file_ended {
             info!(
                 "Incomplete file at block {} erasing",
-                flash_storage.file_start_block
+                flash_storage.file_start_block_index
             );
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
@@ -272,7 +272,9 @@ pub fn offload_flash_storage_and_events(
     if success {
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
-            file_count, flash_storage.file_start_block, flash_storage.previous_file_start_block
+            file_count,
+            flash_storage.file_start_block_index,
+            flash_storage.previous_file_start_block_index
         );
         file_count != 0
     } else {
