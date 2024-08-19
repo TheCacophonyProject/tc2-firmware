@@ -14,7 +14,6 @@
 use crate::bsp::pac::SPI1;
 use crate::rp2040_flash::PAGE_SIZE;
 use byteorder::{ByteOrder, LittleEndian};
-use core::char::MAX;
 use core::mem;
 use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
