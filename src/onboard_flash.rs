@@ -743,6 +743,10 @@ impl OnboardFlash {
     pub fn begin_offload_reverse(&mut self) -> bool {
         if let Some(last_block_index) = self.last_used_block_index {
             if let Some(file_start) = self.file_start_block_index {
+                //read 1 as if incomplete 0 won't be writen too
+                self.read_page(file_start as isize, 1).unwrap();
+                self.read_page_metadata(file_start as isize);
+                self.wait_for_all_ready();
                 self.current_block_index = file_start as isize;
                 self.current_page_index = 0;
                 self.previous_file_start_block_index =
@@ -1170,6 +1174,10 @@ impl OnboardFlash {
                 let space = &mut bytes[4..][0x820..=0x83f][14..=15];
                 LittleEndian::write_u16(space, previous_start as u16);
             }
+            info!(
+                "Written start {} previous start {}",
+                self.file_start_block_index, self.previous_file_start_block_index
+            );
             //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }
         // info!(
