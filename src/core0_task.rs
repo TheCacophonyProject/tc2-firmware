@@ -193,18 +193,12 @@ pub fn frame_acquisition_loop(
                                     && telemetry.ffc_status != FFCStatus::Imminent
                                     && telemetry.ffc_status != FFCStatus::InProgress
                                 {
-                                    info!("Requesting ffc");
                                     needs_ffc = true;
                                     ffc_requested = false;
                                     if high_power_mode {
                                         can_do_ffc = false;
                                     }
                                 }
-                                info!(
-                                    "Requesting ffc in {}",
-                                    FFC_INTERVAL_MS / 1000
-                                        - (telemetry.msec_on - telemetry.time_at_last_ffc) / 1000
-                                );
                                 // Sometimes the header is invalid, but the frame becomes valid and gets sync.
                                 // Because the telemetry revision is static across frame headers we can detect this
                                 // case and not send the frame, as it may cause false triggers.
@@ -481,7 +475,6 @@ pub fn frame_acquisition_loop(
                         } else if message == Core1Task::EndRecording.into() {
                             recording_ended = true;
                             can_do_ffc = true;
-                            info!("Can do ffc is {}", can_do_ffc);
                             if let Some(message) = sio_fifo.read() {
                                 if message == Core1Task::FrameProcessingComplete.into() {
                                     transferring_prev_frame = false;

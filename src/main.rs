@@ -69,7 +69,7 @@ const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
 // got funny results at 150 for aduio seems to work better at 125
 const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
 
-const FFC_INTERVAL_MS: u32 = 1000 * 40; // 20 mins between FFCs
+const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
