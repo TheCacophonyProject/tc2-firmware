@@ -102,7 +102,8 @@ pub fn frame_acquisition_loop(
     // Do FFC every 20 mins?
     let mut needs_ffc = false;
     let mut ffc_requested = false;
-
+    let mut can_do_ffc = true;
+    let mut high_power_mode = false;
     let mut seen_telemetry_revision = [0u8, 0u8];
     let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
@@ -137,6 +138,7 @@ pub fn frame_acquisition_loop(
             // Initiate the transfer of the previous frame
             sio_fifo.write(Core1Task::ReceiveFrame.into());
             sio_fifo.write(selected_frame_buffer);
+            sio_fifo.write(needs_ffc as u32);
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
             } else {
@@ -175,7 +177,8 @@ pub fn frame_acquisition_loop(
                     if got_sync && valid_frame_current_segment_num == 1 {
                         // Check if we need an FFC
                         if unverified_frame_counter == prev_frame_counter + 2 {
-                            if !is_recording
+                            if !needs_ffc
+                                && !is_recording
                                 && telemetry.msec_on != 0
                                 && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
                             {
@@ -190,9 +193,18 @@ pub fn frame_acquisition_loop(
                                     && telemetry.ffc_status != FFCStatus::Imminent
                                     && telemetry.ffc_status != FFCStatus::InProgress
                                 {
+                                    info!("Requesting ffc");
                                     needs_ffc = true;
                                     ffc_requested = false;
+                                    if high_power_mode {
+                                        can_do_ffc = false;
+                                    }
                                 }
+                                info!(
+                                    "Requesting ffc in {}",
+                                    FFC_INTERVAL_MS / 1000
+                                        - (telemetry.msec_on - telemetry.time_at_last_ffc) / 1000
+                                );
                                 // Sometimes the header is invalid, but the frame becomes valid and gets sync.
                                 // Because the telemetry revision is static across frame headers we can detect this
                                 // case and not send the frame, as it may cause false triggers.
@@ -339,7 +351,7 @@ pub fn frame_acquisition_loop(
                     prev_segment_was_4 = is_last_segment;
                     if packet_id == last_packet_id_for_segment {
                         if is_last_segment {
-                            if needs_ffc && !ffc_requested {
+                            if can_do_ffc && needs_ffc && !ffc_requested {
                                 ffc_requested = true;
                                 info!("Requesting needed FFC");
                                 let success = lepton.do_ffc();
@@ -468,6 +480,8 @@ pub fn frame_acquisition_loop(
                             }
                         } else if message == Core1Task::EndRecording.into() {
                             recording_ended = true;
+                            can_do_ffc = true;
+                            info!("Can do ffc is {}", can_do_ffc);
                             if let Some(message) = sio_fifo.read() {
                                 if message == Core1Task::FrameProcessingComplete.into() {
                                     transferring_prev_frame = false;
@@ -493,6 +507,9 @@ pub fn frame_acquisition_loop(
                                 // Wait until the watchdog timer kills us.
                                 nop();
                             }
+                        } else if message == Core1Task::HighPowerMode.into() {
+                            high_power_mode = true;
+                            info!("in high power mode");
                         }
                     }
                     // if !transferring_prev_frame || recording_started {

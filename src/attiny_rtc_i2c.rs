@@ -376,6 +376,14 @@ impl SharedI2C {
             Err(x) => Err(x),
         }
     }
+
+    pub fn tc2_agent_is_recording(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & 0x04) == 0x04),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
             Ok(state) => {
