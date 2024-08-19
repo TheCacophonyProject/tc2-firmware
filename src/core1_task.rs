@@ -401,7 +401,9 @@ pub fn core_1_task(
     let has_files_to_offload = flash_storage.has_files_to_offload();
     let should_offload = (has_files_to_offload
         && !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None))
-        || flash_storage.is_too_full_to_start_new_recordings();
+        || flash_storage.is_too_full_to_start_new_recordings()
+        || (has_files_to_offload && flash_storage.file_start_block_index.is_none());
+    //means old file system offload once
     let should_offload = if !should_offload {
         let previous_offload_time = event_logger
             .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
@@ -420,7 +422,6 @@ pub fn core_1_task(
     } else {
         should_offload
     };
-
     let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
@@ -438,7 +439,6 @@ pub fn core_1_task(
     } else {
         false
     };
-
     // Unset the is_recording flag on attiny on startup
     let _ = shared_i2c
         .set_recording_flag(&mut delay, false)
@@ -488,7 +488,7 @@ pub fn core_1_task(
     let mut logged_flash_storage_nearly_full = false;
     // NOTE: If there are already recordings on the flash memory,
     //  assume we've already made the startup status recording during this recording window.
-    let mut made_startup_status_recording = !has_files_to_offload || did_offload_files;
+    let mut made_startup_status_recording = has_files_to_offload || did_offload_files;
     let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
     let mut high_power_recording = false;
@@ -785,10 +785,31 @@ pub fn core_1_task(
                 // Finalise on a different frame period to writing out the prev/last frame,
                 // to give more breathing room.
                 if let Some(cptv_stream) = &mut cptv_stream {
-                    error!("Ending current recording");
                     let cptv_start_block_index = cptv_stream.starting_block_index as isize;
-                    cptv_stream.finalise(&mut flash_storage);
-                    let cptv_end_block_index = flash_storage.last_used_block_index.unwrap();
+
+                    if !making_status_recording
+                        && motion_detection.as_ref().unwrap().was_false_positive()
+                    // && cptv_stream.num_frames <= 100
+                    {
+                        info!(
+                            "Discarding as a false-positive {}:{} ",
+                            cptv_start_block_index, flash_storage.last_used_block_index
+                        );
+                        let _ = flash_storage.erase_last_file();
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::WouldDiscardAsFalsePositive,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
+                    } else {
+                        cptv_stream.finalise(&mut flash_storage);
+                        error!(
+                            "Ending current recording start block {} end block{}",
+                            cptv_start_block_index, flash_storage.last_used_block_index
+                        );
+                    }
 
                     ended_recording = true;
                     let _ = shared_i2c
@@ -802,24 +823,7 @@ pub fn core_1_task(
                         ),
                         &mut flash_storage,
                     );
-                    if !making_status_recording
-                        && motion_detection.as_ref().unwrap().was_false_positive()
-                    // && cptv_stream.num_frames <= 100
-                    {
-                        info!("Discarding as a false-positive");
-                        cptv_stream.discard(
-                            &mut flash_storage,
-                            cptv_start_block_index,
-                            cptv_end_block_index,
-                        );
-                        // event_logger.log_event(
-                        //     LoggerEvent::new(
-                        //         LoggerEventKind::WouldDiscardAsFalsePositive,
-                        //         synced_date_time.get_timestamp_micros(&timer),
-                        //     ),
-                        //     &mut flash_storage,
-                        // );
-                    }
+
                     if making_status_recording {
                         making_status_recording = false;
                     }
