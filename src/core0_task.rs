@@ -135,9 +135,12 @@ pub fn frame_acquisition_loop(
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
-            sio_fifo.write(Core1Task::ReceiveFrame.into());
+            if needs_ffc {
+                sio_fifo.write(Core1Task::ReceiveFrameWithPendingFFC.into());
+            } else {
+                sio_fifo.write(Core1Task::ReceiveFrame.into());
+            }
             sio_fifo.write(selected_frame_buffer);
-            sio_fifo.write(needs_ffc as u32);
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
             } else {
@@ -318,15 +321,13 @@ pub fn frame_acquisition_loop(
                             && packet_id != 0
                             && valid_frame_current_segment_num != 1
                         {
-                            // warn!(
-                            //     "Checksum fail on packet {}, segment {} buffer {}",
-                            //     packet_id, current_segment_num, selected_frame_buffer
-                            // );
+                            warn!(
+                                "Checksum fail on packet {}, segment {} buffer {}",
+                                packet_id, current_segment_num, selected_frame_buffer
+                            );
                         }
                     }
 
-                    let is_last_packet = packet_id == last_packet_id_for_segment;
-                    let is_last_segment = valid_frame_current_segment_num == 4;
                     // Copy the line out to the appropriate place in the current segment buffer.
                     critical_section::with(|cs| {
                         let segment_index =
@@ -347,16 +348,11 @@ pub fn frame_acquisition_loop(
                                 .unwrap()
                                 .packet(segment_index, packet_id as usize),
                         );
-                        if is_last_segment && is_last_packet {
-                            buffer
-                                .borrow_ref_mut(cs)
-                                .as_mut()
-                                .unwrap()
-                                .ffc_pending(needs_ffc);
-                        }
                     });
+
+                    let is_last_segment = valid_frame_current_segment_num == 4;
                     prev_segment_was_4 = is_last_segment;
-                    if is_last_packet {
+                    if packet_id == last_packet_id_for_segment {
                         if is_last_segment {
                             if can_do_ffc && needs_ffc && !ffc_requested {
                                 ffc_requested = true;

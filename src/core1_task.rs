@@ -50,6 +50,7 @@ pub enum Core1Task {
     ReadyToSleep = 0xef,
     RequestReset = 0xea,
     HighPowerMode = 0xeb,
+    ReceiveFrameWithPendingFFC = 0xac,
 }
 
 impl Into<u32> for Core1Task {
@@ -498,17 +499,22 @@ pub fn core_1_task(
     info!("Entering frame loop");
     loop {
         let input = sio.fifo.read_blocking();
-        crate::assert_eq!(
-            input,
-            Core1Task::ReceiveFrame.into(),
-            "Got unknown fifo input to core1 task loop {}",
-            input
-        );
+        let needs_ffc: bool;
+        if input == Core1Task::ReceiveFrameWithPendingFFC.into() {
+            needs_ffc = true;
+        } else {
+            crate::assert_eq!(
+                input,
+                Core1Task::ReceiveFrame.into(),
+                "Got unknown fifo input to core1 task loop {}",
+                input
+            );
+            needs_ffc = false;
+        }
 
         let start = timer.get_counter();
         // Get the currently selected buffer to transfer/write to disk.
         let selected_frame_buffer = sio.fifo.read_blocking();
-        let needs_ffc = sio.fifo.read_blocking() > 0;
         critical_section::with(|cs| {
             // Now we just swap the buffers?
             let buffer = if selected_frame_buffer == 0 {
@@ -537,12 +543,6 @@ pub fn core_1_task(
             .unwrap()
             .frame_data_as_u8_slice_mut()[637];
 
-        // crate::assert_eq!(
-        //     needs_ffc,
-        //     telemetry_ffc > 0,
-        //     "Needs ffc doesn't match telemtry {}",
-        //     needs_ffc
-        // );
         if needs_ffc && !device_config.use_low_power_mode() {
             if frame_telemetry.frame_num - last_rec_check > 9 * 20 {
                 if let Ok(is_recording) = shared_i2c.tc2_agent_is_recording(&mut delay) {
@@ -561,6 +561,10 @@ pub fn core_1_task(
                     } else {
                         sio.fifo.write(Core1Task::EndRecording.into());
                         high_power_recording = false;
+                        thread_local_frame_buffer
+                            .as_mut()
+                            .unwrap()
+                            .ffc_pending(true);
                     }
                 }
             }
