@@ -75,7 +75,6 @@ pub fn frame_acquisition_loop(
     let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
     let do_crc_check = true;
     let mut crc_buffer = [0u8; 164];
-
     let mut prev_segment_was_4 = false;
     let mut scanline_buffer = [0u16; 82];
 
@@ -199,6 +198,12 @@ pub fn frame_acquisition_loop(
                                         can_do_ffc = false;
                                     }
                                 }
+                                info!(
+                                    "Doing ffc in {}",
+                                    (FFC_INTERVAL_MS - telemetry.msec_on
+                                        + telemetry.time_at_last_ffc)
+                                        / 1000
+                                );
                                 // Sometimes the header is invalid, but the frame becomes valid and gets sync.
                                 // Because the telemetry revision is static across frame headers we can detect this
                                 // case and not send the frame, as it may cause false triggers.
@@ -313,24 +318,27 @@ pub fn frame_acquisition_loop(
                             && packet_id != 0
                             && valid_frame_current_segment_num != 1
                         {
-                            warn!(
-                                "Checksum fail on packet {}, segment {}",
-                                packet_id, current_segment_num
-                            );
+                            // warn!(
+                            //     "Checksum fail on packet {}, segment {} buffer {}",
+                            //     packet_id, current_segment_num, selected_frame_buffer
+                            // );
                         }
                     }
 
+                    let is_last_packet = packet_id == last_packet_id_for_segment;
+                    let is_last_segment = valid_frame_current_segment_num == 4;
                     // Copy the line out to the appropriate place in the current segment buffer.
                     critical_section::with(|cs| {
                         let segment_index =
                             ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
-                        //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
+                        //  set correctly when we reach qpacket 20, assuming we do manage to write out a full segment.
                         let buffer = if selected_frame_buffer == 0 {
                             frame_buffer_local
                         } else {
                             frame_buffer_local_2
                         };
+
                         LittleEndian::write_u16_into(
                             &scanline_buffer[2..],
                             buffer
@@ -339,11 +347,16 @@ pub fn frame_acquisition_loop(
                                 .unwrap()
                                 .packet(segment_index, packet_id as usize),
                         );
+                        if is_last_segment && is_last_packet {
+                            buffer
+                                .borrow_ref_mut(cs)
+                                .as_mut()
+                                .unwrap()
+                                .ffc_pending(needs_ffc);
+                        }
                     });
-
-                    let is_last_segment = valid_frame_current_segment_num == 4;
                     prev_segment_was_4 = is_last_segment;
-                    if packet_id == last_packet_id_for_segment {
+                    if is_last_packet {
                         if is_last_segment {
                             if can_do_ffc && needs_ffc && !ffc_requested {
                                 ffc_requested = true;

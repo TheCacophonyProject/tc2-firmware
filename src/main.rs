@@ -69,7 +69,7 @@ const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
 // got funny results at 150 for aduio seems to work better at 125
 const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
 
-const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
+const FFC_INTERVAL_MS: u32 = 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
@@ -89,6 +89,11 @@ impl FrameBuffer {
 
     pub fn as_u8_slice_mut(&mut self) -> &mut [u8] {
         &mut self.0
+    }
+
+    pub fn ffc_pending(&mut self, is_pending: bool) {
+        self.0[TRANSFER_HEADER_LENGTH + 637] = if is_pending { 1 } else { 0 };
+        self.0[TRANSFER_HEADER_LENGTH + 636] = if is_pending { 1 } else { 0 };
     }
 
     pub fn frame_data_as_u8_slice_mut(&mut self) -> &mut [u8] {

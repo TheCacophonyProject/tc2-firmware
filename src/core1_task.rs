@@ -532,6 +532,17 @@ pub fn core_1_task(
                 is_frame_telemetry_is_valid(&frame_telemetry, &mut stable_telemetry_tracker);
             (frame_telemetry, frame_header_is_valid)
         };
+        let telemetry_ffc = thread_local_frame_buffer
+            .as_mut()
+            .unwrap()
+            .frame_data_as_u8_slice_mut()[637];
+
+        // crate::assert_eq!(
+        //     needs_ffc,
+        //     telemetry_ffc > 0,
+        //     "Needs ffc doesn't match telemtry {}",
+        //     needs_ffc
+        // );
         if needs_ffc && !device_config.use_low_power_mode() {
             if frame_telemetry.frame_num - last_rec_check > 9 * 20 {
                 if let Ok(is_recording) = shared_i2c.tc2_agent_is_recording(&mut delay) {
@@ -543,6 +554,10 @@ pub fn core_1_task(
                     if is_recording {
                         sio.fifo.write(Core1Task::StartRecording.into());
                         high_power_recording = true;
+                        thread_local_frame_buffer
+                            .as_mut()
+                            .unwrap()
+                            .ffc_pending(false);
                     } else {
                         sio.fifo.write(Core1Task::EndRecording.into());
                         high_power_recording = false;
