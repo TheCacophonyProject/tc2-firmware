@@ -1,4 +1,4 @@
-use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C, tc2_agent_state};
+use crate::attiny_rtc_i2c::{tc2_agent_state, I2CConfig, SharedI2C};
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
@@ -200,22 +200,17 @@ pub fn audio_task(
         let flash_alarm = get_audio_alarm(&mut flash_storage);
         let mut scheduled = false;
         if let Some(flash_alarm) = flash_alarm {
-            let alarm_day = flash_alarm[0];
-            let alarm_hours = flash_alarm[1];
-            let alarm_minutes = flash_alarm[2];
+            // let alarm_day = flash_alarm[0];
+            // let alarm_hours = flash_alarm[1];
+            // let alarm_minutes = flash_alarm[2];
             let alarm_mode = flash_alarm[3];
-            scheduled = alarm_day != u8::MAX && alarm_hours != u8::MAX && alarm_minutes != u8::MAX;
+            scheduled = flash_alarm.iter().all(|x: &u8| *x != u8::MAX);
 
-            info!(
-                "Alarm day {} hours {} minutes {} in mode {}",
-                alarm_day, alarm_hours, alarm_minutes, alarm_mode
-            );
+            info!("Alarm {}", flash_alarm);
             if scheduled {
                 match get_alarm_dt(
                     synced_date_time.get_adjusted_dt(timer),
-                    alarm_day,
-                    alarm_hours,
-                    alarm_minutes,
+                    flash_alarm[0..3].into(),
                 ) {
                     Ok(alarm) => {
                         if device_config_was_updated {
@@ -234,10 +229,7 @@ pub fn audio_task(
                         }
                     }
                     Err(_) => {
-                        error!(
-                            "Could not get alarm dt for {} {} {}",
-                            alarm_day, alarm_hours, alarm_minutes
-                        );
+                        error!("Could not get alarm dt");
                     }
                 }
             }
@@ -671,23 +663,18 @@ pub fn offload(
     }
     Ok(())
 }
-pub fn get_alarm_dt(
-    datetime: NaiveDateTime,
-    alarm_day: u8,
-    alarm_hours: u8,
-    alarm_minutes: u8,
-) -> Result<NaiveDateTime, ()> {
+pub fn get_alarm_dt(datetime: NaiveDateTime, alarm: [u8; 3]) -> Result<NaiveDateTime, ()> {
     let naive_date = chrono::NaiveDate::from_ymd_opt(
         datetime.year() as i32,
         datetime.month() as u32,
-        alarm_day as u32,
+        alarm[0] as u32,
     );
     if naive_date.is_none() {
         return Err(());
     }
     let naive_date = naive_date.unwrap();
 
-    let naive_time = chrono::NaiveTime::from_hms_opt(alarm_hours as u32, alarm_minutes as u32, 0);
+    let naive_time = chrono::NaiveTime::from_hms_opt(alarm[1] as u32, alarm[2] as u32, 0);
     if naive_time.is_none() {
         return Err(());
     }

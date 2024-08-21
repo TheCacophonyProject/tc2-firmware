@@ -25,6 +25,7 @@ use crate::FrameBuffer;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
 
 use core::cell::RefCell;
+use core::char::MAX;
 use core::ops::Add;
 use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
@@ -407,7 +408,7 @@ pub fn core_1_task(
             ),
             &mut flash_storage,
         );
-        //changing from no audio to audio mode and then click test rec quickly
+        //changing from no audio to audio mode and then clicking test rec quickly
         let test_rec = shared_i2c
             .tc2_agent_requested_test_audio_rec(&mut delay)
             .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
@@ -434,30 +435,10 @@ pub fn core_1_task(
     }
 
     let record_audio: bool;
+    let mut last_rec_check = 0;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
-    // let alarm_time = get_audio_alarm(&mut flash_storage);
-    // info!("Reading audio alarm time is {}", alarm_time);
-    // write_audio_alarm(&mut flash_storage, 26, 16, 5, 1);
-    // let alarm_time = get_audio_alarm(&mut flash_storage).unwrap();
-    // info!("(2)Reading audio alarm time is {}", alarm_time);
-    // let alarm_dt = get_alarm_dt(
-    //     synced_date_time.date_time_utc,
-    //     alarm_time[0],
-    //     alarm_time[1],
-    //     alarm_time[2],
-    // )
-    // .ok()
-    // .unwrap();
-    // info!(
-    //     "Alarm already scheduled for {} {}:{}",
-    //     alarm_dt.day(),
-    //     alarm_dt.hour(),
-    //     alarm_dt.minute()
-    // );
-    // loop {
-    //     nop();
-    // }
+
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal => {
             let alarm_time = get_audio_alarm(&mut flash_storage);
@@ -465,19 +446,13 @@ pub fn core_1_task(
             let mut schedule_alarm = true;
 
             if let Some(alarm_time) = alarm_time {
-                let scheduled: bool = alarm_time[0] != u8::MAX
-                    && alarm_time[1] != u8::MAX
-                    && alarm_time[2] != u8::MAX;
+                let scheduled: bool = alarm_time.iter().all(|x: &u8| *x != u8::MAX);
+
                 if alarm_time[3] == 1 {
                     //means the alarm was to be in thermal mode so need to schedule audio rec
                     schedule_alarm = true;
                 } else if scheduled {
-                    match get_alarm_dt(
-                        synced_date_time.date_time_utc,
-                        alarm_time[0],
-                        alarm_time[1],
-                        alarm_time[2],
-                    ) {
+                    match get_alarm_dt(synced_date_time.date_time_utc, alarm_time[0..3].into()) {
                         Ok(alarm_dt) => {
                             let synced = synced_date_time.date_time_utc;
                             let until_alarm = (alarm_dt - synced).num_minutes();
@@ -783,7 +758,6 @@ pub fn core_1_task(
                 &device_config.motion_detection_mask,
             );
             let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
-            let max_length_in_frames = 60 * 9;
             let status_recording_length_in_frames = 18;
             let motion_detection_triggered_this_frame =
                 this_frame_motion_detection.got_new_trigger();
@@ -1137,19 +1111,7 @@ pub fn core_1_task(
                         logged_told_rpi_to_sleep = true;
                     }
                 }
-                //can relly on audiopending check to restart
-                // match device_config.config().audio_mode {
-                //     AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                //         //just reboot and it will go into audio branch
-                //         info!("Reset as thermal finished and time for audio");
-                //         sio.fifo.write(Core1Task::RequestReset.into());
 
-                //         loop {
-                //             nop();
-                //         }
-                //     }
-                //     _ => (),
-                // }
                 let check_power_down_state_start = timer.get_counter();
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
@@ -1165,6 +1127,7 @@ pub fn core_1_task(
                             logged_pi_powered_down = true;
                         }
 
+                        //do this when powered down so preview stays up
                         match device_config.config().audio_mode {
                             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                                 //just reboot and it will go into audio branch
@@ -1355,9 +1318,12 @@ pub fn core_1_task(
                 synced_date_time.timer_offset.ticks(),
                 next_audio_alarm.unwrap().hour(),
                 next_audio_alarm.unwrap().minute()
-            )
+                )
             }
-            if audio_pending {
+            if cptv_stream.is_none()
+                && audio_pending
+                && (frame_telemetry.frame_num - last_rec_check) > 9 * 20
+            {
                 //hanldes case where thermal recorder is doing recording
                 if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
                     if !is_recording {
@@ -1371,6 +1337,7 @@ pub fn core_1_task(
                         }
                     }
                 }
+                last_rec_check = frame_telemetry.frame_num;
             }
         }
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
