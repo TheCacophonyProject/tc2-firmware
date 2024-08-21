@@ -1,9 +1,9 @@
-use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C, Tc2AgentState};
+use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C, tc2_agent_state};
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::core1_sub_tasks::{
-    get_existing_device_config_or_config_from_pi_on_initial_handshake, offload_file,
+    get_existing_device_config_or_config_from_pi_on_initial_handshake,
     offload_flash_storage_and_events,
 };
 use crate::core1_task::Core1Pins;
@@ -448,13 +448,13 @@ pub fn audio_task(
                     watchdog.feed();
                     let _ = shared_i2c.tc2_agent_clear_and_set_flag(
                         &mut delay,
-                        Tc2AgentState::TEST_AUDIO_RECORDING,
-                        Tc2AgentState::THERMAL_MODE,
+                        tc2_agent_state::TEST_AUDIO_RECORDING,
+                        tc2_agent_state::THERMAL_MODE,
                     );
 
                     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
-                    offload_file(
+                    offload_flash_storage_and_events(
                         &mut flash_storage,
                         &mut pi_spi,
                         &mut peripherals.RESETS,
@@ -466,7 +466,7 @@ pub fn audio_task(
                         &mut event_logger,
                         &synced_date_time,
                         Some(watchdog),
-                        file_position,
+                        true,
                     );
 
                     restart(watchdog);
@@ -479,8 +479,8 @@ pub fn audio_task(
                         //if audio requested from thermal, the alarm will be re scheduled there
                         let _ = shared_i2c.tc2_agent_clear_and_set_flag(
                             &mut delay,
-                            Tc2AgentState::TAKE_AUDIO,
-                            Tc2AgentState::THERMAL_MODE,
+                            tc2_agent_state::TAKE_AUDIO,
+                            tc2_agent_state::THERMAL_MODE,
                         );
                         info!("Audio taken in thermal window clearing flag");
                         restart(watchdog);
@@ -662,6 +662,7 @@ pub fn offload(
                 event_logger,
                 &synced_date_time,
                 Some(watchdog),
+                false,
             ) && flash_storage.has_files_to_offload()
             {
                 return Err(());

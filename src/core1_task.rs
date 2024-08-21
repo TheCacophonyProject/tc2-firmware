@@ -618,6 +618,7 @@ pub fn core_1_task(
             &mut event_logger,
             &synced_date_time,
             None,
+            false,
         )
     } else {
         false

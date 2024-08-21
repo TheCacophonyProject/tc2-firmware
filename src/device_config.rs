@@ -1,7 +1,7 @@
+use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::rp2040_flash::read_device_config_from_rp2040_flash;
 use crate::sun_times::sun_times;
-use crate::{byte_slice_cursor::Cursor, motion_detector};
 use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
 use embedded_io::Read;

@@ -1,7 +1,7 @@
 // TODO: Essentially we want to log an error code and a timestamp for each error/event to flash storage.
 //  There would be a maximum number of errors we can store before we run out of memory.  Timestamp can
 //  be in 32bit seconds past a given epoch (let's say Jan 1 2023).  Is a 1 second granularity enough?
-use crate::{onboard_flash::OnboardFlash, rp2040_flash::FLASH_END};
+use crate::onboard_flash::OnboardFlash;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::NaiveDateTime;
 use core::ops::Range;
@@ -107,7 +107,6 @@ impl TryFrom<u16> for LoggerEventKind {
             20 => Ok(Rp2040MissedAudioAlarm(0)),
             21 => Ok(AudioRecordingFailed),
             22 => Ok(ErasePartialOrCorruptRecording),
-
             23 => Ok(StartedAudioRecording),
             24 => Ok(ThermalMode),
             25 => Ok(AudioMode),

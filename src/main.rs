@@ -25,11 +25,11 @@ mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, Core1Pins, Core1Task, SyncedDateTime};
+use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
-use attiny_rtc_i2c::Tc2AgentState;
+use attiny_rtc_i2c::tc2_agent_state;
 use bsp::{
     entry,
     hal::{
@@ -40,7 +40,7 @@ use bsp::{
     },
     pac::Peripherals,
 };
-use chrono::{NaiveDateTime, Timelike};
+use chrono::NaiveDateTime;
 use cortex_m::asm::nop;
 use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use rp2040_hal::rosc::RingOscillator;
@@ -189,7 +189,7 @@ fn main() -> ! {
         }
     }
 
-    let mut date_time: NaiveDateTime;
+    let date_time: NaiveDateTime;
     match shared_i2c.get_datetime(&mut delay) {
         Ok(now) => {
             info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
@@ -203,7 +203,7 @@ fn main() -> ! {
         match config.audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                 if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
-                    if (state & (Tc2AgentState::THERMAL_MODE)) > 0 {
+                    if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
                         let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
                         info!("Audio request thermal mode");
                         //audio mode wants to go in thermal mode
@@ -213,16 +213,12 @@ fn main() -> ! {
                             config.next_or_current_recording_window(&date_time);
 
                         let in_window = config.time_is_in_recording_window(&date_time, &None);
-                        info!("Is in window {}", in_window);
-                        is_audio = !in_window;
                         if in_window {
-                            info!("Checking if agent requested rec");
                             is_audio = (state
-                                & (Tc2AgentState::TAKE_AUDIO
-                                    | Tc2AgentState::TEST_AUDIO_RECORDING))
+                                & (tc2_agent_state::TAKE_AUDIO
+                                    | tc2_agent_state::TEST_AUDIO_RECORDING))
                                 > 0;
-                            info!("Audio request?? {}", state);
-                            if (is_audio) {
+                            if is_audio {
                                 info!("Is audio because thermal requested or test rec");
                             }
                         }

@@ -37,7 +37,6 @@ pub fn maybe_offload_events(
         let event_indices = event_logger.event_range();
         let total_events = event_indices.end;
         warn!("Transferring {} events", total_events);
-        let mut counter = timer.get_counter();
         'transfer_all_events: for event_index in event_indices {
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
@@ -59,7 +58,7 @@ pub fn maybe_offload_events(
                             timer,
                             resets,
                         );
-                        counter = timer.get_counter();
+                        let counter = timer.get_counter();
                         if !did_transfer {
                             attempts += 1;
                             if attempts > 100 {
@@ -128,6 +127,7 @@ pub fn offload_flash_storage_and_events(
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
     mut watchdog: Option<&mut bsp::hal::Watchdog>,
+    only_last_file: bool,
 ) -> bool {
     warn!("There are files to offload!");
     if watchdog.is_some() {
@@ -147,28 +147,29 @@ pub fn offload_flash_storage_and_events(
         watchdog.as_mut().unwrap().start(8388607.micros());
     }
 
-    maybe_offload_events(
-        pi_spi,
-        resets,
-        dma,
-        delay,
-        timer,
-        event_logger,
-        flash_storage,
-        clock_freq,
-        time,
-        if watchdog.is_some() {
-            Some(watchdog.as_mut().unwrap())
-        } else {
-            None
-        },
-    );
+    if !only_last_file {
+        maybe_offload_events(
+            pi_spi,
+            resets,
+            dma,
+            delay,
+            timer,
+            event_logger,
+            flash_storage,
+            clock_freq,
+            time,
+            if watchdog.is_some() {
+                Some(watchdog.as_mut().unwrap())
+            } else {
+                None
+            },
+        );
+    }
     let mut has_file = flash_storage.begin_offload_reverse();
 
     // do some offloading.
     let mut file_count = 0;
     let mut success: bool = true;
-    let mut counter = timer.get_counter();
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
 
@@ -217,7 +218,7 @@ pub fn offload_flash_storage_and_events(
                 }
                 let did_transfer =
                     pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-                counter = timer.get_counter();
+                let counter = timer.get_counter();
                 if !did_transfer {
                     attempts += 1;
                     if attempts > 100 {
@@ -260,6 +261,7 @@ pub fn offload_flash_storage_and_events(
                 }
                 let _ = flash_storage.erase_last_file();
                 file_ended = true;
+                break;
             }
             file_start = false;
         }
@@ -285,17 +287,10 @@ pub fn offload_flash_storage_and_events(
                 );
             }
         }
+        if only_last_file {
+            break;
+        }
         has_file = flash_storage.begin_offload_reverse();
-    }
-    if !file_end && part_count > 0 {
-        //possible corrupt file
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::CorruptFile,
-                time.get_timestamp_micros(&timer),
-            ),
-            flash_storage,
-        );
     }
 
     if success {

@@ -1,27 +1,13 @@
-use core::time;
-
-use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
-use crate::bsp::pac;
-use crate::bsp::pac::Peripherals;
 use crate::bsp::pac::RESETS;
-use crate::bsp::pac::{DMA, PIO1, SPI1};
-use crate::core1_sub_tasks::offload_flash_storage_and_events;
+use crate::bsp::pac::{PIO1, SPI1};
 use crate::core1_task::SyncedDateTime;
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
-use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-use crate::utils::{
-    u16_slice_to_u8, u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16, u8_slice_to_u16,
-};
+use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16};
 use crate::{bsp, onboard_flash};
-use byteorder::{ByteOrder, LittleEndian};
-use chrono::Timelike;
-use cortex_m::delay::Delay;
-use cortex_m::singleton;
 use defmt::{info, warn};
-use embedded_hal::blocking::delay::{DelayMs, DelayUs};
+use embedded_hal::blocking::delay::DelayMs;
 use fugit::HertzU32;
+use rp2040_hal::dma::Channel;
 use rp2040_hal::dma::{double_buffer, CH3, CH4};
-use rp2040_hal::dma::{single_buffer, Channel, Channels};
 use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMachine, PIO, SM1};
@@ -306,7 +292,7 @@ impl PdmMicrophone {
                 // When a transfer is done we immediately enqueue the buffers again.
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
                 cycle += 1;
-                if (cycle < WARMUP_CYCLES) {
+                if cycle < WARMUP_CYCLES {
                     // get the values initialized so the start of the recording is nice
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     filter.filter(payload, VOLUME, &mut [0u16; 0], false);
@@ -316,7 +302,7 @@ impl PdmMicrophone {
                         watchdog.feed();
                     }
                 } else {
-                    if (cycle == WARMUP_CYCLES) {
+                    if cycle == WARMUP_CYCLES {
                         start = timer.get_counter();
                     }
                     current_recording.samples_taken += rx_buf.len() * 32;
@@ -372,10 +358,7 @@ impl PdmMicrophone {
                             match flash_storage.append_file_bytes_async(
                                 payload, data_size, true, None, None, transfer, address,
                             ) {
-                                Ok((new_t, new_a)) => {
-                                    transfer = new_t;
-                                    address = new_a;
-                                }
+                                Ok(_) => (),
                                 Err(e) => {
                                     warn!("Error writing bytes to flash ending rec early {}", e);
                                     break;
@@ -410,7 +393,7 @@ const USER_BUFFER_LENGTH: usize = 1024;
 // expecting 2066 bytes
 // so for u16 data
 pub struct AudioBuffer {
-    data: [u16; (512 * 2 + 34)],
+    data: [u16; 512 * 2 + 34],
     index: usize,
 }
 const PAGE_COMMAND_ADDRESS: usize = 2;
