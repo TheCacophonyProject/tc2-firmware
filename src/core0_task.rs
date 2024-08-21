@@ -322,8 +322,8 @@ pub fn frame_acquisition_loop(
                             && valid_frame_current_segment_num != 1
                         {
                             warn!(
-                                "Checksum fail on packet {}, segment {} buffer {}",
-                                packet_id, current_segment_num, selected_frame_buffer
+                                "Checksum fail on packet {}, segment {}",
+                                packet_id, current_segment_num
                             );
                         }
                     }
@@ -333,7 +333,7 @@ pub fn frame_acquisition_loop(
                         let segment_index =
                             ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
-                        //  set correctly when we reach qpacket 20, assuming we do manage to write out a full segment.
+                        //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
                         let buffer = if selected_frame_buffer == 0 {
                             frame_buffer_local
                         } else {
@@ -511,7 +511,6 @@ pub fn frame_acquisition_loop(
                             }
                         } else if message == Core1Task::HighPowerMode.into() {
                             high_power_mode = true;
-                            info!("in high power mode");
                         }
                     }
                     // if !transferring_prev_frame || recording_started {

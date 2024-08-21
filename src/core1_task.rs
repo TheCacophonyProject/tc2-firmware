@@ -538,12 +538,10 @@ pub fn core_1_task(
                 is_frame_telemetry_is_valid(&frame_telemetry, &mut stable_telemetry_tracker);
             (frame_telemetry, frame_header_is_valid)
         };
-        let telemetry_ffc = thread_local_frame_buffer
-            .as_mut()
-            .unwrap()
-            .frame_data_as_u8_slice_mut()[637];
 
+        //if in high power mode need to check thermal-recorder hasn't made a recording
         if needs_ffc && !device_config.use_low_power_mode() {
+            //only check status every 20 seconds
             if frame_telemetry.frame_num - last_rec_check > 9 * 20 {
                 if let Ok(is_recording) = shared_i2c.tc2_agent_is_recording(&mut delay) {
                     high_power_recording = is_recording;
@@ -555,10 +553,6 @@ pub fn core_1_task(
                     if high_power_recording {
                         sio.fifo.write(Core1Task::StartRecording.into());
                         high_power_recording = true;
-                        thread_local_frame_buffer
-                            .as_mut()
-                            .unwrap()
-                            .ffc_imminent(false);
                     } else {
                         sio.fifo.write(Core1Task::EndRecording.into());
                         high_power_recording = false;
@@ -569,6 +563,7 @@ pub fn core_1_task(
                     }
                 }
             } else if !high_power_recording {
+                //depending on timing might get 2 frames with needs_ffc event after said ok
                 thread_local_frame_buffer
                     .as_mut()
                     .unwrap()
