@@ -112,7 +112,6 @@ fn main() -> ! {
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     let mut config = DeviceConfig::load_existing_inner_config_from_flash();
     let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
-
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -177,6 +176,12 @@ fn main() -> ! {
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
+
+    if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
+        info!("EEPROM audio device: {}", audio_only);
+        is_audio = is_audio || audio_only;
+    }
+
     if !is_audio {
         let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
         if disabled_alarm.is_err() {
@@ -386,13 +391,9 @@ pub fn thermal_code(
     info!("Camera serial #{}", lepton_serial);
     info!("Radiometry enabled? {}", radiometric_mode);
 
-    let mut fb0 = FrameBuffer::new(); //39060
-    let mut fb1 = FrameBuffer::new(); //39060
-
-    let mut core1_stack: Stack<44900> = Stack::new(); //180000
-                                                      //258.12 out of a total of 260.49536
-                                                      //leaves 2.37536KB
-
+    let mut fb0 = FrameBuffer::new();
+    let mut fb1 = FrameBuffer::new();
+    let mut core1_stack: Stack<44900> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));

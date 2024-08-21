@@ -386,8 +386,6 @@ pub struct CptvStream<'a> {
     crc_val: u32,
     total_uncompressed: u32,
     pub starting_block_index: u16,
-    pub end_page_index: isize,
-
     pub num_frames: u32,
 }
 
@@ -439,7 +437,6 @@ impl<'a> CptvStream<'a> {
             starting_block_index: starting_block_index as u16,
             cptv_header,
             num_frames: 0,
-            end_page_index: 0,
         }
     }
 
@@ -560,7 +557,7 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                flash_storage.append_file_bytes(
+                let _ = flash_storage.append_file_bytes(
                     to_flush,
                     num_bytes,
                     false,
@@ -575,7 +572,7 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                flash_storage.append_file_bytes(
+                let _ = flash_storage.append_file_bytes(
                     to_flush,
                     num_bytes,
                     false,
@@ -589,10 +586,7 @@ impl<'a> CptvStream<'a> {
         // and write out to storage.
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
-        if !at_header_location {
-            self.end_page_index = flash_storage.current_page_index;
-        }
-        flash_storage.append_file_bytes(
+        let _ = flash_storage.append_file_bytes(
             to_flush,
             num_bytes,
             !at_header_location,
@@ -626,16 +620,6 @@ impl<'a> CptvStream<'a> {
             }
         }
         self.write_gzip_trailer(flash_storage, true);
-    }
-
-    pub fn discard(
-        &mut self,
-        flash_storage: &mut OnboardFlash,
-        start_block_index: isize,
-        end_block_index: isize,
-    ) {
-        // NOTE: In the case that the block erase fails, that just means we won't reclaim the space at the moment.
-        let _ = flash_storage.erase_block_range(start_block_index, end_block_index);
     }
 }
 

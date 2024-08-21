@@ -803,7 +803,6 @@ fn should_offload_audio_recordings(
     if !has_files {
         return false;
     }
-
     // flash getting full
     if flash_storage.is_too_full_for_audio() {
         info!("Offloading as flash is nearly full");
@@ -813,6 +812,11 @@ fn should_offload_audio_recordings(
     // probably never happens if functioning correctly
     if event_logger.is_nearly_full() {
         info!("Offloading as logger is nearly full");
+        return true;
+    }
+    if flash_storage.file_start_block_index.is_none() {
+        //one off
+        info!("Offloading as previous file system version");
         return true;
     }
 
