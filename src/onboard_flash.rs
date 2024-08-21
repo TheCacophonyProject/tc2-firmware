@@ -777,12 +777,9 @@ impl OnboardFlash {
 
     pub fn begin_offload(&mut self) {
         if let Some(block_index) = self.first_used_block_index {
-            self.set_current_position(block_index, 0);
+            self.current_block_index = block_index;
+            self.current_page_index = page_index;
         }
-    }
-    pub fn set_current_position(&mut self, block_index: isize, page_index: isize) {
-        self.current_block_index = block_index;
-        self.current_page_index = page_index;
     }
 
     pub fn begin_offload_reverse(&mut self) -> bool {
