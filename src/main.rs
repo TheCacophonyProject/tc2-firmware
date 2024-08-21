@@ -91,8 +91,9 @@ impl FrameBuffer {
         &mut self.0
     }
 
-    pub fn ffc_pending(&mut self, is_pending: bool) {
-        self.0[TRANSFER_HEADER_LENGTH + 637] = if is_pending { 1 } else { 0 };
+    pub fn ffc_imminent(&mut self, is_imminent: bool) {
+        self.0[TRANSFER_HEADER_LENGTH + 636] = if is_imminent { 1 } else { 0 };
+        self.0[TRANSFER_HEADER_LENGTH + 637] = if is_imminent { 1 } else { 0 };
     }
 
     pub fn frame_data_as_u8_slice_mut(&mut self) -> &mut [u8] {

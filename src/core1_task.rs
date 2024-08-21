@@ -546,32 +546,39 @@ pub fn core_1_task(
         if needs_ffc && !device_config.use_low_power_mode() {
             if frame_telemetry.frame_num - last_rec_check > 9 * 20 {
                 if let Ok(is_recording) = shared_i2c.tc2_agent_is_recording(&mut delay) {
+                    high_power_recording = is_recording;
                     last_rec_check = frame_telemetry.frame_num;
                     info!(
                         "Checking if recording {} am recording ?? {}",
                         is_recording, high_power_recording
                     );
-                    if is_recording {
+                    if high_power_recording {
                         sio.fifo.write(Core1Task::StartRecording.into());
                         high_power_recording = true;
                         thread_local_frame_buffer
                             .as_mut()
                             .unwrap()
-                            .ffc_pending(false);
+                            .ffc_imminent(false);
                     } else {
                         sio.fifo.write(Core1Task::EndRecording.into());
                         high_power_recording = false;
                         thread_local_frame_buffer
                             .as_mut()
                             .unwrap()
-                            .ffc_pending(true);
+                            .ffc_imminent(true);
                     }
                 }
+            } else if !high_power_recording {
+                thread_local_frame_buffer
+                    .as_mut()
+                    .unwrap()
+                    .ffc_imminent(true);
             }
         } else if high_power_recording {
             high_power_recording = false;
             last_rec_check = 0;
         }
+
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame to pi if it is available.
         let transfer = if frame_header_is_valid {
