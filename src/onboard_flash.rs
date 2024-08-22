@@ -1210,10 +1210,6 @@ impl OnboardFlash {
                 let space = &mut bytes[4..][0x820..=0x83f][14..=15];
                 LittleEndian::write_u16(space, previous_start as u16);
             }
-            info!(
-                "Written start {} previous start {}",
-                self.file_start_block_index, self.previous_file_start_block_index
-            );
             //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }
         // info!(

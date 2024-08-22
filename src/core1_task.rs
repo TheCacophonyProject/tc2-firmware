@@ -452,7 +452,10 @@ pub fn core_1_task(
                     //means the alarm was to be in thermal mode so need to schedule audio rec
                     schedule_alarm = true;
                 } else if scheduled {
-                    match get_alarm_dt(synced_date_time.date_time_utc, alarm_time[0..3].into()) {
+                    match get_alarm_dt(
+                        synced_date_time.date_time_utc,
+                        alarm_time[0..3].try_into().unwrap(),
+                    ) {
                         Ok(alarm_dt) => {
                             let synced = synced_date_time.date_time_utc;
                             let until_alarm = (alarm_dt - synced).num_minutes();
@@ -1292,10 +1295,7 @@ pub fn core_1_task(
             delay.delay_us(expected_rtc_sync_time_us as u32);
         }
         let one_min_check_end = timer.get_counter();
-        if frame_header_is_valid {
-            prev_frame_telemetry = Some(frame_telemetry);
-        }
-        frames_seen += 1;
+
         // info!(
         //     "Loop took {}µs, 1min check {}µs, frame transfer {}µs",
         //     (timer.get_counter() - start).to_micros(),
@@ -1340,6 +1340,11 @@ pub fn core_1_task(
                 last_rec_check = frame_telemetry.frame_num;
             }
         }
+
+        if frame_header_is_valid {
+            prev_frame_telemetry = Some(frame_telemetry);
+        }
+        frames_seen += 1;
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
 }

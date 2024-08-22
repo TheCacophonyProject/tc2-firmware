@@ -210,7 +210,7 @@ pub fn audio_task(
             if scheduled {
                 match get_alarm_dt(
                     synced_date_time.get_adjusted_dt(timer),
-                    flash_alarm[0..3].into(),
+                    flash_alarm[0..3].try_into().unwrap(),
                 ) {
                     Ok(alarm) => {
                         if device_config_was_updated {
