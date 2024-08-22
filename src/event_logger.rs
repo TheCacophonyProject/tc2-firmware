@@ -7,6 +7,17 @@ use chrono::NaiveDateTime;
 use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
+#[repr(u8)]
+#[derive(Format, Copy, Clone)]
+
+pub enum WakeReason {
+    Unknown = 0,
+    ThermalOffload = 1,
+    ThermalOffloadAfter24Hours = 2,
+    ThermalHighPower = 3,
+    AudioThermalEnded = 4,
+    AudioShouldOffload = 5,
+}
 #[derive(Format, Copy, Clone)]
 pub enum LoggerEventKind {
     Rp2040Sleep,
@@ -18,7 +29,7 @@ pub enum LoggerEventKind {
     ToldRpiToSleep,
     GotRpiPoweredDown,
     GotRpiPoweredOn,
-    ToldRpiToWake(u64),
+    ToldRpiToWake(WakeReason),
     LostSync,
     SetAlarm(u64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
     GotPowerOnTimeout,
@@ -94,7 +105,7 @@ impl TryFrom<u16> for LoggerEventKind {
             7 => Ok(ToldRpiToSleep),
             8 => Ok(GotRpiPoweredDown),
             9 => Ok(GotRpiPoweredOn),
-            10 => Ok(ToldRpiToWake(0)),
+            10 => Ok(ToldRpiToWake(WakeReason::Unknown)),
             11 => Ok(LostSync),
             12 => Ok(SetAlarm(0)),
             13 => Ok(GotPowerOnTimeout),
@@ -310,7 +321,7 @@ impl EventLogger {
                 } else if let LoggerEventKind::Rp2040MissedAudioAlarm(alarm_time) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
                 } else if let LoggerEventKind::ToldRpiToWake(reason) = event.event {
-                    LittleEndian::write_u64(&mut event_data[10..18], reason);
+                    LittleEndian::write_u64(&mut event_data[10..18], reason as u64);
                 }
                 // Write to the end of the flash storage.
                 // We can do up to 4 partial page writes per page, so in a block of 64 pages we get 256 entries.

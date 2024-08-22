@@ -13,7 +13,7 @@ use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{
-    clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind,
+    clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
 };
 
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
@@ -25,7 +25,6 @@ use crate::FrameBuffer;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
 
 use core::cell::RefCell;
-use core::char::MAX;
 use core::ops::Add;
 use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
@@ -42,7 +41,7 @@ use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
 use crate::core0_audio::{
-    check_alarm_and_maybe_clear, get_alarm_dt, schedule_audio_rec, MAX_GAP_MIN,
+    check_alarm_still_valid, get_alarm_dt, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
 };
 #[repr(u32)]
 #[derive(Format)]
@@ -448,8 +447,8 @@ pub fn core_1_task(
             if let Some(alarm_time) = alarm_time {
                 let scheduled: bool = alarm_time.iter().all(|x: &u8| *x != u8::MAX);
 
-                if alarm_time[3] == 1 {
-                    //means the alarm was to be in thermal mode so need to schedule audio rec
+                if alarm_time[3] == AlarmMode::THERMAL as u8 {
+                    //means the alarm was for recording window start so schedule next audio rec
                     schedule_alarm = true;
                 } else if scheduled {
                     match get_alarm_dt(
@@ -466,12 +465,12 @@ pub fn core_1_task(
                                     alarm_dt.hour(),
                                     alarm_dt.minute()
                                 );
-                                if check_alarm_and_maybe_clear(&alarm_dt, &synced, &device_config) {
-                                    //if window time changed and alarm is after rec window start
-                                    info!("Rescehduling as alarm is after window start");
-                                } else {
+                                if check_alarm_still_valid(&alarm_dt, &synced, &device_config) {
                                     next_audio_alarm = Some(alarm_dt);
                                     schedule_alarm = false;
+                                } else {
+                                    //if window time changed and alarm is after rec window start
+                                    info!("Rescehduling as alarm is after window start");
                                 }
                             } else {
                                 info!("Alarm is missed");
@@ -505,14 +504,15 @@ pub fn core_1_task(
     }
 
     if !device_config.use_low_power_mode() {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::ToldRpiToWake(3),
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-        wake_raspberry_pi(&mut shared_i2c, &mut delay);
+        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+        }
         maybe_offload_events(
             &mut pi_spi,
             &mut peripherals.RESETS,
@@ -541,7 +541,7 @@ pub fn core_1_task(
     if should_offload {
         event_logger.log_event(
             LoggerEvent::new(
-                LoggerEventKind::ToldRpiToWake(1),
+                LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffload),
                 synced_date_time.get_timestamp_micros(&timer),
             ),
             &mut flash_storage,
@@ -564,7 +564,7 @@ pub fn core_1_task(
         if has_files_to_offload && duration_since_prev_offload > Duration::hours(24) {
             event_logger.log_event(
                 LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToWake(2),
+                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffloadAfter24Hours),
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
                 &mut flash_storage,
@@ -850,7 +850,6 @@ pub fn core_1_task(
                     );
                     error!("Starting new recording, {:?}", &frame_telemetry);
                     // TODO: Pass in various cptv header info bits.
-                    let start_block = flash_storage.current_block_index;
                     let mut cptv_streamer = CptvStream::new(
                         synced_date_time.get_timestamp_micros(&timer), // Microseconds
                         lepton_version,
@@ -1246,14 +1245,15 @@ pub fn core_1_task(
                     (timer.get_counter() - check_power_down_state_start).to_micros()
                 );
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::ToldRpiToWake(4),
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    &mut flash_storage,
-                );
-                wake_raspberry_pi(&mut shared_i2c, &mut delay);
+                if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
+                }
             }
 
             // Make sure timing is as close as possible to the non-sync case

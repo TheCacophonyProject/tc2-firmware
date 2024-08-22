@@ -361,6 +361,7 @@ impl SharedI2C {
         };
         return res;
     }
+
     pub fn set_recording_flag(
         &mut self,
         delay: &mut Delay,

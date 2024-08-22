@@ -11,7 +11,7 @@ use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, 
 use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, write_audio_alarm, EventLogger, LoggerEvent,
-    LoggerEventKind,
+    LoggerEventKind, WakeReason,
 };
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
@@ -39,6 +39,11 @@ use crate::onboard_flash::extend_lifetime_generic_mut;
 //     clear_flash_alarm, read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
 // };
 
+#[repr(u8)]
+pub enum AlarmMode {
+    AUDIO = 0,
+    THERMAL = 1,
+}
 const DEV_MODE: bool = false;
 pub const MAX_GAP_MIN: u8 = 60;
 pub fn audio_task(
@@ -136,6 +141,17 @@ pub fn audio_task(
             panic!("Unable to get DateTime from RTC {}", e)
         }
     }
+
+    if alarm_triggered {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::Rp2040WokenByAlarm,
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
+
     let mut take_test_rec = false;
     if let Ok(test_rec) = shared_i2c.tc2_agent_requested_test_audio_rec(&mut delay) {
         take_test_rec = test_rec;
@@ -200,13 +216,10 @@ pub fn audio_task(
         let flash_alarm = get_audio_alarm(&mut flash_storage);
         let mut scheduled = false;
         if let Some(flash_alarm) = flash_alarm {
-            // let alarm_day = flash_alarm[0];
-            // let alarm_hours = flash_alarm[1];
-            // let alarm_minutes = flash_alarm[2];
             let alarm_mode = flash_alarm[3];
             scheduled = flash_alarm.iter().all(|x: &u8| *x != u8::MAX);
 
-            info!("Alarm {}", flash_alarm);
+            info!("Audio alarm scheduled for {}", flash_alarm);
             if scheduled {
                 match get_alarm_dt(
                     synced_date_time.get_adjusted_dt(timer),
@@ -214,17 +227,17 @@ pub fn audio_task(
                 ) {
                     Ok(alarm) => {
                         if device_config_was_updated {
-                            if check_alarm_and_maybe_clear(
+                            if check_alarm_still_valid(
                                 &alarm,
                                 &synced_date_time.get_adjusted_dt(timer),
                                 &device_config,
                             ) {
+                                alarm_date_time = Some(alarm);
+                            } else {
                                 //if window time changed and alarm is after rec window start
                                 clear_audio_alarm(&mut flash_storage);
                                 scheduled = false;
                                 info!("Rescehduling as alarm is after window start");
-                            } else {
-                                alarm_date_time = Some(alarm);
                             }
                         }
                     }
@@ -275,7 +288,7 @@ pub fn audio_task(
                         should_wake = true;
                         event_logger.log_event(
                             LoggerEvent::new(
-                                LoggerEventKind::ToldRpiToWake(5),
+                                LoggerEventKind::ToldRpiToWake(WakeReason::AudioThermalEnded),
                                 synced_date_time.get_timestamp_micros(&timer),
                             ),
                             &mut flash_storage,
@@ -286,33 +299,24 @@ pub fn audio_task(
             _ => {}
         }
         if !should_wake {
-            let wake_up = should_offload_audio_recordings(
+            should_wake = should_offload_audio_recordings(
                 &mut flash_storage,
                 &mut event_logger,
                 &mut delay,
                 &mut shared_i2c,
                 synced_date_time.date_time_utc,
             );
-            if wake_up {
+            if should_wake {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::ToldRpiToWake(6),
+                        LoggerEventKind::ToldRpiToWake(WakeReason::AudioShouldOffload),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     &mut flash_storage,
                 );
             }
-            should_wake = wake_up;
         };
 
-        if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-            thermal_requested_audio = take_rec;
-            if thermal_requested_audio {
-                do_recording = true;
-            }
-        } else {
-            thermal_requested_audio = false;
-        }
         match offload(
             &mut shared_i2c,
             clock_freq,
@@ -331,11 +335,22 @@ pub fn audio_task(
                 restart(watchdog);
             }
         }
+
+        if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
+            thermal_requested_audio = take_rec;
+            if thermal_requested_audio {
+                do_recording = true;
+            }
+        } else {
+            thermal_requested_audio = false;
+        }
+
         info!(
-            "ALarm triggered {} scheduled {}",
-            alarm_triggered, scheduled
+            "Alarm triggered {} scheduled {} thermal requested {}",
+            alarm_triggered, scheduled, thermal_requested_audio
         );
-        if !alarm_triggered && scheduled {
+
+        if !do_recording && scheduled {
             // check we haven't missed the alarm somehow
             if let Some(alarm) = alarm_date_time {
                 let synced = synced_date_time.get_adjusted_dt(timer);
@@ -360,15 +375,6 @@ pub fn audio_task(
                     do_recording = true;
                 }
             }
-        }
-        if alarm_triggered {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::Rp2040WokenByAlarm,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                &mut flash_storage,
-            );
         }
     }
     if do_recording || take_test_rec {
@@ -591,7 +597,7 @@ pub fn audio_task(
             }
         }
         if boot_thermal && should_sleep {
-            //if we have done eveyrthing and PI is still on go into thermal for preview
+            //if we have done everything and PI is still on go into thermal for preview
             if let Ok(()) = shared_i2c.tc2_agent_request_thermal_mode(&mut delay) {
                 info!("Going into thermal mode");
                 restart(watchdog);
@@ -713,7 +719,7 @@ pub fn schedule_audio_rec(
     }
     let current_time = synced_date_time.get_adjusted_dt(timer);
     let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);
-    let mut alarm_mode = 0u8;
+    let mut alarm_mode = AlarmMode::AUDIO;
 
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
@@ -737,7 +743,7 @@ pub fn schedule_audio_rec(
                 } else {
                     info!("Setting wake up to be start of next rec window");
                     wakeup = start;
-                    alarm_mode = 1u8;
+                    alarm_mode = AlarmMode::THERMAL;
                 }
             }
         }
@@ -769,7 +775,7 @@ pub fn schedule_audio_rec(
                     wakeup.day() as u8,
                     wakeup.hour() as u8,
                     wakeup.minute() as u8,
-                    alarm_mode,
+                    alarm_mode as u8,
                 );
                 return Ok(wakeup);
             }
@@ -811,14 +817,15 @@ fn should_offload_audio_recordings(
     return false;
 }
 
-pub fn check_alarm_and_maybe_clear(
+pub fn check_alarm_still_valid(
     alarm: &NaiveDateTime,
     now: &NaiveDateTime,
     device_config: &DeviceConfig,
 ) -> bool {
     if device_config.config().audio_mode != AudioMode::AudioOnly {
         let (start, end) = device_config.next_or_current_recording_window(now);
-        return alarm > &start && &start > now;
+        //alarm before start or we are in rec window
+        return alarm <= &start || now >= &start;
     }
     false
 }

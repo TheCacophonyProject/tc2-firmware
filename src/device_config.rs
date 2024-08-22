@@ -15,15 +15,6 @@ pub enum AudioMode {
     AudioOrThermal = 2,
     AudioAndThermal = 3,
 }
-// impl PartialEq for AudioMode {
-//     fn eq(&self, other: &Self) -> bool {
-//         matches!(self, other)
-//     }
-// }
-
-// impl Format for AudioMode {
-//     fn format(&self, fmt: Formatter) {}
-// }
 
 impl TryFrom<u8> for AudioMode {
     type Error = ();
