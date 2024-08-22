@@ -407,7 +407,7 @@ pub fn audio_task(
                 &mut flash_storage,
             );
 
-            let (recorded, file_position, end_pos) = microphone.record_for_n_seconds(
+            let recorded = microphone.record_for_n_seconds(
                 duration,
                 dma_channels.ch3,
                 dma_channels.ch4,

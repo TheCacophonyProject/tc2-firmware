@@ -140,7 +140,6 @@ fn main() -> ! {
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
-    delay.delay_ms(1500);
     let sio = Sio::new(peripherals.SIO);
 
     let pins = rp2040_hal::gpio::Pins::new(

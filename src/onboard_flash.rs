@@ -382,40 +382,21 @@ impl OnboardFlash {
         if !self.has_files_to_offload() {
             return false;
         }
-        let mut page_index = 0;
-        //only need to check last used page in a block and first page
-        for block_index in (0..=self.last_used_block_index.unwrap()).rev() {
-            while page_index >= 0 {
-                //find first used page
-                self.read_page(block_index, page_index).unwrap();
-                self.read_page_from_cache(block_index);
-                page_index -= 1;
-                if !self.current_page.page_is_used() {
-                    continue;
-                }
+        let mut file_start = self.file_start_block_index;
+        while file_start.is_some() {
+            //read 1 as if incomplete 0 won't be writen too
+            self.read_page(file_start.unwrap() as isize, 1).unwrap();
+            self.read_page_metadata(file_start.unwrap() as isize);
+            self.wait_for_all_ready();
 
-                let is_last = self.current_page.is_last_page_for_file();
-                if is_last {
-                    self.read_page(block_index + 1, 0).unwrap();
-                    self.read_page_from_cache(block_index + 1);
-                    let is_cptv = Some(self.current_page.user_data()[0] != 1);
-                    // info!("Is cptv calculated from {}:{}", block_index + 1, 0);
+            let is_cptv = Some(self.current_page.user_data()[0] != 1);
 
-                    // info!("Is last at {}:{}", block_index, page_index + 1);
-                    if only_last || is_cptv.unwrap() {
-                        return is_cptv.unwrap();
-                    }
-                    break;
-                }
-                break;
+            if only_last || is_cptv.unwrap() {
+                return is_cptv.unwrap();
             }
-            page_index = 63;
+            file_start = self.current_page.previous_file_start_block_index();
         }
-
-        //only one file exists
-        self.read_page(0, 0).unwrap();
-        self.read_page_from_cache(0);
-        return self.current_page.user_data()[0] != 1;
+        return false;
     }
 
     pub fn scan(&mut self) {
