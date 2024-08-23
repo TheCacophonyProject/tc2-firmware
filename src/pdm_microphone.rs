@@ -269,6 +269,7 @@ impl PdmMicrophone {
             let mut cycle = 0;
             let mut audio_buffer = AudioBuffer::new();
             audio_buffer.init(timestamp, adjusted_sr as u16);
+            flash_storage.start_file(0);
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
