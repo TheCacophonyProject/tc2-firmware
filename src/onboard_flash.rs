@@ -386,7 +386,7 @@ impl OnboardFlash {
         while file_start.is_some() {
             //read 1 as if incomplete 0 won't be writen too
             self.read_page(file_start.unwrap() as isize, 0).unwrap();
-            self.read_page_metadata(file_start.unwrap() as isize);
+            self.read_page_from_cache(file_start.unwrap() as isize);
             self.wait_for_all_ready();
             if !self.current_page.page_is_used() {
                 //possibly unfinished cptv file try previous
@@ -399,11 +399,6 @@ impl OnboardFlash {
 
             let is_cptv = Some(self.current_page.user_data()[0] != 1);
             if only_last || is_cptv.unwrap() {
-                info!(
-                    "File at {} is cptv user data {}",
-                    file_start,
-                    self.current_page.user_data()[..10]
-                );
                 return is_cptv.unwrap();
             }
 
