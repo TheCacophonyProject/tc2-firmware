@@ -201,12 +201,7 @@ pub fn frame_acquisition_loop(
                                         can_do_ffc = false;
                                     }
                                 }
-                                info!(
-                                    "Doing ffc in {}",
-                                    (FFC_INTERVAL_MS - telemetry.msec_on
-                                        + telemetry.time_at_last_ffc)
-                                        / 1000
-                                );
+
                                 // Sometimes the header is invalid, but the frame becomes valid and gets sync.
                                 // Because the telemetry revision is static across frame headers we can detect this
                                 // case and not send the frame, as it may cause false triggers.
