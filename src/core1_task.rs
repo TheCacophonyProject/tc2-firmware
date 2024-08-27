@@ -236,7 +236,7 @@ pub fn core_1_task(
     woken_by_alarm: bool,
     mut timer: Timer,
 ) {
-    let dev_mode = false;
+    let dev_mode = true;
     info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
@@ -576,7 +576,7 @@ pub fn core_1_task(
     } else {
         should_offload
     };
-
+    let should_offload = true;
     let is_cptv = flash_storage.has_cptv_files(false);
     info!(
         "Has cptv files? {} has files? {}",
@@ -862,18 +862,17 @@ pub fn core_1_task(
                         making_status_recording,
                     );
                     cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-
-                    prev_frame_2.copy_from_slice(&prev_frame);
+                    // prev_frame_2.copy_from_slice(&prev_frame);
                     // Prev frame needs to be zeroed out at the start.
-                    prev_frame.fill(0);
+                    // prev_frame.fill(0);
                     // NOTE: Write the initial frame before the trigger.
                     cptv_streamer.push_frame(
-                        &prev_frame_2,
-                        &mut prev_frame, // This should be zeroed out before starting a new clip.
+                        &prev_frame,
+                        &mut prev_frame_2, // This should be zeroed out before starting a new clip.
                         &prev_frame_telemetry.as_ref().unwrap(),
                         &mut flash_storage,
                     );
-                    prev_frame.copy_from_slice(&prev_frame_2);
+                    // prev_frame.copy_from_slice(&prev_frame_2);
                     frames_written += 1;
 
                     event_logger.log_event(
@@ -939,7 +938,7 @@ pub fn core_1_task(
                             "Ending current recording start block {} end block{}",
                             cptv_start_block_index, flash_storage.last_used_block_index
                         );
-
+                        prev_frame_2.fill(0);
                         event_logger.log_event(
                             LoggerEvent::new(
                                 LoggerEventKind::EndedRecording,
