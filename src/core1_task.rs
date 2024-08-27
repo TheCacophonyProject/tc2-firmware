@@ -40,9 +40,7 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{
-    check_alarm_still_valid, get_alarm_dt, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
-};
+use crate::core0_audio::{check_alarm_still_valid, schedule_audio_rec, AlarmMode, MAX_GAP_MIN};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -440,43 +438,39 @@ pub fn core_1_task(
 
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal => {
-            let alarm_time = get_audio_alarm(&mut flash_storage);
+            let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
             record_audio = true;
             let mut schedule_alarm = true;
 
-            if let Some(alarm_time) = alarm_time {
-                let scheduled: bool = alarm_time.iter().all(|x: &u8| *x != u8::MAX);
-
-                if alarm_time[3] == AlarmMode::THERMAL as u8 {
-                    //means the alarm was for recording window start so schedule next audio rec
-                    schedule_alarm = true;
-                } else if scheduled {
-                    match get_alarm_dt(
-                        synced_date_time.date_time_utc,
-                        alarm_time[0..3].try_into().unwrap(),
-                    ) {
-                        Ok(alarm_dt) => {
-                            let synced = synced_date_time.date_time_utc;
-                            let until_alarm = (alarm_dt - synced).num_minutes();
-                            if until_alarm <= MAX_GAP_MIN as i64 {
-                                info!(
-                                    "Alarm already scheduled for {} {}:{}",
-                                    alarm_dt.day(),
-                                    alarm_dt.hour(),
-                                    alarm_dt.minute()
-                                );
-                                if check_alarm_still_valid(&alarm_dt, &synced, &device_config) {
-                                    next_audio_alarm = Some(alarm_dt);
-                                    schedule_alarm = false;
-                                } else {
-                                    //if window time changed and alarm is after rec window start
-                                    info!("Rescehduling as alarm is after window start");
-                                }
-                            } else {
-                                info!("Alarm is missed");
-                            }
+            if let Some(audio_alarm) = audio_alarm {
+                if let Ok(audio_mode) = audio_mode {
+                    if audio_mode == AlarmMode::AUDIO {
+                        schedule_alarm = false;
+                    }
+                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
+                }
+                if !schedule_alarm {
+                    let synced = synced_date_time.date_time_utc;
+                    let until_alarm = (audio_alarm - synced).num_minutes();
+                    if until_alarm <= MAX_GAP_MIN as i64 {
+                        info!(
+                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                            audio_alarm.year(),
+                            audio_alarm.month(),
+                            audio_alarm.day(),
+                            audio_alarm.hour(),
+                            audio_alarm.minute()
+                        );
+                        if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
+                            next_audio_alarm = Some(audio_alarm);
+                            schedule_alarm = false;
+                        } else {
+                            schedule_alarm = true;
+                            //if window time changed and alarm is after rec window start
+                            info!("Rescehduling as alarm is after window start");
                         }
-                        _ => {}
+                    } else {
+                        info!("Alarm is missed");
                     }
                 }
             }
