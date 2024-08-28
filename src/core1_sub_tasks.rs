@@ -29,14 +29,14 @@ pub fn maybe_offload_events(
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
     clock_freq: u32,
+    time: &SyncedDateTime,
     mut watchdog: Option<&mut bsp::hal::Watchdog>,
-) {
+) -> bool {
+    let mut success = true;
     if event_logger.has_events_to_offload() {
         let event_indices = event_logger.event_range();
         let total_events = event_indices.end;
         warn!("Transferring {} events", total_events);
-        let mut success = true;
-        let mut counter = timer.get_counter();
         'transfer_all_events: for event_index in event_indices {
             if watchdog.is_some() {
                 watchdog.as_mut().unwrap().feed();
@@ -58,7 +58,7 @@ pub fn maybe_offload_events(
                             timer,
                             resets,
                         );
-                        counter = timer.get_counter();
+                        let counter = timer.get_counter();
                         if !did_transfer {
                             attempts += 1;
                             if attempts > 100 {
@@ -92,8 +92,24 @@ pub fn maybe_offload_events(
                 "Clear events took {}µs",
                 (timer.get_counter() - start).to_micros()
             );
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::OffloadedLogs,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
+        } else {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::LogOffloadFailed,
+                    time.get_timestamp_micros(&timer),
+                ),
+                flash_storage,
+            );
         }
     }
+    return success;
 }
 
 //feels like should be longer but seems to work
@@ -111,6 +127,7 @@ pub fn offload_flash_storage_and_events(
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
     mut watchdog: Option<&mut bsp::hal::Watchdog>,
+    only_last_file: bool,
 ) -> bool {
     warn!("There are files to offload!");
     if watchdog.is_some() {
@@ -130,27 +147,29 @@ pub fn offload_flash_storage_and_events(
         watchdog.as_mut().unwrap().start(8388607.micros());
     }
 
-    maybe_offload_events(
-        pi_spi,
-        resets,
-        dma,
-        delay,
-        timer,
-        event_logger,
-        flash_storage,
-        clock_freq,
-        if watchdog.is_some() {
-            Some(watchdog.as_mut().unwrap())
-        } else {
-            None
-        },
-    );
+    if !only_last_file {
+        maybe_offload_events(
+            pi_spi,
+            resets,
+            dma,
+            delay,
+            timer,
+            event_logger,
+            flash_storage,
+            clock_freq,
+            time,
+            if watchdog.is_some() {
+                Some(watchdog.as_mut().unwrap())
+            } else {
+                None
+            },
+        );
+    }
     let mut has_file = flash_storage.begin_offload_reverse();
 
     // do some offloading.
     let mut file_count = 0;
     let mut success: bool = true;
-    let mut counter = timer.get_counter();
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
 
@@ -199,7 +218,7 @@ pub fn offload_flash_storage_and_events(
                 }
                 let did_transfer =
                     pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-                counter = timer.get_counter();
+                let counter = timer.get_counter();
                 if !did_transfer {
                     attempts += 1;
                     if attempts > 100 {
@@ -242,6 +261,7 @@ pub fn offload_flash_storage_and_events(
                 }
                 let _ = flash_storage.erase_last_file();
                 file_ended = true;
+                break;
             }
             file_start = false;
         }
@@ -267,8 +287,12 @@ pub fn offload_flash_storage_and_events(
                 );
             }
         }
+        if only_last_file {
+            break;
+        }
         has_file = flash_storage.begin_offload_reverse();
     }
+
     if success {
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
@@ -278,6 +302,13 @@ pub fn offload_flash_storage_and_events(
         );
         file_count != 0
     } else {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::FileOffloadFailed,
+                time.get_timestamp_micros(&timer),
+            ),
+            flash_storage,
+        );
         flash_storage.scan();
         warn!("File transfer to pi failed");
         false
@@ -293,10 +324,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     clock_freq: HertzU32,
     radiometry_enabled: u32,
     camera_serial_number: u32,
+    audio_mode: bool,
     timer: &mut Timer,
     existing_config: Option<DeviceConfig>,
 ) -> (Option<DeviceConfig>, bool) {
-    let mut payload = [0u8; 12];
+    let mut payload = [0u8; 16];
     let mut config_was_updated = false;
     if let Some(free_spi) = flash_storage.free_spi() {
         pi_spi.enable(free_spi, resets);
@@ -304,6 +336,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
         LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
         LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
         LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
+        LittleEndian::write_u32(&mut payload[12..16], if audio_mode { 1 } else { 0 });
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
@@ -323,7 +356,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 if new_config.is_some() {
                     length_used = new_config.as_mut().unwrap().cursor_position;
                 }
-                let mut new_config_bytes = [0u8; 2400 + 104];
+                let mut new_config_bytes = [0u8; 2400 + 105];
                 new_config_bytes[0..length_used]
                     .copy_from_slice(&device_config[4..4 + length_used]);
                 if let Some(new_config) = &mut new_config {
