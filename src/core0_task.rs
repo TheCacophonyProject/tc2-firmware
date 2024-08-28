@@ -75,7 +75,6 @@ pub fn frame_acquisition_loop(
     let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
     let do_crc_check = true;
     let mut crc_buffer = [0u8; 164];
-
     let mut prev_segment_was_4 = false;
     let mut scanline_buffer = [0u16; 82];
 
@@ -102,7 +101,8 @@ pub fn frame_acquisition_loop(
     // Do FFC every 20 mins?
     let mut needs_ffc = false;
     let mut ffc_requested = false;
-
+    let mut can_do_ffc = true;
+    let mut high_power_mode = false;
     let mut seen_telemetry_revision = [0u8, 0u8];
     let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
@@ -135,7 +135,11 @@ pub fn frame_acquisition_loop(
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
-            sio_fifo.write(Core1Task::ReceiveFrame.into());
+            if needs_ffc {
+                sio_fifo.write(Core1Task::ReceiveFrameWithPendingFFC.into());
+            } else {
+                sio_fifo.write(Core1Task::ReceiveFrame.into());
+            }
             sio_fifo.write(selected_frame_buffer);
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
@@ -175,7 +179,8 @@ pub fn frame_acquisition_loop(
                     if got_sync && valid_frame_current_segment_num == 1 {
                         // Check if we need an FFC
                         if unverified_frame_counter == prev_frame_counter + 2 {
-                            if !is_recording
+                            if !needs_ffc
+                                && !is_recording
                                 && telemetry.msec_on != 0
                                 && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
                             {
@@ -192,7 +197,11 @@ pub fn frame_acquisition_loop(
                                 {
                                     needs_ffc = true;
                                     ffc_requested = false;
+                                    if high_power_mode {
+                                        can_do_ffc = false;
+                                    }
                                 }
+
                                 // Sometimes the header is invalid, but the frame becomes valid and gets sync.
                                 // Because the telemetry revision is static across frame headers we can detect this
                                 // case and not send the frame, as it may cause false triggers.
@@ -325,6 +334,7 @@ pub fn frame_acquisition_loop(
                         } else {
                             frame_buffer_local_2
                         };
+
                         LittleEndian::write_u16_into(
                             &scanline_buffer[2..],
                             buffer
@@ -339,7 +349,7 @@ pub fn frame_acquisition_loop(
                     prev_segment_was_4 = is_last_segment;
                     if packet_id == last_packet_id_for_segment {
                         if is_last_segment {
-                            if needs_ffc && !ffc_requested {
+                            if can_do_ffc && needs_ffc && !ffc_requested {
                                 ffc_requested = true;
                                 info!("Requesting needed FFC");
                                 let success = lepton.do_ffc();
@@ -468,6 +478,7 @@ pub fn frame_acquisition_loop(
                             }
                         } else if message == Core1Task::EndRecording.into() {
                             recording_ended = true;
+                            can_do_ffc = true;
                             if let Some(message) = sio_fifo.read() {
                                 if message == Core1Task::FrameProcessingComplete.into() {
                                     transferring_prev_frame = false;
@@ -493,6 +504,8 @@ pub fn frame_acquisition_loop(
                                 // Wait until the watchdog timer kills us.
                                 nop();
                             }
+                        } else if message == Core1Task::HighPowerMode.into() {
+                            high_power_mode = true;
                         }
                     }
                     // if !transferring_prev_frame || recording_started {
