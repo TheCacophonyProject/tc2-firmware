@@ -358,7 +358,6 @@ pub fn write_audio_alarm(
     alarm_dt: NaiveDateTime,
     mode: AlarmMode,
 ) {
-    // 4 blocks per page, 64 pages per block.
     let _ = flash_storage.erase_block(AUDIO_BLOCK);
     let page_offset = 0;
     let mut event_data = [0u8; 18];
