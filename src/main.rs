@@ -29,7 +29,7 @@ use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
-use crate::rp2040_flash::read_is_audio_from_rp2040_flash;
+use attiny_rtc_i2c::tc2_agent_state;
 use bsp::{
     entry,
     hal::{
@@ -40,7 +40,9 @@ use bsp::{
     },
     pac::Peripherals,
 };
+use chrono::NaiveDateTime;
 use cortex_m::asm::nop;
+use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use rp2040_hal::rosc::RingOscillator;
 
 use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
@@ -62,12 +64,12 @@ use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 13;
+pub const FIRMWARE_VERSION: u32 = 14;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version. // TODO Check against minor version also.
-const ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL: u32 = 150_000_000;
+                                                    // const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 
 // got funny results at 150 for aduio seems to work better at 125
-const ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO: u32 = 125_000_000;
+const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
@@ -111,22 +113,15 @@ impl FrameBuffer {
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
-
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let mut is_audio = read_is_audio_from_rp2040_flash();
-
-    let freq = if is_audio {
-        ROSC_TARGET_CLOCK_FREQ_HZ_AUDIO.Hz()
-    } else {
-        //for some reason audio comes out faster than expected when using this clock
-        ROSC_TARGET_CLOCK_FREQ_HZ_THERMAL.Hz()
-    };
+    let mut config = DeviceConfig::load_existing_inner_config_from_flash();
+    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
         peripherals.ROSC,
-        freq,
+        ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
     );
     let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
 
@@ -197,8 +192,47 @@ fn main() -> ! {
             error!("{}", disabled_alarm.unwrap());
         }
     }
-    let (i2c1, unlocked_pin) = shared_i2c.free();
 
+    let date_time: NaiveDateTime;
+    match shared_i2c.get_datetime(&mut delay) {
+        Ok(now) => {
+            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
+            date_time = get_naive_datetime(now)
+        }
+        Err(_) => crate::panic!("Unable to get DateTime from RTC"),
+    }
+
+    if is_audio {
+        let config = config.unwrap().0;
+        match config.audio_mode {
+            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
+                    if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
+                        let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
+                        info!("Audio request thermal mode");
+                        //audio mode wants to go in thermal mode
+                        is_audio = false;
+                    } else {
+                        let (start_time, end_time) =
+                            config.next_or_current_recording_window(&date_time);
+
+                        let in_window = config.time_is_in_recording_window(&date_time, &None);
+                        if in_window {
+                            is_audio = (state
+                                & (tc2_agent_state::TAKE_AUDIO
+                                    | tc2_agent_state::TEST_AUDIO_RECORDING))
+                                > 0;
+                            if is_audio {
+                                info!("Is audio because thermal requested or test rec");
+                            }
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+    let (i2c1, unlocked_pin) = shared_i2c.free();
     if is_audio {
         let gpio0 = pins.gpio0;
         let gpio1 = pins.gpio1;
@@ -258,6 +292,7 @@ fn main() -> ! {
             fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
+
         thermal_code(
             lepton_pins,
             pins,
@@ -373,6 +408,7 @@ pub fn thermal_code(
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
     watchdog.disable();
+
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
         let _ = core1.spawn(
@@ -393,7 +429,6 @@ pub fn thermal_code(
             },
         );
     }
-
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
     sio.fifo

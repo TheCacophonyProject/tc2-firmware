@@ -56,7 +56,7 @@ fn go_dormant_until_woken<T: PinId>(
 }
 
 pub fn frame_acquisition_loop(
-    mut rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,

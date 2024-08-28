@@ -11,15 +11,19 @@ use crate::core1_sub_tasks::{
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::device_config::{get_naive_datetime, DeviceConfig};
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
+use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use crate::event_logger::{
+    clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
+};
+
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
-use chrono::{Duration, NaiveDateTime};
+use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
+
 use core::cell::RefCell;
 use core::ops::Add;
 use cortex_m::asm::nop;
@@ -36,6 +40,7 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
+use crate::core0_audio::{check_alarm_still_valid, schedule_audio_rec, AlarmMode, MAX_GAP_MIN};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -178,7 +183,7 @@ fn is_frame_telemetry_is_valid(
 // NOTE: Important: If we start using dormant states again, the timer will be incorrect
 pub struct SyncedDateTime {
     pub date_time_utc: NaiveDateTime,
-    timer_offset: Instant,
+    pub timer_offset: Instant,
 }
 
 impl Default for SyncedDateTime {
@@ -260,17 +265,6 @@ pub fn core_1_task(
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
 
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
-            synced_date_time.set(get_naive_datetime(now), &timer);
-            break;
-        } else {
-            warn!("Failed getting date from RTC, retrying");
-            delay.delay_ms(10);
-        }
-    }
-
     let mut pi_spi = ExtSpiTransfers::new(
         pins.pi_mosi,
         pins.pi_cs,
@@ -314,6 +308,49 @@ pub fn core_1_task(
         info!("There are {} event(s) to offload", event_logger.count());
     }
 
+    loop {
+        // NOTE: Keep retrying until we get a datetime from RTC.
+        match shared_i2c.get_datetime(&mut delay) {
+            Ok(now) => {
+                synced_date_time.set(get_naive_datetime(now), &timer);
+                break;
+            }
+            Err(e) => {
+                //cant get time so use 0 and add a time when tc2-agent uploads
+                event_logger.log_event(
+                    LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
+                    &mut flash_storage,
+                );
+
+                warn!("Failed getting date from RTC, retrying");
+                delay.delay_ms(10);
+            }
+        }
+    }
+    event_logger.log_event(
+        LoggerEvent::new(
+            LoggerEventKind::ThermalMode,
+            synced_date_time.get_timestamp_micros(&timer),
+        ),
+        &mut flash_storage,
+    );
+    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+        if is_recording {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::RecordingNotFinished,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+        }
+    }
+    // Unset the is_recording flag on attiny on startup
+    let _ = shared_i2c
+        .set_recording_flag(&mut delay, false)
+        .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+    let startup_date_time_utc: NaiveDateTime = synced_date_time.date_time_utc.clone();
+
     // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
     //let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
@@ -350,9 +387,11 @@ pub fn core_1_task(
             clock_freq.Hz(),
             radiometry_enabled,
             lepton_serial.unwrap_or(0),
+            false,
             &mut timer,
             existing_config,
         );
+
     if woken_by_alarm {
         event_logger.log_event(
             LoggerEvent::new(
@@ -370,19 +409,108 @@ pub fn core_1_task(
             ),
             &mut flash_storage,
         );
+        //changing from no audio to audio mode and then clicking test rec quickly
+        let test_rec = shared_i2c
+            .tc2_agent_requested_test_audio_rec(&mut delay)
+            .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+        if let Ok(test_rec) = test_rec {
+            if test_rec {
+                sio.fifo.write_blocking(Core1Task::RequestReset.into());
+                loop {
+                    // Wait to be reset
+                    nop();
+                }
+            }
+        }
     }
 
     let device_config = device_config.unwrap_or(DeviceConfig::default());
-    if device_config.config().is_audio_device {
-        shared_i2c.disable_alarm(&mut delay);
+    if let AudioMode::AudioOnly = device_config.config().audio_mode {
+        let _ = shared_i2c.disable_alarm(&mut delay);
+        info!("Is audio device restarting");
         sio.fifo.write_blocking(Core1Task::RequestReset.into());
         loop {
             // Wait to be reset
             nop();
         }
     }
+
+    let record_audio: bool;
+    let mut last_rec_check = 0;
+    let mut audio_pending: bool = false;
+    let mut next_audio_alarm: Option<NaiveDateTime> = None;
+
+    match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal => {
+            let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
+            record_audio = true;
+            let mut schedule_alarm = true;
+
+            if let Some(audio_alarm) = audio_alarm {
+                if let Ok(audio_mode) = audio_mode {
+                    if audio_mode == AlarmMode::AUDIO {
+                        schedule_alarm = false;
+                    }
+                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
+                }
+                if !schedule_alarm {
+                    let synced = synced_date_time.date_time_utc;
+                    let until_alarm = (audio_alarm - synced).num_minutes();
+                    if until_alarm <= MAX_GAP_MIN as i64 {
+                        info!(
+                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                            audio_alarm.year(),
+                            audio_alarm.month(),
+                            audio_alarm.day(),
+                            audio_alarm.hour(),
+                            audio_alarm.minute()
+                        );
+                        if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
+                            next_audio_alarm = Some(audio_alarm);
+                            schedule_alarm = false;
+                        } else {
+                            schedule_alarm = true;
+                            //if window time changed and alarm is after rec window start
+                            info!("Rescehduling as alarm is after window start");
+                        }
+                    } else {
+                        info!("Alarm is missed");
+                    }
+                }
+            }
+            if schedule_alarm {
+                if let Ok(next_alarm) = schedule_audio_rec(
+                    &mut delay,
+                    &synced_date_time,
+                    &mut shared_i2c,
+                    &mut flash_storage,
+                    &mut timer,
+                    &mut event_logger,
+                    &device_config,
+                ) {
+                    next_audio_alarm = Some(next_alarm);
+                    info!("Setting a pending audio alarm");
+                } else {
+                    error!("Couldn't schedule alarm");
+                }
+            }
+        }
+        _ => {
+            clear_audio_alarm(&mut flash_storage);
+            record_audio = false
+        }
+    }
+
     if !device_config.use_low_power_mode() {
-        wake_raspberry_pi(&mut shared_i2c, &mut delay);
+        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+        }
         maybe_offload_events(
             &mut pi_spi,
             &mut peripherals.RESETS,
@@ -392,6 +520,7 @@ pub fn core_1_task(
             &mut event_logger,
             &mut flash_storage,
             clock_freq,
+            &synced_date_time,
             None,
         );
     }
@@ -405,6 +534,16 @@ pub fn core_1_task(
         || flash_storage.is_too_full_to_start_new_recordings()
         || (has_files_to_offload && flash_storage.file_start_block_index.is_none());
     //means old file system offload once
+
+    if should_offload {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffload),
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
     let should_offload = if !should_offload {
         let previous_offload_time = event_logger
             .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
@@ -419,10 +558,28 @@ pub fn core_1_task(
             } else {
                 Duration::minutes(0)
             };
-        has_files_to_offload && duration_since_prev_offload > Duration::hours(24)
+        if has_files_to_offload && duration_since_prev_offload > Duration::hours(24) {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffloadAfter24Hours),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+            true
+        } else {
+            false
+        }
     } else {
         should_offload
     };
+
+    let is_cptv = flash_storage.has_cptv_files(false);
+    info!(
+        "Has cptv files? {} has files? {}",
+        is_cptv,
+        flash_storage.has_files_to_offload()
+    );
     let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
@@ -436,14 +593,23 @@ pub fn core_1_task(
             &mut event_logger,
             &synced_date_time,
             None,
+            false,
         )
     } else {
         false
     };
-    // Unset the is_recording flag on attiny on startup
-    let _ = shared_i2c
-        .set_recording_flag(&mut delay, false)
-        .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+
+    if record_audio {
+        if let Some(audio_alarm) = next_audio_alarm {
+            info!(
+                "Alarm scheduled for {} {}:{}",
+                audio_alarm.day(),
+                audio_alarm.hour(),
+                audio_alarm.minute()
+            );
+        }
+    }
+
     warn!("Core 1 is ready to receive frames");
     sio.fifo.write_blocking(Core1Task::Ready.into());
     if !device_config.config().use_low_power_mode {
@@ -461,19 +627,6 @@ pub fn core_1_task(
     let mut prev_frame_telemetry: Option<Telemetry> = None;
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
-    let startup_date_time_utc;
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        if let Ok(now) = shared_i2c.get_datetime(&mut delay) {
-            synced_date_time.set(get_naive_datetime(now), &timer);
-            startup_date_time_utc = synced_date_time.date_time_utc.clone();
-            break;
-        } else {
-            warn!("Failed getting date from RTC, retrying");
-            delay.delay_ms(10);
-        }
-    }
-
     let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
 
     info!(
@@ -482,21 +635,27 @@ pub fn core_1_task(
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
-    let mut current_recording_window = None;
+    let current_recording_window =
+        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
     let mut logged_flash_storage_nearly_full = false;
     // NOTE: If there are already recordings on the flash memory,
     //  assume we've already made the startup status recording during this recording window.
-    let mut made_startup_status_recording = has_files_to_offload || did_offload_files;
+    let mut made_startup_status_recording =
+        (is_cptv && has_files_to_offload) || (is_cptv && did_offload_files);
+
     let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
     let mut high_power_recording = false;
     let mut last_rec_check = 0;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
-    info!("Entering frame loop");
+    info!(
+        "Entering frame loop made start up? {}",
+        made_startup_status_recording
+    );
     loop {
         let input = sio.fifo.read_blocking();
         let needs_ffc: bool;
@@ -649,6 +808,7 @@ pub fn core_1_task(
             let status_recording_length_in_frames = 18;
             let motion_detection_triggered_this_frame =
                 this_frame_motion_detection.got_new_trigger();
+
             should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
                 && (motion_detection_triggered_this_frame || !made_startup_status_recording)
                 && cptv_stream.is_none(); // wait until lepton stabilises before recording
@@ -668,13 +828,12 @@ pub fn core_1_task(
                         making_status_recording = true;
                     }
                 } else {
-                    if let Some((_, window_end)) = &current_recording_window {
-                        if synced_date_time.date_time_utc + Duration::minutes(1) > *window_end {
-                            warn!("Make shutdown status recording");
-                            should_start_new_recording = true;
-                            made_shutdown_status_recording = true;
-                            making_status_recording = true;
-                        }
+                    let (_, window_end) = &current_recording_window;
+                    if &(synced_date_time.date_time_utc + Duration::minutes(1)) > window_end {
+                        warn!("Make shutdown status recording");
+                        should_start_new_recording = true;
+                        made_shutdown_status_recording = true;
+                        making_status_recording = true;
                     }
                 }
             }
@@ -703,7 +862,7 @@ pub fn core_1_task(
                 let is_inside_recording_window = if !dev_mode {
                     device_config.time_is_in_recording_window(
                         &synced_date_time.date_time_utc,
-                        &current_recording_window,
+                        &Some(current_recording_window),
                     )
                 } else {
                     // Recording window is 5 minutes from startup time in dev mode.
@@ -712,13 +871,6 @@ pub fn core_1_task(
                 };
 
                 if is_inside_recording_window {
-                    if current_recording_window.is_none() {
-                        current_recording_window = Some(
-                            device_config
-                                .next_or_current_recording_window(&synced_date_time.date_time_utc),
-                        );
-                    }
-
                     // Should we make a 2-second status recording at the beginning or end of the window?
                     if !made_startup_status_recording && !motion_detection_triggered_this_frame {
                         warn!("Make startup status recording");
@@ -776,7 +928,7 @@ pub fn core_1_task(
                     );
 
                     cptv_stream = Some(cptv_streamer);
-                } else {
+                } else if made_startup_status_recording {
                     info!("Would start recording, but outside recording window");
                 }
             }
@@ -830,20 +982,20 @@ pub fn core_1_task(
                             "Ending current recording start block {} end block{}",
                             cptv_start_block_index, flash_storage.last_used_block_index
                         );
+
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::EndedRecording,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
                     }
 
                     ended_recording = true;
                     let _ = shared_i2c
                         .set_recording_flag(&mut delay, false)
                         .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
-
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::EndedRecording,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        &mut flash_storage,
-                    );
 
                     if making_status_recording {
                         making_status_recording = false;
@@ -898,7 +1050,10 @@ pub fn core_1_task(
         }
 
         let one_min_check_start = timer.get_counter();
-        let expected_rtc_sync_time_us = 3500;
+        // let expected_rtc_sync_time_us = 3500;
+        let expected_rtc_sync_time_us = 4200; //using slower clock speed
+
+        //INFO  RTC Sync time took 1350µs
         if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
@@ -925,6 +1080,7 @@ pub fn core_1_task(
                 );
             }
             let sync_rtc_start_real = timer.get_counter();
+
             synced_date_time = match shared_i2c.get_datetime(&mut delay) {
                 Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
                 Err(err_str) => {
@@ -939,6 +1095,7 @@ pub fn core_1_task(
                     synced_date_time
                 }
             };
+
             info!(
                 "RTC Sync time took {}µs",
                 (timer.get_counter() - sync_rtc_start_real).to_micros()
@@ -977,6 +1134,7 @@ pub fn core_1_task(
                     // If flash storage is nearly full, or we're now outside the recording window,
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
+
                     sio.fifo.write(Core1Task::RequestReset.into());
                     loop {
                         // Wait to be reset
@@ -998,6 +1156,7 @@ pub fn core_1_task(
                         logged_told_rpi_to_sleep = true;
                     }
                 }
+
                 let check_power_down_state_start = timer.get_counter();
                 if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
@@ -1013,6 +1172,20 @@ pub fn core_1_task(
                             logged_pi_powered_down = true;
                         }
 
+                        //only reboot into audio mode if pi is powered down and rp2040 is asleep
+                        //so we can keep the thermal preview up as long as the PI is on.
+                        match device_config.config().audio_mode {
+                            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+                                //just reboot and it will go into audio branch
+                                info!("Reset as thermal finished and time for audio");
+                                sio.fifo.write(Core1Task::RequestReset.into());
+
+                                loop {
+                                    nop();
+                                }
+                            }
+                            _ => (),
+                        }
                         // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if !dev_mode {
@@ -1116,7 +1289,15 @@ pub fn core_1_task(
                     (timer.get_counter() - check_power_down_state_start).to_micros()
                 );
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
-                wake_raspberry_pi(&mut shared_i2c, &mut delay);
+                if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+                    event_logger.log_event(
+                        LoggerEvent::new(
+                            LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
+                }
             }
 
             // Make sure timing is as close as possible to the non-sync case
@@ -1138,12 +1319,12 @@ pub fn core_1_task(
             // don't have too many stalls trying to communicate via I2C with the RTC.
 
             let mut incremented_datetime = synced_date_time.date_time_utc.clone();
+
             let frames_elapsed = if frame_header_is_valid {
                 get_frames_elapsed(&frame_telemetry, &prev_frame_telemetry)
             } else {
                 1
             };
-
             if frames_elapsed > 100 {
                 warn!("Got {} elapsed frames, ignoring", frames_elapsed);
             } else {
@@ -1158,16 +1339,59 @@ pub fn core_1_task(
             delay.delay_us(expected_rtc_sync_time_us as u32);
         }
         let one_min_check_end = timer.get_counter();
-        if frame_header_is_valid {
-            prev_frame_telemetry = Some(frame_telemetry);
-        }
-        frames_seen += 1;
+
         // info!(
         //     "Loop took {}µs, 1min check {}µs, frame transfer {}µs",
         //     (timer.get_counter() - start).to_micros(),
         //     (one_min_check_end - one_min_check_start).to_micros(),
         //     (frame_transfer_end - frame_transfer_start).to_micros()
         // );
+        if record_audio {
+            if let Some(next_audio_alarm) = next_audio_alarm {
+                if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm {
+                    //Should we be checking alarm triggered? or just us ethis and clear alarm
+                    audio_pending = true;
+                    let cur_time = &synced_date_time.date_time_utc;
+
+                    info!(
+                            "Audio recording is pending because time {}:{} from {}:{} and timer {:?} startup {:?} is after {}:{} ",
+                            cur_time.hour(),
+                            cur_time.minute(),
+                            synced_date_time.date_time_utc.hour(),
+                            synced_date_time.date_time_utc.minute(),
+                            timer.get_counter().ticks(),
+                            synced_date_time.timer_offset.ticks(),
+                            next_audio_alarm.hour(),
+                            next_audio_alarm.minute()
+                            )
+                }
+            }
+
+            if cptv_stream.is_none()
+                && audio_pending
+                && (frame_telemetry.frame_num - last_rec_check) > 9 * 20
+            {
+                //hanldes case where thermal recorder is doing recording
+                if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+                    if !is_recording {
+                        info!("Taking audio recording");
+                        //make audio rec now
+                        let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
+                        sio.fifo.write(Core1Task::RequestReset.into());
+                        loop {
+                            // Wait to be reset
+                            nop();
+                        }
+                    }
+                }
+                last_rec_check = frame_telemetry.frame_num;
+            }
+        }
+
+        if frame_header_is_valid {
+            prev_frame_telemetry = Some(frame_telemetry);
+        }
+        frames_seen += 1;
         sio.fifo.write(Core1Task::FrameProcessingComplete.into());
     }
 }

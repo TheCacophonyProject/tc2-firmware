@@ -12,10 +12,8 @@
 // in blocks of a certain size.
 
 use crate::bsp::pac::SPI1;
-use crate::rp2040_flash::PAGE_SIZE;
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
-use cortex_m::singleton;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::{error, info, println, warn, Format};
 use embedded_hal::digital::v2::OutputPin;
@@ -24,9 +22,7 @@ use embedded_hal::prelude::{
 };
 
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::dma::single_buffer::Transfer;
-use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2, CH5};
-use rp2040_hal::dma::{single_buffer, CH0};
+use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2};
 use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio8, Gpio9};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
@@ -215,7 +211,7 @@ impl Page {
         }
     }
 
-    pub fn previous_file_start_block_index(&self) -> Option<(u16)> {
+    pub fn previous_file_start_block_index(&self) -> Option<u16> {
         let block = LittleEndian::read_u16(&self.user_metadata_1()[14..=15]);
         if block == u16::MAX {
             None
@@ -381,6 +377,36 @@ impl OnboardFlash {
         self.spi_write(&[SET_FEATURES, FEATURE_BLOCK_LOCK, 0x00]);
         self.wait_for_ready();
     }
+
+    pub fn has_cptv_files(&mut self, only_last: bool) -> bool {
+        if !self.has_files_to_offload() {
+            return false;
+        }
+        let mut file_start = self.file_start_block_index;
+        while file_start.is_some() {
+            //read 1 as if incomplete 0 won't be writen too
+            self.read_page(file_start.unwrap() as isize, 0).unwrap();
+            self.read_page_from_cache(file_start.unwrap() as isize);
+            self.wait_for_all_ready();
+            if !self.current_page.page_is_used() {
+                //possibly unfinished cptv file try previous
+                self.read_page(file_start.unwrap() as isize, 1).unwrap();
+                self.read_page_metadata(file_start.unwrap() as isize);
+                self.wait_for_all_ready();
+                file_start = self.current_page.previous_file_start_block_index();
+                continue;
+            }
+
+            let is_cptv = Some(self.current_page.user_data()[0] != 1);
+            if only_last || is_cptv.unwrap() {
+                return is_cptv.unwrap();
+            }
+
+            file_start = self.current_page.previous_file_start_block_index();
+        }
+        return false;
+    }
+
     pub fn scan(&mut self) {
         let mut bad_blocks = [i16::MAX; 40];
         self.first_used_block_index = None;
@@ -505,7 +531,7 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_blocks(&mut self) {
-        'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
+        for block_index in 0..NUM_RECORDING_BLOCKS {
             if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
             } else if !self.erase_block(block_index).is_ok() {
@@ -516,10 +542,10 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_good_used_blocks(&mut self) {
-        'outer: for block_index in 0..NUM_RECORDING_BLOCKS {
+        for block_index in 0..NUM_RECORDING_BLOCKS {
             if self.bad_blocks.contains(&(block_index as i16)) {
                 info!("Skipping erase of bad block {}", block_index);
-                continue 'outer;
+                continue;
             }
             self.read_page(block_index, 0).unwrap();
 
@@ -625,7 +651,6 @@ impl OnboardFlash {
                 let length = self.current_page.page_bytes_used();
                 let crc = self.current_page.page_crc();
                 let is_last_page_for_file = self.current_page.is_last_page_for_file();
-
                 let block = self.current_block_index;
                 let page = self.current_page_index;
                 self.advance_file_cursor(is_last_page_for_file);
@@ -938,8 +963,8 @@ impl OnboardFlash {
         address: [u8; 3],
         is_last: bool,
     ) -> OnboardFlashStatus {
-        let mut b = block_index.unwrap_or(self.current_block_index);
-        let mut p = page_index.unwrap_or(self.current_page_index);
+        let b = block_index.unwrap_or(self.current_block_index);
+        let p = page_index.unwrap_or(self.current_page_index);
         let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
         self.cs.set_high().unwrap();
         self.payload_buffer = Some(tx_buf);
@@ -1023,8 +1048,8 @@ impl OnboardFlash {
 
             if !status.erase_failed() {}
         }
-        let mut b = block_index.unwrap_or(self.current_block_index);
-        let mut p = page_index.unwrap_or(self.current_page_index);
+        let b = block_index.unwrap_or(self.current_block_index);
+        let p = page_index.unwrap_or(self.current_page_index);
 
         if b > NUM_RECORDING_BLOCKS {
             return Err(&"Flash full");
@@ -1100,7 +1125,7 @@ impl OnboardFlash {
                 )
                 .start(),
             );
-            if (is_last) {
+            if is_last {
                 let status = self.finish_transfer(
                     block_index,
                     page_index,

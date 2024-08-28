@@ -447,6 +447,7 @@ impl ExtSpiTransfers {
             if self.ping(timer, true) {
                 finished_transfer = true;
                 let start = timer.get_counter();
+
                 let transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
@@ -465,9 +466,10 @@ impl ExtSpiTransfers {
                 self.dma_channel_0 = Some(r_ch0);
                 self.payload_buffer = Some(r_buf);
                 self.spi = Some(tx);
-
                 // Now read the crc + return payload from the pi
                 {
+                    let return_length = self.return_payload_buffer.as_ref().unwrap().len() as u32;
+
                     self.return_payload_buffer.as_mut().unwrap().fill(0);
                     let transfer = single_buffer::Config::new(
                         self.dma_channel_0.take().unwrap(),
@@ -475,11 +477,19 @@ impl ExtSpiTransfers {
                         self.return_payload_buffer.take().unwrap(),
                     )
                     .start();
-
                     let transfer_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
                         .ch_read_addr
                         .read()
                         .bits();
+
+                    let aborted = maybe_abort_dma_transfer(
+                        dma_peripheral,
+                        DMA_CHANNEL_NUM,
+                        transfer_read_address + return_length,
+                        transfer_read_address,
+                        1,
+                    );
+                    //gp 5th August 2024 this was sometimes hanging, added the abort. maybe fixed??
                     let (r_ch0, spi, r_buf) = transfer.wait();
                     self.dma_channel_0 = Some(r_ch0);
                     // Find offset crc in buffer:
@@ -593,6 +603,7 @@ fn maybe_abort_dma_transfer(
             break;
         }
     }
+
     if needs_abort && dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {
         info!(
             "Aborting dma transfer at {}/{}, #{}",

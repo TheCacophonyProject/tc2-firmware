@@ -118,8 +118,8 @@ impl PDMFilter {
             z = round_div(z, self.div_const as i64);
             z = satural_lh(z, -32700 as i64, 32700 as i64);
 
-            if (saveout) {
-                dataout[out_index] = (z as u16);
+            if saveout {
+                dataout[out_index] = z as u16;
                 out_index += 1;
             }
         }

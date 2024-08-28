@@ -28,6 +28,16 @@ pub struct SharedI2C {
     rtc: Option<PCF8563<I2CConfig>>,
 }
 
+pub mod tc2_agent_state {
+    pub const NOT_READY: u8 = 0x00;
+    pub const READY: u8 = 1 << 1;
+    pub const RECORDING: u8 = 1 << 2;
+    pub const TEST_AUDIO_RECORDING: u8 = 1 << 3;
+    pub const TAKE_AUDIO: u8 = 1 << 4;
+    pub const OFFLOAD: u8 = 1 << 5;
+    pub const THERMAL_MODE: u8 = 1 << 6;
+}
+
 #[repr(u8)]
 #[derive(Format)]
 enum CameraState {
@@ -37,14 +47,6 @@ enum CameraState {
     PoweredOff = 0x03,
     PowerOnTimeout = 0x04,
     InvalidState = 0x05,
-}
-
-#[repr(u8)]
-#[derive(Format)]
-enum Tc2AgentReadyState {
-    NotReady = 0x00,
-    Ready = 0x02,
-    Recording = 0x04,
 }
 
 impl Into<u8> for CameraState {
@@ -352,6 +354,14 @@ impl SharedI2C {
         self.try_attiny_read_command(REG_RP2040_PI_POWER_CTRL, delay, None)
     }
 
+    pub fn get_is_recording(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        let res = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & tc2_agent_state::RECORDING) == tc2_agent_state::RECORDING),
+            Err(e) => Err(e),
+        };
+        return res;
+    }
+
     pub fn set_recording_flag(
         &mut self,
         delay: &mut Delay,
@@ -364,9 +374,9 @@ impl SharedI2C {
         match state {
             Ok(mut state) => {
                 if is_recording {
-                    state |= 4;
+                    state |= tc2_agent_state::RECORDING;
                 } else {
-                    state &= !4u8;
+                    state &= !tc2_agent_state::RECORDING;
                 }
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
                     Ok(_) => Ok(()),
@@ -455,16 +465,23 @@ impl SharedI2C {
                         info!("tc2-agent unknown state {}", state);
                     }
                 }
-                Ok(state & 1 << 1 == 2)
+                Ok((state & tc2_agent_state::READY) == tc2_agent_state::READY)
             }
             Err(e) => Err(e),
         }
     }
 
-    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+    pub fn tc2_agent_state(&mut self, delay: &mut Delay) -> Result<u8, Error> {
+        self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)
+    }
+
+    pub fn tc2_agent_requested_test_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let rec_state: bool = (state & 1 << 1 == 2) && (state & 0x08 == 0x08);
+                let rec_state: bool = (state & tc2_agent_state::READY
+                    == state & tc2_agent_state::READY)
+                    && (state & tc2_agent_state::TEST_AUDIO_RECORDING
+                        == tc2_agent_state::TEST_AUDIO_RECORDING);
                 Ok(rec_state)
             }
             Err(e) => Err(e),
@@ -472,9 +489,18 @@ impl SharedI2C {
     }
 
     pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, tc2_agent_state::TEST_AUDIO_RECORDING, false)
+    }
+
+    pub fn tc2_agent_write_flag(
+        &mut self,
+        delay: &mut Delay,
+        flag: u8,
+        set: bool,
+    ) -> Result<(), Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let val = state & !8u8;
+                let val = if set { state | flag } else { state & !flag };
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),
@@ -482,6 +508,54 @@ impl SharedI2C {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn tc2_agent_clear_and_set_flag(
+        &mut self,
+        delay: &mut Delay,
+        clear_flag: u8,
+        set_flag: u8,
+    ) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let val = (state & !clear_flag) | set_flag;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(_) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn tc2_agent_requested_thermal_mode(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                Ok((state & tc2_agent_state::THERMAL_MODE) == tc2_agent_state::THERMAL_MODE)
+            }
+            Err(e) => Err(e),
+        }
+    }
+    pub fn tc2_agent_request_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, tc2_agent_state::THERMAL_MODE, true)
+    }
+
+    pub fn tc2_agent_clear_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, tc2_agent_state::THERMAL_MODE, false)
+    }
+
+    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & tc2_agent_state::TAKE_AUDIO) == tc2_agent_state::TAKE_AUDIO),
+            Err(e) => Err(e),
+        }
+    }
+    pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, tc2_agent_state::TAKE_AUDIO, true)
+    }
+
+    pub fn tc2_agent_clear_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.tc2_agent_write_flag(delay, tc2_agent_state::TAKE_AUDIO, false)
     }
 
     pub fn pi_is_powered_down(&mut self, delay: &mut Delay, print: bool) -> Result<bool, Error> {
