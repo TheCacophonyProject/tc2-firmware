@@ -150,9 +150,9 @@ pub fn audio_task(
             synced_date_time.set(get_naive_datetime(now), &timer);
         }
         Err(e) => {
-            //cant get time so just set this error to be Wednesday, November 30, 2039 12:00:00 AM
+            //cant get time so use 0 and add a time when tc2-agent uploads
             event_logger.log_event(
-                LoggerEvent::new(LoggerEventKind::RtcCommError, 2206224000000000),
+                LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
                 &mut flash_storage,
             );
             panic!("Unable to get DateTime from RTC {}", e)
