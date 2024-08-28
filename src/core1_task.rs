@@ -40,9 +40,7 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{
-    check_alarm_still_valid, get_alarm_dt, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
-};
+use crate::core0_audio::{check_alarm_still_valid, schedule_audio_rec, AlarmMode, MAX_GAP_MIN};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -316,8 +314,9 @@ pub fn core_1_task(
                 break;
             }
             Err(e) => {
+                //cant get time so use 0 and add a time when tc2-agent uploads
                 event_logger.log_event(
-                    LoggerEvent::new(LoggerEventKind::RtcCommError, 2206224000000000),
+                    LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
                     &mut flash_storage,
                 );
 
@@ -440,43 +439,39 @@ pub fn core_1_task(
 
     match device_config.config().audio_mode {
         AudioMode::AudioAndThermal => {
-            let alarm_time = get_audio_alarm(&mut flash_storage);
+            let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
             record_audio = true;
             let mut schedule_alarm = true;
 
-            if let Some(alarm_time) = alarm_time {
-                let scheduled: bool = alarm_time.iter().all(|x: &u8| *x != u8::MAX);
-
-                if alarm_time[3] == AlarmMode::THERMAL as u8 {
-                    //means the alarm was for recording window start so schedule next audio rec
-                    schedule_alarm = true;
-                } else if scheduled {
-                    match get_alarm_dt(
-                        synced_date_time.date_time_utc,
-                        alarm_time[0..3].try_into().unwrap(),
-                    ) {
-                        Ok(alarm_dt) => {
-                            let synced = synced_date_time.date_time_utc;
-                            let until_alarm = (alarm_dt - synced).num_minutes();
-                            if until_alarm <= MAX_GAP_MIN as i64 {
-                                info!(
-                                    "Alarm already scheduled for {} {}:{}",
-                                    alarm_dt.day(),
-                                    alarm_dt.hour(),
-                                    alarm_dt.minute()
-                                );
-                                if check_alarm_still_valid(&alarm_dt, &synced, &device_config) {
-                                    next_audio_alarm = Some(alarm_dt);
-                                    schedule_alarm = false;
-                                } else {
-                                    //if window time changed and alarm is after rec window start
-                                    info!("Rescehduling as alarm is after window start");
-                                }
-                            } else {
-                                info!("Alarm is missed");
-                            }
+            if let Some(audio_alarm) = audio_alarm {
+                if let Ok(audio_mode) = audio_mode {
+                    if audio_mode == AlarmMode::AUDIO {
+                        schedule_alarm = false;
+                    }
+                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
+                }
+                if !schedule_alarm {
+                    let synced = synced_date_time.date_time_utc;
+                    let until_alarm = (audio_alarm - synced).num_minutes();
+                    if until_alarm <= MAX_GAP_MIN as i64 {
+                        info!(
+                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                            audio_alarm.year(),
+                            audio_alarm.month(),
+                            audio_alarm.day(),
+                            audio_alarm.hour(),
+                            audio_alarm.minute()
+                        );
+                        if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
+                            next_audio_alarm = Some(audio_alarm);
+                            schedule_alarm = false;
+                        } else {
+                            schedule_alarm = true;
+                            //if window time changed and alarm is after rec window start
+                            info!("Rescehduling as alarm is after window start");
                         }
-                        _ => {}
+                    } else {
+                        info!("Alarm is missed");
                     }
                 }
             }
@@ -603,12 +598,14 @@ pub fn core_1_task(
     };
 
     if record_audio {
-        info!(
-            "Alarm scheduled for {} {}:{}",
-            next_audio_alarm.unwrap().day(),
-            next_audio_alarm.unwrap().hour(),
-            next_audio_alarm.unwrap().minute()
-        );
+        if let Some(audio_alarm) = next_audio_alarm {
+            info!(
+                "Alarm scheduled for {} {}:{}",
+                audio_alarm.day(),
+                audio_alarm.hour(),
+                audio_alarm.minute()
+            );
+        }
     }
 
     warn!("Core 1 is ready to receive frames");
@@ -784,9 +781,8 @@ pub fn core_1_task(
                         making_status_recording = true;
                     }
                 } else {
-                    if synced_date_time.date_time_utc + Duration::minutes(1)
-                        > current_recording_window.1
-                    {
+                    let (_, window_end) = &current_recording_window;
+                    if &(synced_date_time.date_time_utc + Duration::minutes(1)) > window_end {
                         warn!("Make shutdown status recording");
                         should_start_new_recording = true;
                         made_shutdown_status_recording = true;
@@ -1128,7 +1124,8 @@ pub fn core_1_task(
                             logged_pi_powered_down = true;
                         }
 
-                        //do this when powered down so preview stays up
+                        //only reboot into audio mode if pi is powered down and rp2040 is asleep
+                        //so we can keep the thermal preview up as long as the PI is on.
                         match device_config.config().audio_mode {
                             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                                 //just reboot and it will go into audio branch
@@ -1302,23 +1299,26 @@ pub fn core_1_task(
         //     (frame_transfer_end - frame_transfer_start).to_micros()
         // );
         if record_audio {
-            if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm.unwrap() {
-                //Should we be checking alarm triggered? or just us ethis and clear alarm
-                audio_pending = true;
-                let cur_time = &synced_date_time.date_time_utc;
+            if let Some(next_audio_alarm) = next_audio_alarm {
+                if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm {
+                    //Should we be checking alarm triggered? or just us ethis and clear alarm
+                    audio_pending = true;
+                    let cur_time = &synced_date_time.date_time_utc;
 
-                info!(
-                "Audio recording is pending because time {}:{} from {}:{} and timer {:?} startup {:?} is after {}:{} ",
-                cur_time.hour(),
-                cur_time.minute(),
-                synced_date_time.date_time_utc.hour(),
-                synced_date_time.date_time_utc.minute(),
-                timer.get_counter().ticks(),
-                synced_date_time.timer_offset.ticks(),
-                next_audio_alarm.unwrap().hour(),
-                next_audio_alarm.unwrap().minute()
-                )
+                    info!(
+                            "Audio recording is pending because time {}:{} from {}:{} and timer {:?} startup {:?} is after {}:{} ",
+                            cur_time.hour(),
+                            cur_time.minute(),
+                            synced_date_time.date_time_utc.hour(),
+                            synced_date_time.date_time_utc.minute(),
+                            timer.get_counter().ticks(),
+                            synced_date_time.timer_offset.ticks(),
+                            next_audio_alarm.hour(),
+                            next_audio_alarm.minute()
+                            )
+                }
             }
+
             if cptv_stream.is_none()
                 && audio_pending
                 && (frame_telemetry.frame_num - last_rec_check) > 9 * 20

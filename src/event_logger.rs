@@ -7,6 +7,8 @@ use chrono::NaiveDateTime;
 use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
+use crate::core0_audio::AlarmMode;
+
 #[repr(u8)]
 #[derive(Format, Copy, Clone)]
 
@@ -208,7 +210,7 @@ impl EventLogger {
         event_index: usize,
         flash_storage: &mut OnboardFlash,
     ) -> Option<[u8; 18]> {
-        // 4 blocks per page, 64 pages per block.
+        // 4 partial writes per page, 64 pages per block.
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index as isize / 256);
         let page = ((event_index % 256) / 4) as isize;
         let page_offset = (event_index % 4) * 64; // Allocate 64 bytes for each event
@@ -348,29 +350,35 @@ pub fn clear_audio_alarm(flash_storage: &mut OnboardFlash) {
     let _ = flash_storage.erase_block(AUDIO_BLOCK);
 }
 
+//write audio alarm into last block of event storage
+//byte 0 is alarm mode 0 for audio 1 for thermal
+//bytes 1-9 is millisecond timestamp of the alarm
 pub fn write_audio_alarm(
     flash_storage: &mut OnboardFlash,
-    alarm_day: u8,
-    alarm_hours: u8,
-    alarm_minutes: u8,
-    mode: u8,
+    alarm_dt: NaiveDateTime,
+    mode: AlarmMode,
 ) {
-    // 4 blocks per page, 64 pages per block.
     let _ = flash_storage.erase_block(AUDIO_BLOCK);
     let page_offset = 0;
     let mut event_data = [0u8; 18];
-    event_data[0..4].copy_from_slice(&[alarm_day, alarm_hours, alarm_minutes, mode]);
+    event_data[0] = mode as u8;
+    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.timestamp_millis());
     flash_storage.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset as u16);
 }
 
-pub fn get_audio_alarm(flash_storage: &mut OnboardFlash) -> Option<[u8; 4]> {
-    // 4 blocks per page, 64 pages per block.
+pub fn get_audio_alarm(
+    flash_storage: &mut OnboardFlash,
+) -> (Result<AlarmMode, ()>, Option<NaiveDateTime>) {
     let page_offset = 0;
     if flash_storage.read_page(AUDIO_BLOCK, AUDIO_PAGE).is_ok() {
         let event = flash_storage
             .read_event_from_cache_at_column_offset_spi(AUDIO_BLOCK, page_offset as isize);
-        return Some(event[0..4].try_into().unwrap());
+        if event[0..9].iter().all(|x: &u8| *x == u8::MAX) {
+            return (Err(()), None);
+        }
+        let dt = NaiveDateTime::from_timestamp_millis(LittleEndian::read_i64(&event[1..9]));
+        return (AlarmMode::try_from(event[0]), dt);
     } else {
-        None
+        (Err(()), None)
     }
 }

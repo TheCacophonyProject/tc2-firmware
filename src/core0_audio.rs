@@ -40,10 +40,27 @@ use crate::onboard_flash::extend_lifetime_generic_mut;
 // };
 
 #[repr(u8)]
+#[derive(PartialEq, Eq)]
+
 pub enum AlarmMode {
     AUDIO = 0,
     THERMAL = 1,
 }
+
+impl TryFrom<u8> for AlarmMode {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        use AlarmMode::*;
+
+        match value {
+            0 => Ok(AUDIO),
+            1 => Ok(THERMAL),
+            _ => Err(()),
+        }
+    }
+}
+
 const DEV_MODE: bool = false;
 pub const MAX_GAP_MIN: u8 = 60;
 pub fn audio_task(
@@ -133,9 +150,9 @@ pub fn audio_task(
             synced_date_time.set(get_naive_datetime(now), &timer);
         }
         Err(e) => {
-            // should take recording now
+            //cant get time so use 0 and add a time when tc2-agent uploads
             event_logger.log_event(
-                LoggerEvent::new(LoggerEventKind::RtcCommError, 2206224000000000),
+                LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
                 &mut flash_storage,
             );
             panic!("Unable to get DateTime from RTC {}", e)
@@ -213,39 +230,35 @@ pub fn audio_task(
         //this isn't reliable so use alarm stored in flash
         // let mut alarm_hours = shared_i2c.get_alarm_hours();
         // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
-        let flash_alarm = get_audio_alarm(&mut flash_storage);
-        let mut scheduled = false;
-        if let Some(flash_alarm) = flash_alarm {
-            let alarm_mode = flash_alarm[3];
-            scheduled = flash_alarm.iter().all(|x: &u8| *x != u8::MAX);
+        let mut scheduled: bool = false;
 
-            info!("Audio alarm scheduled for {}", flash_alarm);
-            if scheduled {
-                match get_alarm_dt(
-                    synced_date_time.get_adjusted_dt(timer),
-                    flash_alarm[0..3].try_into().unwrap(),
+        let (_, flash_alarm) = get_audio_alarm(&mut flash_storage);
+        if let Some(alarm) = flash_alarm {
+            scheduled = true;
+            info!(
+                "Audio alarm scheduled for {}-{}-{} {}:{}",
+                alarm.year(),
+                alarm.month(),
+                alarm.day(),
+                alarm.hour(),
+                alarm.minute(),
+            );
+            if device_config_was_updated {
+                if check_alarm_still_valid(
+                    &alarm,
+                    &synced_date_time.get_adjusted_dt(timer),
+                    &device_config,
                 ) {
-                    Ok(alarm) => {
-                        if device_config_was_updated {
-                            if check_alarm_still_valid(
-                                &alarm,
-                                &synced_date_time.get_adjusted_dt(timer),
-                                &device_config,
-                            ) {
-                                alarm_date_time = Some(alarm);
-                            } else {
-                                //if window time changed and alarm is after rec window start
-                                clear_audio_alarm(&mut flash_storage);
-                                scheduled = false;
-                                info!("Rescehduling as alarm is after window start");
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        error!("Could not get alarm dt");
-                    }
+                    alarm_date_time = Some(alarm);
+                } else {
+                    //if window time changed and alarm is after rec window start
+                    clear_audio_alarm(&mut flash_storage);
+                    scheduled = false;
+                    info!("Rescehduling as alarm is after window start");
                 }
             }
+        } else {
+            error!("Not scheduled");
         }
 
         event_logger.log_event(
@@ -669,23 +682,6 @@ pub fn offload(
     }
     Ok(())
 }
-pub fn get_alarm_dt(datetime: NaiveDateTime, alarm: [u8; 3]) -> Result<NaiveDateTime, ()> {
-    let naive_date = chrono::NaiveDate::from_ymd_opt(
-        datetime.year() as i32,
-        datetime.month() as u32,
-        alarm[0] as u32,
-    );
-    if naive_date.is_none() {
-        return Err(());
-    }
-    let naive_date = naive_date.unwrap();
-
-    let naive_time = chrono::NaiveTime::from_hms_opt(alarm[1] as u32, alarm[2] as u32, 0);
-    if naive_time.is_none() {
-        return Err(());
-    }
-    Ok(NaiveDateTime::new(naive_date, naive_time.unwrap()))
-}
 
 pub fn schedule_audio_rec(
     delay: &mut Delay,
@@ -770,13 +766,7 @@ pub fn schedule_audio_rec(
                     flash_storage,
                 );
 
-                write_audio_alarm(
-                    flash_storage,
-                    wakeup.day() as u8,
-                    wakeup.hour() as u8,
-                    wakeup.minute() as u8,
-                    alarm_mode as u8,
-                );
+                write_audio_alarm(flash_storage, wakeup, alarm_mode);
                 return Ok(wakeup);
             }
         }
