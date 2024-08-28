@@ -54,6 +54,8 @@ pub enum Core1Task {
     EndFileOffload = 0xfb,
     ReadyToSleep = 0xef,
     RequestReset = 0xea,
+    HighPowerMode = 0xeb,
+    ReceiveFrameWithPendingFFC = 0xac,
 }
 
 impl Into<u32> for Core1Task {
@@ -363,6 +365,7 @@ pub fn core_1_task(
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
     sio.fifo.write_blocking(Core1Task::Ready.into());
+
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
@@ -521,7 +524,6 @@ pub fn core_1_task(
             None,
         );
     }
-
     // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
     //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
     //  Otherwise, if the rp2040 happens to restart, we'll pretty much
@@ -610,7 +612,9 @@ pub fn core_1_task(
 
     warn!("Core 1 is ready to receive frames");
     sio.fifo.write_blocking(Core1Task::Ready.into());
-
+    if !device_config.config().use_low_power_mode {
+        sio.fifo.write_blocking(Core1Task::HighPowerMode.into());
+    }
     let mut cptv_stream: Option<CptvStream> = None;
     let mut prev_frame: [u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1] =
         [0u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1];
@@ -644,6 +648,8 @@ pub fn core_1_task(
 
     let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
+    let mut high_power_recording = false;
+    let mut last_rec_check = 0;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     info!(
@@ -652,12 +658,18 @@ pub fn core_1_task(
     );
     loop {
         let input = sio.fifo.read_blocking();
-        crate::assert_eq!(
-            input,
-            Core1Task::ReceiveFrame.into(),
-            "Got unknown fifo input to core1 task loop {}",
-            input
-        );
+        let needs_ffc: bool;
+        if input == Core1Task::ReceiveFrameWithPendingFFC.into() {
+            needs_ffc = true;
+        } else {
+            crate::assert_eq!(
+                input,
+                Core1Task::ReceiveFrame.into(),
+                "Got unknown fifo input to core1 task loop {}",
+                input
+            );
+            needs_ffc = false;
+        }
 
         let start = timer.get_counter();
         // Get the currently selected buffer to transfer/write to disk.
@@ -685,6 +697,41 @@ pub fn core_1_task(
                 is_frame_telemetry_is_valid(&frame_telemetry, &mut stable_telemetry_tracker);
             (frame_telemetry, frame_header_is_valid)
         };
+
+        //if in high power mode need to check thermal-recorder hasn't made a recording
+        if needs_ffc && !device_config.use_low_power_mode() {
+            //only check status every 20 seconds
+            if frame_telemetry.frame_num - last_rec_check > 9 * 20 {
+                if let Ok(is_recording) = shared_i2c.tc2_agent_is_recording(&mut delay) {
+                    high_power_recording = is_recording;
+                    last_rec_check = frame_telemetry.frame_num;
+                    info!(
+                        "Checking if recording {} am recording ?? {}",
+                        is_recording, high_power_recording
+                    );
+                    if high_power_recording {
+                        sio.fifo.write(Core1Task::StartRecording.into());
+                        high_power_recording = true;
+                    } else {
+                        sio.fifo.write(Core1Task::EndRecording.into());
+                        high_power_recording = false;
+                        thread_local_frame_buffer
+                            .as_mut()
+                            .unwrap()
+                            .ffc_imminent(true);
+                    }
+                }
+            } else if !high_power_recording {
+                //depending on timing might get 2 frames with needs_ffc event after said ok
+                thread_local_frame_buffer
+                    .as_mut()
+                    .unwrap()
+                    .ffc_imminent(true);
+            }
+        } else if high_power_recording {
+            high_power_recording = false;
+            last_rec_check = 0;
+        }
 
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame to pi if it is available.
