@@ -909,12 +909,14 @@ pub fn core_1_task(
                     // Prev frame needs to be zeroed out at the start.
                     // prev_frame.fill(0);
                     // NOTE: Write the initial frame before the trigger.
+
                     cptv_streamer.push_frame(
                         &prev_frame,
                         &mut prev_frame_2, // This should be zeroed out before starting a new clip.
                         &prev_frame_telemetry.as_ref().unwrap(),
                         &mut flash_storage,
                     );
+
                     // prev_frame.copy_from_slice(&prev_frame_2);
                     frames_written += 1;
 
@@ -930,9 +932,7 @@ pub fn core_1_task(
                 } else if made_startup_status_recording {
                     info!("Would start recording, but outside recording window");
                 }
-            }
-
-            if !should_end_current_recording {
+            } else if !should_end_current_recording {
                 if let Some(cptv_stream) = &mut cptv_stream {
                     if let Some(prev_telemetry) = &prev_frame_telemetry {
                         if frame_telemetry.frame_num == prev_telemetry.frame_num {
@@ -1004,8 +1004,12 @@ pub fn core_1_task(
                 frames_written = 0;
                 motion_detection = None;
             }
-
-            prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
+            if frames_written == 1 {
+                prev_frame_2[FRAME_WIDTH * FRAME_HEIGHT] = 0;
+                prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
+            } else {
+                prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
+            }
         }
 
         if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
@@ -1023,16 +1027,58 @@ pub fn core_1_task(
             }
         }
         let frame_transfer_end = timer.get_counter();
+        if frames_written == 1 {
+            {
+                critical_section::with(|cs| {
+                    // Now we just swap the buffers?
+                    let buffer = if selected_frame_buffer == 0 {
+                        frame_buffer_local
+                    } else {
+                        frame_buffer_local_2
+                    };
+                    *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+                });
+                sio.fifo.write(Core1Task::StartRecording.into());
 
-        critical_section::with(|cs| {
-            // Now we just swap the buffers?
-            let buffer = if selected_frame_buffer == 0 {
-                frame_buffer_local
-            } else {
-                frame_buffer_local_2
-            };
-            *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
-        });
+                sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+
+                if let Some(prev_telemetry) = &prev_frame_telemetry {
+                    if frame_telemetry.frame_num == prev_telemetry.frame_num {
+                        warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                    }
+                    if frame_telemetry.msec_on == prev_telemetry.msec_on {
+                        warn!(
+                            "Duplicate frame {} (same time {})",
+                            frame_telemetry.frame_num, frame_telemetry.msec_on
+                        );
+                    }
+                }
+                info!(
+                    "Doing prev frame {} and prev {}",
+                    prev_frame_2[0..10],
+                    prev_frame[0..10]
+                );
+                cptv_stream.as_mut().unwrap().push_frame(
+                    &mut prev_frame_2,
+                    &mut prev_frame,
+                    &frame_telemetry,
+                    &mut flash_storage,
+                );
+                frames_written += 1;
+                prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
+                    .copy_from_slice(&prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT]);
+            }
+        } else {
+            critical_section::with(|cs| {
+                // Now we just swap the buffers?
+                let buffer = if selected_frame_buffer == 0 {
+                    frame_buffer_local
+                } else {
+                    frame_buffer_local_2
+                };
+                *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+            });
+        }
 
         let swap_buffer = timer.get_counter();
         if should_start_new_recording && cptv_stream.is_some() {
@@ -1391,7 +1437,9 @@ pub fn core_1_task(
             prev_frame_telemetry = Some(frame_telemetry);
         }
         frames_seen += 1;
-        sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+        if frames_written != 2 {
+            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+        }
     }
 }
 
