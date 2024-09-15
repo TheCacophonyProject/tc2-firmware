@@ -1039,7 +1039,7 @@ pub fn core_1_task(
                 *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
             });
             sio.fifo.write(Core1Task::StartRecording.into());
-
+            info!("Sent start recording message to core0");
             sio.fifo.write(Core1Task::FrameProcessingComplete.into());
 
             if let Some(prev_telemetry) = &prev_frame_telemetry {
@@ -1078,13 +1078,10 @@ pub fn core_1_task(
                 };
                 *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
             });
+            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
         }
 
         let swap_buffer = timer.get_counter();
-        if should_start_new_recording && cptv_stream.is_some() {
-            info!("Send start recording message to core0");
-            sio.fifo.write(Core1Task::StartRecording.into());
-        }
         if ended_recording && cptv_stream.is_none() {
             info!("Send end recording message to core0");
             sio.fifo.write(Core1Task::EndRecording.into());
@@ -1437,9 +1434,6 @@ pub fn core_1_task(
             prev_frame_telemetry = Some(frame_telemetry);
         }
         frames_seen += 1;
-        if frames_written != 2 {
-            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
-        }
     }
 }
 
