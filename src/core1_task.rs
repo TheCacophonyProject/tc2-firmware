@@ -854,8 +854,6 @@ pub fn core_1_task(
             motion_detection = Some(this_frame_motion_detection);
 
             if should_start_new_recording {
-                // Begin CPTV file
-
                 // NOTE: Rather than trying to get the RTC time right as we're trying to start a CPTV file,
                 //  we just get it periodically, and then each frame add to it, then re-sync it
                 // (when we do our once a minute checks) when we're *not* trying to start a recording.
@@ -869,7 +867,8 @@ pub fn core_1_task(
                     synced_date_time.date_time_utc
                         < startup_date_time_utc + chrono::Duration::minutes(5)
                 };
-
+                should_start_new_recording =
+                    should_start_new_recording && is_inside_recording_window;
                 if is_inside_recording_window {
                     // Should we make a 2-second status recording at the beginning or end of the window?
                     if !made_startup_status_recording && !motion_detection_triggered_this_frame {
@@ -879,56 +878,6 @@ pub fn core_1_task(
                     } else {
                         // We're making a shutdown recording.
                     }
-
-                    warn!("Setting recording flag on attiny");
-                    // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
-                    //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
-                    //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
-                    let _ = shared_i2c
-                        .set_recording_flag(&mut delay, true)
-                        .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-                    warn!(
-                        "Making a status recording? {}, Triggered motion? {}",
-                        making_status_recording, motion_detection_triggered_this_frame
-                    );
-                    error!("Starting new recording, {:?}", &frame_telemetry);
-                    // TODO: Pass in various cptv header info bits.
-                    let mut cptv_streamer = CptvStream::new(
-                        synced_date_time.get_timestamp_micros(&timer), // Microseconds
-                        lepton_version,
-                        lepton_serial.clone(),
-                        lepton_firmware_version.clone(),
-                        &device_config,
-                        &mut flash_storage,
-                        &huffman_table,
-                        &crc_table,
-                        making_status_recording,
-                    );
-                    cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-                    // prev_frame_2.copy_from_slice(&prev_frame);
-                    // Prev frame needs to be zeroed out at the start.
-                    // prev_frame.fill(0);
-                    // NOTE: Write the initial frame before the trigger.
-
-                    cptv_streamer.push_frame(
-                        &prev_frame,
-                        &mut prev_frame_2, // This should be zeroed out before starting a new clip.
-                        &prev_frame_telemetry.as_ref().unwrap(),
-                        &mut flash_storage,
-                    );
-
-                    // prev_frame.copy_from_slice(&prev_frame_2);
-                    frames_written += 1;
-
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::StartedRecording,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        &mut flash_storage,
-                    );
-
-                    cptv_stream = Some(cptv_streamer);
                 } else if made_startup_status_recording {
                     info!("Would start recording, but outside recording window");
                 }
@@ -1004,10 +953,9 @@ pub fn core_1_task(
                 frames_written = 0;
                 motion_detection = None;
             }
-            if frames_written == 1 {
-                prev_frame_2[FRAME_WIDTH * FRAME_HEIGHT] = 0;
-                prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
-            } else {
+
+            //if starting a new recording will handle this differently below
+            if !should_start_new_recording {
                 prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
             }
         }
@@ -1027,47 +975,99 @@ pub fn core_1_task(
             }
         }
         let frame_transfer_end = timer.get_counter();
-        if frames_written == 1 {
-            {
-                critical_section::with(|cs| {
-                    // Now we just swap the buffers?
-                    let buffer = if selected_frame_buffer == 0 {
-                        frame_buffer_local
-                    } else {
-                        frame_buffer_local_2
-                    };
-                    *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
-                });
-                sio.fifo.write(Core1Task::StartRecording.into());
+        if should_start_new_recording {
+            //Since we write 2 frames every new recording, this can take too long and we drop a frame
+            //so cache the current frame and tell core0 to keep getting lepton frames, this will spread the initial
+            //load over the first 2 frames.
 
-                sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+            warn!("Setting recording flag on attiny");
+            // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
+            //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
+            //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
+            let _ = shared_i2c
+                .set_recording_flag(&mut delay, true)
+                .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
-                if let Some(prev_telemetry) = &prev_frame_telemetry {
-                    if frame_telemetry.frame_num == prev_telemetry.frame_num {
-                        warn!("Duplicate frame {}", frame_telemetry.frame_num);
-                    }
-                    if frame_telemetry.msec_on == prev_telemetry.msec_on {
-                        warn!(
-                            "Duplicate frame {} (same time {})",
-                            frame_telemetry.frame_num, frame_telemetry.msec_on
-                        );
-                    }
+            error!("Starting new recording, {:?}", &frame_telemetry);
+            // TODO: Pass in various cptv header info bits.
+            let mut cptv_streamer = CptvStream::new(
+                synced_date_time.get_timestamp_micros(&timer), // Microseconds
+                lepton_version,
+                lepton_serial.clone(),
+                lepton_firmware_version.clone(),
+                &device_config,
+                &mut flash_storage,
+                &huffman_table,
+                &crc_table,
+                making_status_recording,
+            );
+            cptv_streamer.init_gzip_stream(&mut flash_storage, false);
+            cptv_streamer.push_frame(
+                &prev_frame,
+                &mut prev_frame_2, // This should be zeroed out before starting a new clip.
+                &prev_frame_telemetry.as_ref().unwrap(),
+                &mut flash_storage,
+            );
+
+            // prev_frame.copy_from_slice(&prev_frame_2);
+            frames_written += 1;
+
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::StartedRecording,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+
+            cptv_stream = Some(cptv_streamer);
+
+            let mut current_frame = prev_frame_2;
+            current_frame[FRAME_WIDTH * FRAME_HEIGHT] = 0;
+            current_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
+                &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
+            }); // Telemetry skipped
+
+            //release the buffer before writing the frame so core0 can continue working
+            critical_section::with(|cs| {
+                // Now we just swap the buffers?
+                let buffer = if selected_frame_buffer == 0 {
+                    frame_buffer_local
+                } else {
+                    frame_buffer_local_2
+                };
+                *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+            });
+            sio.fifo.write(Core1Task::StartRecording.into());
+
+            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+
+            if let Some(prev_telemetry) = &prev_frame_telemetry {
+                if frame_telemetry.frame_num == prev_telemetry.frame_num {
+                    warn!("Duplicate frame {}", frame_telemetry.frame_num);
                 }
-                info!(
-                    "Doing prev frame {} and prev {}",
-                    prev_frame_2[0..10],
-                    prev_frame[0..10]
-                );
-                cptv_stream.as_mut().unwrap().push_frame(
-                    &mut prev_frame_2,
-                    &mut prev_frame,
-                    &frame_telemetry,
-                    &mut flash_storage,
-                );
-                frames_written += 1;
-                prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
-                    .copy_from_slice(&prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT]);
+                if frame_telemetry.msec_on == prev_telemetry.msec_on {
+                    warn!(
+                        "Duplicate frame {} (same time {})",
+                        frame_telemetry.frame_num, frame_telemetry.msec_on
+                    );
+                }
             }
+            info!(
+                "Doing current frame {} and prev {}",
+                current_frame[0..10],
+                prev_frame[0..10]
+            );
+            //now write the frame
+            cptv_stream.as_mut().unwrap().push_frame(
+                &mut current_frame,
+                &mut prev_frame,
+                &frame_telemetry,
+                &mut flash_storage,
+            );
+            frames_written += 1;
+            prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
+                .copy_from_slice(&current_frame[0..FRAME_WIDTH * FRAME_HEIGHT]);
         } else {
             critical_section::with(|cs| {
                 // Now we just swap the buffers?
