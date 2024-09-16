@@ -867,6 +867,7 @@ pub fn core_1_task(
                         synced_date_time.date_time_utc
                             < startup_date_time_utc + chrono::Duration::minutes(5)
                     };
+                    //start recording bellow so frame buffer is out of scope
                     should_start_new_recording =
                         should_start_new_recording && is_inside_recording_window;
                     if is_inside_recording_window {
