@@ -1064,7 +1064,6 @@ pub fn core_1_task(
                 frames_written += 1;
                 prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
                     .copy_from_slice(&prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT]);
-                info!("FINISHED START {}", frame_telemetry.frame_num);
             }
         } else {
             critical_section::with(|cs| {
