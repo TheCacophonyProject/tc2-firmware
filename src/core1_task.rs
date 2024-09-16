@@ -236,7 +236,7 @@ pub fn core_1_task(
     woken_by_alarm: bool,
     mut timer: Timer,
 ) {
-    let dev_mode = true;
+    let dev_mode = false;
     info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
@@ -573,7 +573,7 @@ pub fn core_1_task(
     } else {
         should_offload
     };
-    let should_offload = true;
+
     let is_cptv = flash_storage.has_cptv_files(false);
     info!(
         "Has cptv files? {} has files? {}",
@@ -787,171 +787,175 @@ pub fn core_1_task(
             frames_seen = 0;
             motion_detection = None;
         }
-
         // NOTE: In low power mode, don't try to start recordings/motion detection until frames have stabilised.
-        if !too_close_to_ffc_event
-            && frames_seen > WAIT_N_FRAMES_FOR_STABLE
+        if frames_seen >= WAIT_N_FRAMES_FOR_STABLE
             && device_config.use_low_power_mode()
             && frame_header_is_valid
         {
             let current_raw_frame =
                 unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
 
-            let this_frame_motion_detection = track_motion(
-                &current_raw_frame,
-                &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
-                &motion_detection,
-                is_daytime,
-                &device_config.motion_detection_mask,
-            );
-            let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
-            let status_recording_length_in_frames = 18;
-            let motion_detection_triggered_this_frame =
-                this_frame_motion_detection.got_new_trigger();
+            //just want 1 previous frame for first status
+            if !too_close_to_ffc_event && frames_seen > WAIT_N_FRAMES_FOR_STABLE {
+                let this_frame_motion_detection = track_motion(
+                    &current_raw_frame,
+                    &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
+                    &motion_detection,
+                    is_daytime,
+                    &device_config.motion_detection_mask,
+                );
+                let max_length_in_frames = if dev_mode { 60 * 9 } else { 60 * 10 * 9 };
+                let status_recording_length_in_frames = 18;
+                let motion_detection_triggered_this_frame =
+                    this_frame_motion_detection.got_new_trigger();
 
-            should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
-                && (motion_detection_triggered_this_frame || !made_startup_status_recording)
-                && cptv_stream.is_none(); // wait until lepton stabilises before recording
+                should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
+                    && (motion_detection_triggered_this_frame || !made_startup_status_recording)
+                    && cptv_stream.is_none(); // wait until lepton stabilises before recording
 
-            if made_startup_status_recording
-                && !made_shutdown_status_recording
-                && !motion_detection_triggered_this_frame
-                && cptv_stream.is_none()
-            {
-                if dev_mode {
-                    if synced_date_time.date_time_utc + Duration::minutes(1)
-                        > startup_date_time_utc + Duration::minutes(4)
-                    {
-                        warn!("Make shutdown status recording");
-                        should_start_new_recording = true;
-                        made_shutdown_status_recording = true;
-                        making_status_recording = true;
-                    }
-                } else {
-                    let (_, window_end) = &current_recording_window;
-                    if &(synced_date_time.date_time_utc + Duration::minutes(1)) > window_end {
-                        warn!("Make shutdown status recording");
-                        should_start_new_recording = true;
-                        made_shutdown_status_recording = true;
-                        making_status_recording = true;
-                    }
-                }
-            }
-
-            // TODO: Do we want to have a max recording length timeout, or just pause recording if a subject stays in the frame
-            //  but doesn't move for a while?  Maybe if a subject is stationary for 1 minute, we pause, and only resume
-            //  recording if there is new movement, or it moves again?  If the night ends in this way, we end the recording then.
-            //  In continuous recording mode we'd have a really long timeout perhaps?  Needs more thought.
-            //  Also consider the case where we have a mask region to ignore or pay attention to.
-            let should_end_current_recording = cptv_stream.is_some()
-                && ((this_frame_motion_detection.triggering_ended()
-                    || frames_written >= max_length_in_frames
-                    || flash_storage.is_nearly_full())
-                    || (making_status_recording
-                        && (frames_written >= status_recording_length_in_frames
-                            || flash_storage.is_nearly_full())));
-
-            motion_detection = Some(this_frame_motion_detection);
-
-            if should_start_new_recording {
-                // NOTE: Rather than trying to get the RTC time right as we're trying to start a CPTV file,
-                //  we just get it periodically, and then each frame add to it, then re-sync it
-                // (when we do our once a minute checks) when we're *not* trying to start a recording.
-                let is_inside_recording_window = if !dev_mode {
-                    device_config.time_is_in_recording_window(
-                        &synced_date_time.date_time_utc,
-                        &Some(current_recording_window),
-                    )
-                } else {
-                    // Recording window is 5 minutes from startup time in dev mode.
-                    synced_date_time.date_time_utc
-                        < startup_date_time_utc + chrono::Duration::minutes(5)
-                };
-                should_start_new_recording =
-                    should_start_new_recording && is_inside_recording_window;
-                if is_inside_recording_window {
-                    // Should we make a 2-second status recording at the beginning or end of the window?
-                    if !made_startup_status_recording && !motion_detection_triggered_this_frame {
-                        warn!("Make startup status recording");
-                        made_startup_status_recording = true;
-                        making_status_recording = true;
-                    } else {
-                        // We're making a shutdown recording.
-                    }
-                } else if made_startup_status_recording {
-                    info!("Would start recording, but outside recording window");
-                }
-            } else if !should_end_current_recording {
-                if let Some(cptv_stream) = &mut cptv_stream {
-                    if let Some(prev_telemetry) = &prev_frame_telemetry {
-                        if frame_telemetry.frame_num == prev_telemetry.frame_num {
-                            warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                if made_startup_status_recording
+                    && !made_shutdown_status_recording
+                    && !motion_detection_triggered_this_frame
+                    && cptv_stream.is_none()
+                {
+                    if dev_mode {
+                        if synced_date_time.date_time_utc + Duration::minutes(1)
+                            > startup_date_time_utc + Duration::minutes(4)
+                        {
+                            warn!("Make shutdown status recording");
+                            should_start_new_recording = true;
+                            made_shutdown_status_recording = true;
+                            making_status_recording = true;
                         }
-                        if frame_telemetry.msec_on == prev_telemetry.msec_on {
-                            warn!(
-                                "Duplicate frame {} (same time {})",
-                                frame_telemetry.frame_num, frame_telemetry.msec_on
+                    } else {
+                        let (_, window_end) = &current_recording_window;
+                        if &(synced_date_time.date_time_utc + Duration::minutes(1)) > window_end {
+                            warn!("Make shutdown status recording");
+                            should_start_new_recording = true;
+                            made_shutdown_status_recording = true;
+                            making_status_recording = true;
+                        }
+                    }
+                }
+
+                // TODO: Do we want to have a max recording length timeout, or just pause recording if a subject stays in the frame
+                //  but doesn't move for a while?  Maybe if a subject is stationary for 1 minute, we pause, and only resume
+                //  recording if there is new movement, or it moves again?  If the night ends in this way, we end the recording then.
+                //  In continuous recording mode we'd have a really long timeout perhaps?  Needs more thought.
+                //  Also consider the case where we have a mask region to ignore or pay attention to.
+                let should_end_current_recording = cptv_stream.is_some()
+                    && ((this_frame_motion_detection.triggering_ended()
+                        || frames_written >= max_length_in_frames
+                        || flash_storage.is_nearly_full())
+                        || (making_status_recording
+                            && (frames_written >= status_recording_length_in_frames
+                                || flash_storage.is_nearly_full())));
+
+                motion_detection = Some(this_frame_motion_detection);
+
+                if should_start_new_recording {
+                    // NOTE: Rather than trying to get the RTC time right as we're trying to start a CPTV file,
+                    //  we just get it periodically, and then each frame add to it, then re-sync it
+                    // (when we do our once a minute checks) when we're *not* trying to start a recording.
+                    let is_inside_recording_window = if !dev_mode {
+                        device_config.time_is_in_recording_window(
+                            &synced_date_time.date_time_utc,
+                            &Some(current_recording_window),
+                        )
+                    } else {
+                        // Recording window is 5 minutes from startup time in dev mode.
+                        synced_date_time.date_time_utc
+                            < startup_date_time_utc + chrono::Duration::minutes(5)
+                    };
+                    should_start_new_recording =
+                        should_start_new_recording && is_inside_recording_window;
+                    if is_inside_recording_window {
+                        // Should we make a 2-second status recording at the beginning or end of the window?
+                        if !made_startup_status_recording && !motion_detection_triggered_this_frame
+                        {
+                            warn!("Make startup status recording");
+                            made_startup_status_recording = true;
+                            making_status_recording = true;
+                        } else {
+                            // We're making a shutdown recording.
+                        }
+                    } else if made_startup_status_recording {
+                        info!("Would start recording, but outside recording window");
+                    }
+                } else if !should_end_current_recording {
+                    if let Some(cptv_stream) = &mut cptv_stream {
+                        if let Some(prev_telemetry) = &prev_frame_telemetry {
+                            if frame_telemetry.frame_num == prev_telemetry.frame_num {
+                                warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                            }
+                            if frame_telemetry.msec_on == prev_telemetry.msec_on {
+                                warn!(
+                                    "Duplicate frame {} (same time {})",
+                                    frame_telemetry.frame_num, frame_telemetry.msec_on
+                                );
+                            }
+                        }
+                        cptv_stream.push_frame(
+                            current_raw_frame,
+                            &mut prev_frame,
+                            &frame_telemetry,
+                            &mut flash_storage,
+                        );
+                        frames_written += 1;
+                    }
+                } else {
+                    // Finalise on a different frame period to writing out the prev/last frame,
+                    // to give more breathing room.
+                    if let Some(cptv_stream) = &mut cptv_stream {
+                        let cptv_start_block_index = cptv_stream.starting_block_index as isize;
+
+                        if !making_status_recording
+                            && motion_detection.as_ref().unwrap().was_false_positive()
+                        // && cptv_stream.num_frames <= 100
+                        {
+                            info!(
+                                "Discarding as a false-positive {}:{} ",
+                                cptv_start_block_index, flash_storage.last_used_block_index
+                            );
+                            let _ = flash_storage.erase_last_file();
+                            event_logger.log_event(
+                                LoggerEvent::new(
+                                    LoggerEventKind::WouldDiscardAsFalsePositive,
+                                    synced_date_time.get_timestamp_micros(&timer),
+                                ),
+                                &mut flash_storage,
+                            );
+                        } else {
+                            cptv_stream.finalise(&mut flash_storage);
+                            error!(
+                                "Ending current recording start block {} end block{}",
+                                cptv_start_block_index, flash_storage.last_used_block_index
+                            );
+                            prev_frame_2.fill(0);
+                            event_logger.log_event(
+                                LoggerEvent::new(
+                                    LoggerEventKind::EndedRecording,
+                                    synced_date_time.get_timestamp_micros(&timer),
+                                ),
+                                &mut flash_storage,
                             );
                         }
+
+                        ended_recording = true;
+                        let _ = shared_i2c
+                            .set_recording_flag(&mut delay, false)
+                            .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+
+                        if making_status_recording {
+                            making_status_recording = false;
+                        }
                     }
-                    cptv_stream.push_frame(
-                        current_raw_frame,
-                        &mut prev_frame,
-                        &frame_telemetry,
-                        &mut flash_storage,
-                    );
-                    frames_written += 1;
+                    cptv_stream = None;
+                    frames_written = 0;
+                    motion_detection = None;
                 }
             } else {
-                // Finalise on a different frame period to writing out the prev/last frame,
-                // to give more breathing room.
-                if let Some(cptv_stream) = &mut cptv_stream {
-                    let cptv_start_block_index = cptv_stream.starting_block_index as isize;
-
-                    if !making_status_recording
-                        && motion_detection.as_ref().unwrap().was_false_positive()
-                    // && cptv_stream.num_frames <= 100
-                    {
-                        info!(
-                            "Discarding as a false-positive {}:{} ",
-                            cptv_start_block_index, flash_storage.last_used_block_index
-                        );
-                        let _ = flash_storage.erase_last_file();
-                        event_logger.log_event(
-                            LoggerEvent::new(
-                                LoggerEventKind::WouldDiscardAsFalsePositive,
-                                synced_date_time.get_timestamp_micros(&timer),
-                            ),
-                            &mut flash_storage,
-                        );
-                    } else {
-                        cptv_stream.finalise(&mut flash_storage);
-                        error!(
-                            "Ending current recording start block {} end block{}",
-                            cptv_start_block_index, flash_storage.last_used_block_index
-                        );
-                        prev_frame_2.fill(0);
-                        event_logger.log_event(
-                            LoggerEvent::new(
-                                LoggerEventKind::EndedRecording,
-                                synced_date_time.get_timestamp_micros(&timer),
-                            ),
-                            &mut flash_storage,
-                        );
-                    }
-
-                    ended_recording = true;
-                    let _ = shared_i2c
-                        .set_recording_flag(&mut delay, false)
-                        .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
-
-                    if making_status_recording {
-                        making_status_recording = false;
-                    }
-                }
-                cptv_stream = None;
-                frames_written = 0;
-                motion_detection = None;
+                should_start_new_recording = false;
             }
 
             //if starting a new recording will handle this differently below
@@ -976,98 +980,93 @@ pub fn core_1_task(
         }
         let frame_transfer_end = timer.get_counter();
         if should_start_new_recording {
-            //Since we write 2 frames every new recording, this can take too long and we drop a frame
-            //so cache the current frame and tell core0 to keep getting lepton frames, this will spread the initial
-            //load over the first 2 frames.
+            {
+                //Since we write 2 frames every new recording, this can take too long and we drop a frame
+                //so cache the current frame and tell core0 to keep getting lepton frames, this will spread the initial
+                //load over the first 2 frames.
 
-            warn!("Setting recording flag on attiny");
-            // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
-            //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
-            //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
-            let _ = shared_i2c
-                .set_recording_flag(&mut delay, true)
-                .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+                warn!("Setting recording flag on attiny");
+                // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
+                //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
+                //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
+                let _ = shared_i2c
+                    .set_recording_flag(&mut delay, true)
+                    .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
-            error!("Starting new recording, {:?}", &frame_telemetry);
-            // TODO: Pass in various cptv header info bits.
-            let mut cptv_streamer = CptvStream::new(
-                synced_date_time.get_timestamp_micros(&timer), // Microseconds
-                lepton_version,
-                lepton_serial.clone(),
-                lepton_firmware_version.clone(),
-                &device_config,
-                &mut flash_storage,
-                &huffman_table,
-                &crc_table,
-                making_status_recording,
-            );
-            cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-            cptv_streamer.push_frame(
-                &prev_frame,
-                &mut prev_frame_2, // This should be zeroed out before starting a new clip.
-                &prev_frame_telemetry.as_ref().unwrap(),
-                &mut flash_storage,
-            );
+                error!("Starting new recording, {:?}", &frame_telemetry);
+                // TODO: Pass in various cptv header info bits.
+                let mut cptv_streamer = CptvStream::new(
+                    synced_date_time.get_timestamp_micros(&timer), // Microseconds
+                    lepton_version,
+                    lepton_serial.clone(),
+                    lepton_firmware_version.clone(),
+                    &device_config,
+                    &mut flash_storage,
+                    &huffman_table,
+                    &crc_table,
+                    making_status_recording,
+                );
+                cptv_streamer.init_gzip_stream(&mut flash_storage, false);
+                cptv_streamer.push_frame(
+                    &prev_frame,
+                    &mut prev_frame_2, // This should be zeroed out before starting a new clip.
+                    &prev_frame_telemetry.as_ref().unwrap(),
+                    &mut flash_storage,
+                );
+                frames_written += 1;
 
-            // prev_frame.copy_from_slice(&prev_frame_2);
-            frames_written += 1;
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::StartedRecording,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
 
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::StartedRecording,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                &mut flash_storage,
-            );
+                cptv_stream = Some(cptv_streamer);
+                // let mut prev_frame_2 = prev_frame_2;
+                prev_frame_2[FRAME_WIDTH * FRAME_HEIGHT] = 0;
+                prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
+                    &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
+                }); // Telemetry skipped
 
-            cptv_stream = Some(cptv_streamer);
+                // release the buffer before writing the frame so core0 can continue working
+                critical_section::with(|cs| {
+                    // Now we just swap the buffers?
+                    let buffer = if selected_frame_buffer == 0 {
+                        frame_buffer_local
+                    } else {
+                        frame_buffer_local_2
+                    };
+                    *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+                });
+                sio.fifo.write(Core1Task::StartRecording.into());
+                info!("Sent start recording message to core0");
+                sio.fifo.write(Core1Task::FrameProcessingComplete.into());
 
-            let mut current_frame = prev_frame_2;
-            current_frame[FRAME_WIDTH * FRAME_HEIGHT] = 0;
-            current_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
-                &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
-            }); // Telemetry skipped
-
-            //release the buffer before writing the frame so core0 can continue working
-            critical_section::with(|cs| {
-                // Now we just swap the buffers?
-                let buffer = if selected_frame_buffer == 0 {
-                    frame_buffer_local
-                } else {
-                    frame_buffer_local_2
-                };
-                *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
-            });
-            sio.fifo.write(Core1Task::StartRecording.into());
-            info!("Sent start recording message to core0");
-            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
-
-            if let Some(prev_telemetry) = &prev_frame_telemetry {
-                if frame_telemetry.frame_num == prev_telemetry.frame_num {
-                    warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                if let Some(prev_telemetry) = &prev_frame_telemetry {
+                    if frame_telemetry.frame_num == prev_telemetry.frame_num {
+                        warn!("Duplicate frame {}", frame_telemetry.frame_num);
+                    }
+                    if frame_telemetry.msec_on == prev_telemetry.msec_on {
+                        warn!(
+                            "Duplicate frame {} (same time {})",
+                            frame_telemetry.frame_num, frame_telemetry.msec_on
+                        );
+                    }
                 }
-                if frame_telemetry.msec_on == prev_telemetry.msec_on {
-                    warn!(
-                        "Duplicate frame {} (same time {})",
-                        frame_telemetry.frame_num, frame_telemetry.msec_on
-                    );
-                }
+                //now write the frame
+                cptv_stream.as_mut().unwrap().push_frame(
+                    &mut prev_frame_2,
+                    &mut prev_frame,
+                    &frame_telemetry,
+                    &mut flash_storage,
+                );
+                frames_written += 1;
+                prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
+                    .copy_from_slice(&prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT]);
+                info!("FINISHED START {}", frame_telemetry.frame_num);
             }
-            info!(
-                "Doing current frame {} and prev {}",
-                current_frame[0..10],
-                prev_frame[0..10]
-            );
-            //now write the frame
-            cptv_stream.as_mut().unwrap().push_frame(
-                &mut current_frame,
-                &mut prev_frame,
-                &frame_telemetry,
-                &mut flash_storage,
-            );
-            frames_written += 1;
-            prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
-                .copy_from_slice(&current_frame[0..FRAME_WIDTH * FRAME_HEIGHT]);
         } else {
             critical_section::with(|cs| {
                 // Now we just swap the buffers?
