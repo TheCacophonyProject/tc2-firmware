@@ -1024,7 +1024,6 @@ pub fn core_1_task(
                 );
 
                 cptv_stream = Some(cptv_streamer);
-                // let mut prev_frame_2 = prev_frame_2;
                 prev_frame_2[FRAME_WIDTH * FRAME_HEIGHT] = 0;
                 prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
                     &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
