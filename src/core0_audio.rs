@@ -696,7 +696,13 @@ pub fn schedule_audio_rec(
         error!("Failed to disable alarm");
         return Err(());
     }
-    let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
+    let seed;
+    if device_config.config().audio_seed == 0 {
+        seed = synced_date_time.date_time_utc.timestamp() as u64
+    } else {
+        seed = device_config.config().audio_seed as u64;
+    }
+    let mut rng = RNG::<WyRand, u16>::new(seed);
     let r = rng.generate();
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;

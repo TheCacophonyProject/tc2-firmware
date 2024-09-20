@@ -44,6 +44,7 @@ pub struct DeviceConfigInner {
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
     pub audio_mode: AudioMode,
+    pub audio_seed: i32,
 }
 
 impl DeviceConfigInner {
@@ -260,6 +261,7 @@ impl Default for DeviceConfig {
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
                 audio_mode: AudioMode::Disabled,
+                audio_seed: 0,
             },
             motion_detection_mask: DetectionMask::new(None),
             cursor_position: 0,
@@ -290,6 +292,7 @@ impl DeviceConfig {
         let audio_mode = AudioMode::try_from(cursor.read_u8())
             .ok()
             .unwrap_or(AudioMode::Disabled);
+        let audio_seed = cursor.read_i32();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -329,6 +332,7 @@ impl DeviceConfig {
                 is_continuous_recorder,
                 use_low_power_mode,
                 audio_mode,
+                audio_seed,
             },
             cursor.position(),
         ))
