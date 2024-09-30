@@ -1,0 +1,46 @@
+name: Rust CI and release
+
+on:
+  push:
+    branches: 
+      - '**'
+    tags:
+      - '*'
+  pull_request:
+    branches: 
+      - '**'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Add target for cross-compilation
+        run: rustup target add thumbv6m-none-eabi
+
+      - name: Install flip-link
+        run: cargo install flip-link
+
+      - name: Build the project
+        run: cargo build --release --target=thumbv6m-none-eabi
+
+      - name: Generate SHA256 checksum
+        run: sha256sum ./target/thumbv6m-none-eabi/release/tc2-firmware | cut -d ' ' -f 1 > ./target/thumbv6m-none-eabi/release/tc2-firmware.sha256
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: |
+            ./target/thumbv6m-none-eabi/release/tc2-firmware
+            ./target/thumbv6m-none-eabi/release/tc2-firmware.sha256
+          allowUpdates: true
