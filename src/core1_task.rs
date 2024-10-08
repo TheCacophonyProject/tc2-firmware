@@ -650,6 +650,8 @@ pub fn core_1_task(
     let mut making_status_recording = false;
     let mut high_power_recording = false;
     let mut last_rec_check = 0;
+
+    let mut lost_frames = 0;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     info!(
@@ -895,6 +897,12 @@ pub fn core_1_task(
                                     frame_telemetry.frame_num, frame_telemetry.msec_on
                                 );
                             }
+                            let frame_diff =
+                                frame_telemetry.frame_num - prev_telemetry.frame_num - 1;
+                            //over a 100 is probably corrupt telemtry
+                            if frame_diff > 0 && frame_diff < 100 {
+                                lost_frames += frame_diff;
+                            }
                         }
                         cptv_stream.push_frame(
                             current_raw_frame,
@@ -940,6 +948,16 @@ pub fn core_1_task(
                                 ),
                                 &mut flash_storage,
                             );
+
+                            if lost_frames > 0 {
+                                event_logger.log_event(
+                                    LoggerEvent::new(
+                                        LoggerEventKind::LostFrames(lost_frames as u64),
+                                        synced_date_time.get_timestamp_micros(&timer),
+                                    ),
+                                    &mut flash_storage,
+                                );
+                            }
                         }
 
                         ended_recording = true;
@@ -982,6 +1000,7 @@ pub fn core_1_task(
         let frame_transfer_end = timer.get_counter();
         if should_start_new_recording {
             {
+                lost_frames = 0;
                 //Since we write 2 frames every new recording, this can take too long and we drop a frame
                 //so cache the current frame and tell core0 to keep getting lepton frames, this will spread the initial
                 //load over the first 2 frames.
@@ -1053,6 +1072,11 @@ pub fn core_1_task(
                             "Duplicate frame {} (same time {})",
                             frame_telemetry.frame_num, frame_telemetry.msec_on
                         );
+                    }
+                    let frame_diff = frame_telemetry.frame_num - prev_telemetry.frame_num - 1;
+                    //over a 100 is probably corrupt telemtry
+                    if frame_diff > 0 && frame_diff < 100 {
+                        lost_frames += frame_diff;
                     }
                 }
                 //now write the frame
