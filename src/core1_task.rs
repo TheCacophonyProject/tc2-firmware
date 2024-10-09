@@ -436,7 +436,6 @@ pub fn core_1_task(
     }
 
     let record_audio: bool;
-    let mut last_rec_check = 0;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
 
