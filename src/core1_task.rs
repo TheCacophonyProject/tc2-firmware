@@ -580,6 +580,16 @@ pub fn core_1_task(
     };
 
     let is_cptv = flash_storage.has_cptv_files(false);
+    let mut made_startup_status_recording = is_cptv && has_files_to_offload;
+
+    let current_recording_window =
+        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
+
+    let mut made_shutdown_status_recording = !device_config.time_is_in_recording_window(
+        &synced_date_time.date_time_utc,
+        &Some(current_recording_window),
+    );
+
     info!(
         "Has cptv files? {} has files? {}",
         is_cptv,
@@ -640,24 +650,13 @@ pub fn core_1_task(
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
-    let current_recording_window =
-        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
     let mut logged_flash_storage_nearly_full = false;
     // NOTE: If there are already recordings on the flash memory,
     //  assume we've already made the startup status recording during this recording window.
-    let mut made_startup_status_recording =
-        (is_cptv && has_files_to_offload) || (is_cptv && did_offload_files);
 
-    //there is a small posibility that we miss shutdown status recordings if the flash was full and while
-    //we are offloading it goes outside of the recording window
-    //we could check last recording is a status to counter this
-    let mut made_shutdown_status_recording = !device_config.time_is_in_recording_window(
-        &synced_date_time.date_time_utc,
-        &Some(current_recording_window),
-    );
     let mut making_status_recording = false;
     let mut status_recording_pending = if !made_startup_status_recording {
         Some(StatusRecording::StartupStatus)
