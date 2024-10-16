@@ -36,6 +36,7 @@ pub mod tc2_agent_state {
     pub const TAKE_AUDIO: u8 = 1 << 4;
     pub const OFFLOAD: u8 = 1 << 5;
     pub const THERMAL_MODE: u8 = 1 << 6;
+    pub const LONG_AUDIO_RECORDING: u8 = 1 << 7;
 }
 
 #[repr(u8)]
@@ -70,6 +71,13 @@ impl From<u8> for CameraState {
             }
         }
     }
+}
+
+#[repr(u8)]
+pub enum RecordingType {
+    TestRecording = 0,
+    LongRecording = 1,
+    ScheduledRecording = 2,
 }
 
 #[repr(u8)]
@@ -475,14 +483,26 @@ impl SharedI2C {
         self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)
     }
 
-    pub fn tc2_agent_requested_test_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+    pub fn tc2_agent_requested_audio_recording(
+        &mut self,
+        delay: &mut Delay,
+    ) -> Result<Option<RecordingType>, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let rec_state: bool = (state & tc2_agent_state::READY
-                    == state & tc2_agent_state::READY)
-                    && (state & tc2_agent_state::TEST_AUDIO_RECORDING
-                        == tc2_agent_state::TEST_AUDIO_RECORDING);
-                Ok(rec_state)
+                let rec_state: bool =
+                    state & tc2_agent_state::READY == state & tc2_agent_state::READY;
+                if rec_state {
+                    if state & tc2_agent_state::TEST_AUDIO_RECORDING
+                        == tc2_agent_state::TEST_AUDIO_RECORDING
+                    {
+                        return Ok(Some(RecordingType::TestRecording));
+                    } else if state & tc2_agent_state::LONG_AUDIO_RECORDING
+                        == tc2_agent_state::LONG_AUDIO_RECORDING
+                    {
+                        return Ok(Some(RecordingType::LongRecording));
+                    }
+                }
+                Ok(None)
             }
             Err(e) => Err(e),
         }
@@ -514,11 +534,15 @@ impl SharedI2C {
         &mut self,
         delay: &mut Delay,
         clear_flag: u8,
-        set_flag: u8,
+        set_flag: Option<u8>,
     ) -> Result<(), Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let val = (state & !clear_flag) | set_flag;
+                let mut val = state & !clear_flag;
+                if let Some(flag) = set_flag {
+                    val = val | flag;
+                }
+
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
                     Ok(_) => Ok(()),
                     Err(x) => Err(x),

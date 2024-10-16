@@ -219,7 +219,8 @@ fn main() -> ! {
                         let in_window = config.time_is_in_recording_window(&date_time, &None);
                         if in_window {
                             is_audio = (state
-                                & (tc2_agent_state::TAKE_AUDIO
+                                & (tc2_agent_state::LONG_AUDIO_RECORDING
+                                    | tc2_agent_state::TAKE_AUDIO
                                     | tc2_agent_state::TEST_AUDIO_RECORDING))
                                 > 0;
                             if is_audio {
