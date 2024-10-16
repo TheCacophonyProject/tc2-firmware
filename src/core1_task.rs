@@ -57,6 +57,7 @@ pub enum Core1Task {
     HighPowerMode = 0xeb,
     ReceiveFrameWithPendingFFC = 0xac,
 }
+#[derive(Format)]
 
 enum StatusRecording {
     StartupStatus = 0,
@@ -845,7 +846,10 @@ pub fn core_1_task(
                     && motion_detection_triggered_this_frame
                     && cptv_stream.is_none(); // wait until lepton stabilises before recording
 
-                if made_startup_status_recording && !made_shutdown_status_recording {
+                if made_startup_status_recording
+                    && !made_shutdown_status_recording
+                    && status_recording_pending.is_none()
+                {
                     if dev_mode {
                         if synced_date_time.date_time_utc + Duration::minutes(1)
                             > startup_date_time_utc + Duration::minutes(4)
@@ -919,6 +923,9 @@ pub fn core_1_task(
                         //force shutdown status recording even outside of window
                     } else {
                         making_status_recording = false;
+                    }
+                    if making_status_recording {
+                        info!("Making status recording {}", status_recording_pending);
                     }
                 } else if !should_end_current_recording {
                     if let Some(cptv_stream) = &mut cptv_stream {
