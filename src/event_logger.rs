@@ -52,6 +52,7 @@ pub enum LoggerEventKind {
     LogOffloadFailed,
     OffloadedLogs,
     CorruptFile,
+    LostFrames(u64),
 }
 
 impl Into<u16> for LoggerEventKind {
@@ -88,6 +89,7 @@ impl Into<u16> for LoggerEventKind {
             OffloadedLogs => 28,
             LogOffloadFailed => 29,
             CorruptFile => 30,
+            LostFrames(_) => 31,
         }
     }
 }
@@ -128,6 +130,7 @@ impl TryFrom<u16> for LoggerEventKind {
             28 => Ok(OffloadedLogs),
             29 => Ok(LogOffloadFailed),
             30 => Ok(CorruptFile),
+            31 => Ok(LostFrames(0)),
             _ => Err(()),
         }
     }
@@ -324,6 +327,8 @@ impl EventLogger {
                     LittleEndian::write_u64(&mut event_data[10..18], alarm_time);
                 } else if let LoggerEventKind::ToldRpiToWake(reason) = event.event {
                     LittleEndian::write_u64(&mut event_data[10..18], reason as u64);
+                } else if let LoggerEventKind::LostFrames(number_frames) = event.event {
+                    LittleEndian::write_u64(&mut event_data[10..18], number_frames as u64);
                 }
                 // Write to the end of the flash storage.
                 // We can do up to 4 partial page writes per page, so in a block of 64 pages we get 256 entries.
