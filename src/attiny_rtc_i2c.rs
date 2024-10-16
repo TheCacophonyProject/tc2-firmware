@@ -74,10 +74,13 @@ impl From<u8> for CameraState {
 }
 
 #[repr(u8)]
+#[derive(Format)]
+
 pub enum RecordingType {
     TestRecording = 0,
     LongRecording = 1,
     ScheduledRecording = 2,
+    ThermalRequestedScheduledRecording = 3,
 }
 
 #[repr(u8)]
@@ -500,6 +503,8 @@ impl SharedI2C {
                         == tc2_agent_state::LONG_AUDIO_RECORDING
                     {
                         return Ok(Some(RecordingType::LongRecording));
+                    } else if state & tc2_agent_state::TAKE_AUDIO == tc2_agent_state::TAKE_AUDIO {
+                        return Ok(Some(RecordingType::ThermalRequestedScheduledRecording));
                     }
                 }
                 Ok(None)
@@ -568,12 +573,6 @@ impl SharedI2C {
         self.tc2_agent_write_flag(delay, tc2_agent_state::THERMAL_MODE, false)
     }
 
-    pub fn tc2_agent_requested_audio_rec(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok((state & tc2_agent_state::TAKE_AUDIO) == tc2_agent_state::TAKE_AUDIO),
-            Err(e) => Err(e),
-        }
-    }
     pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::TAKE_AUDIO, true)
     }

@@ -171,7 +171,8 @@ pub fn audio_task(
 
     let mut duration = 60;
     let mut recording_type = None;
-    let mut recording_requested = false;
+    let mut user_recording_requested = false;
+    let mut thermal_requested_audio = false;
     if alarm_triggered {
         recording_type = Some(RecordingType::ScheduledRecording);
     } else {
@@ -182,11 +183,15 @@ pub fn audio_task(
                 match rec_type {
                     RecordingType::LongRecording => {
                         duration = 60 * 5;
-                        recording_requested = true;
+                        user_recording_requested = true;
                     }
                     RecordingType::TestRecording => {
                         duration = 10;
-                        recording_requested = true;
+                        user_recording_requested = true;
+                    }
+                    RecordingType::ThermalRequestedScheduledRecording => {
+                        duration = 60;
+                        thermal_requested_audio = true;
                     }
                     _ => {}
                 }
@@ -194,7 +199,6 @@ pub fn audio_task(
         }
     }
 
-    let mut thermal_requested_audio = false;
     let mut reschedule = false;
     let mut alarm_date_time: Option<NaiveDateTime> = None;
 
@@ -224,9 +228,10 @@ pub fn audio_task(
         );
     }
 
-    if !recording_requested {
+    if !user_recording_requested {
         if device_config_was_updated {
             let reboot;
+
             if device_config.config().is_audio_device() && !thermal_requested_audio {
                 if let AudioMode::AudioOnly = device_config.config().audio_mode {
                     reboot = false;
@@ -369,18 +374,9 @@ pub fn audio_task(
             }
         }
 
-        if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-            thermal_requested_audio = take_rec;
-            if thermal_requested_audio {
-                recording_type = Some(RecordingType::ScheduledRecording);
-            }
-        } else {
-            thermal_requested_audio = false;
-        }
-
         info!(
             "Alarm triggered {} scheduled {} thermal requested {}",
-            alarm_triggered, scheduled, thermal_requested_audio
+            alarm_triggered, scheduled, recording_type
         );
 
         if recording_type.is_none() && scheduled {
@@ -516,7 +512,6 @@ pub fn audio_task(
                         shared_i2c.clear_alarm(&mut delay);
                         reschedule = true;
                         clear_audio_alarm(&mut flash_storage);
-
                         if thermal_requested_audio {
                             //if audio requested from thermal, the alarm will be re scheduled there
                             let _ = shared_i2c.tc2_agent_clear_and_set_flag(
