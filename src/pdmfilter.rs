@@ -1,7 +1,7 @@
 const PDM_DECIMATION: u8 = 64;
 const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
-const FILTER_GAIN: u8 = 64;
+const FILTER_GAIN: u8 = 16;
 const MAX_VOLUME: u8 = 64;
 
 //this is ported from
