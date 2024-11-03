@@ -1,7 +1,7 @@
 const PDM_DECIMATION: u8 = 64;
 const PI: f32 = 3.14159;
 const SINCN: u8 = 3;
-const FILTER_GAIN: u8 = 64;
+const FILTER_GAIN: u8 = 16;
 const MAX_VOLUME: u8 = 64;
 
 //this is ported from
@@ -40,6 +40,8 @@ impl PDMFilter {
         if lp_hz != 0.0 {
             self.lp_alpha = (lp_hz * 256.0 / (lp_hz + self.fs as f32 / (2.0 * PI))) as u32;
         }
+
+        //high pass filter does not seem to be doing anything
         if hp_hz != 0.0 {
             self.hp_alpha = (self.fs as f32 * 256.0 / (2.0 * PI * hp_hz + self.fs as f32)) as u32;
         }
@@ -55,13 +57,16 @@ impl PDMFilter {
             PDM_DECIMATION as usize,
             sinc_out.as_mut(),
         );
+
+        // https://s3.amazonaws.com/embeddedrelated/user/114298/lti%20filters_3552.pdf
+        //adding 0x00008000 to sum, to undo filter noise bias
         let sum = convolve(
             &sinc_out,
             PDM_DECIMATION as usize * 2 - 1,
             &sinc,
             PDM_DECIMATION as usize,
             sinc2[1..].as_mut(),
-        );
+        ) + 0x00008000;
 
         self.sub_const = sum >> 1;
         self.div_const = self.sub_const * MAX_VOLUME as u32 / 32768 / FILTER_GAIN as u32;

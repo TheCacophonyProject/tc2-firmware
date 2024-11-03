@@ -1,4 +1,4 @@
-use crate::attiny_rtc_i2c::{tc2_agent_state, I2CConfig, SharedI2C};
+use crate::attiny_rtc_i2c::{tc2_agent_state, I2CConfig, RecordingType, SharedI2C};
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
@@ -169,12 +169,36 @@ pub fn audio_task(
         );
     }
 
-    let mut take_test_rec = false;
-    if let Ok(test_rec) = shared_i2c.tc2_agent_requested_test_audio_rec(&mut delay) {
-        take_test_rec = test_rec;
-    }
-    let mut do_recording = alarm_triggered;
+    let mut duration = 60;
+    let mut recording_type = None;
+    let mut user_recording_requested = false;
     let mut thermal_requested_audio = false;
+    if alarm_triggered {
+        recording_type = Some(RecordingType::ScheduledRecording);
+    } else {
+        if let Ok(audio_rec) = shared_i2c.tc2_agent_requested_audio_recording(&mut delay) {
+            recording_type = audio_rec;
+
+            if let Some(rec_type) = recording_type.as_mut() {
+                match rec_type {
+                    RecordingType::LongRecording => {
+                        duration = 60 * 5;
+                        user_recording_requested = true;
+                    }
+                    RecordingType::TestRecording => {
+                        duration = 10;
+                        user_recording_requested = true;
+                    }
+                    RecordingType::ThermalRequestedScheduledRecording => {
+                        duration = 60;
+                        thermal_requested_audio = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let mut reschedule = false;
     let mut alarm_date_time: Option<NaiveDateTime> = None;
 
@@ -204,9 +228,10 @@ pub fn audio_task(
         );
     }
 
-    if !take_test_rec {
+    if !user_recording_requested {
         if device_config_was_updated {
             let reboot;
+
             if device_config.config().is_audio_device() && !thermal_requested_audio {
                 if let AudioMode::AudioOnly = device_config.config().audio_mode {
                     reboot = false;
@@ -349,21 +374,12 @@ pub fn audio_task(
             }
         }
 
-        if let Ok(take_rec) = shared_i2c.tc2_agent_requested_audio_rec(&mut delay) {
-            thermal_requested_audio = take_rec;
-            if thermal_requested_audio {
-                do_recording = true;
-            }
-        } else {
-            thermal_requested_audio = false;
-        }
-
         info!(
             "Alarm triggered {} scheduled {} thermal requested {}",
-            alarm_triggered, scheduled, thermal_requested_audio
+            alarm_triggered, scheduled, recording_type
         );
 
-        if !do_recording && scheduled {
+        if recording_type.is_none() && scheduled {
             // check we haven't missed the alarm somehow
             if let Some(alarm) = alarm_date_time {
                 let synced = synced_date_time.get_adjusted_dt(timer);
@@ -385,12 +401,12 @@ pub fn audio_task(
                     ),
                     &mut flash_storage,
                 );
-                    do_recording = true;
+                    recording_type = Some(RecordingType::ScheduledRecording);
                 }
             }
         }
     }
-    if do_recording || take_test_rec {
+    if recording_type.is_some() {
         watchdog.feed();
         //should of already offloaded but extra safety check
         if !flash_storage.is_too_full_for_audio() {
@@ -408,10 +424,7 @@ pub fn audio_task(
                 pio1,
                 sm1,
             );
-            let mut duration = 60;
-            if !do_recording && take_test_rec {
-                duration = 10;
-            }
+
             event_logger.log_event(
                 LoggerEvent::new(
                     LoggerEventKind::StartedAudioRecording,
@@ -454,47 +467,61 @@ pub fn audio_task(
                     ),
                     &mut flash_storage,
                 );
-                if take_test_rec {
-                    info!("taken test recoridng clearing status");
-                    watchdog.feed();
-                    let _ = shared_i2c.tc2_agent_clear_and_set_flag(
-                        &mut delay,
-                        tc2_agent_state::TEST_AUDIO_RECORDING,
-                        tc2_agent_state::THERMAL_MODE,
-                    );
-
-                    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-                    offload_flash_storage_and_events(
-                        &mut flash_storage,
-                        &mut pi_spi,
-                        &mut peripherals.RESETS,
-                        &mut peripherals.DMA,
-                        clock_freq,
-                        &mut shared_i2c,
-                        &mut delay,
-                        timer,
-                        &mut event_logger,
-                        &synced_date_time,
-                        Some(watchdog),
-                        true,
-                    );
-
-                    restart(watchdog);
-                } else {
-                    shared_i2c.clear_alarm(&mut delay);
-                    reschedule = true;
-                    clear_audio_alarm(&mut flash_storage);
-
-                    if thermal_requested_audio {
-                        //if audio requested from thermal, the alarm will be re scheduled there
+                match recording_type.as_mut().unwrap() {
+                    RecordingType::LongRecording | RecordingType::TestRecording => {
+                        info!("taken test recoridng clearing status");
+                        watchdog.feed();
                         let _ = shared_i2c.tc2_agent_clear_and_set_flag(
                             &mut delay,
-                            tc2_agent_state::TAKE_AUDIO,
-                            tc2_agent_state::THERMAL_MODE,
+                            match recording_type.unwrap() {
+                                RecordingType::LongRecording => {
+                                    tc2_agent_state::LONG_AUDIO_RECORDING
+                                }
+                                RecordingType::TestRecording => {
+                                    tc2_agent_state::TEST_AUDIO_RECORDING
+                                }
+                                _ => 0,
+                            },
+                            if device_config.config().audio_mode != AudioMode::AudioOnly {
+                                Some(tc2_agent_state::THERMAL_MODE)
+                            } else {
+                                None
+                            },
                         );
-                        info!("Audio taken in thermal window clearing flag");
+
+                        let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+                        offload_flash_storage_and_events(
+                            &mut flash_storage,
+                            &mut pi_spi,
+                            &mut peripherals.RESETS,
+                            &mut peripherals.DMA,
+                            clock_freq,
+                            &mut shared_i2c,
+                            &mut delay,
+                            timer,
+                            &mut event_logger,
+                            &synced_date_time,
+                            Some(watchdog),
+                            true,
+                        );
+
                         restart(watchdog);
+                    }
+                    _ => {
+                        shared_i2c.clear_alarm(&mut delay);
+                        reschedule = true;
+                        clear_audio_alarm(&mut flash_storage);
+                        if thermal_requested_audio {
+                            //if audio requested from thermal, the alarm will be re scheduled there
+                            let _ = shared_i2c.tc2_agent_clear_and_set_flag(
+                                &mut delay,
+                                tc2_agent_state::TAKE_AUDIO,
+                                Some(tc2_agent_state::THERMAL_MODE),
+                            );
+                            info!("Audio taken in thermal window clearing flag");
+                            restart(watchdog);
+                        }
                     }
                 }
             }
@@ -696,7 +723,12 @@ pub fn schedule_audio_rec(
         error!("Failed to disable alarm");
         return Err(());
     }
-    let mut rng = RNG::<WyRand, u16>::new(synced_date_time.date_time_utc.timestamp() as u64);
+    let seed = if device_config.config().audio_seed == 0 {
+        synced_date_time.date_time_utc.timestamp() as u64
+    } else {
+        device_config.config().audio_seed as u64
+    };
+    let mut rng = RNG::<WyRand, u16>::new(seed);
     let r = rng.generate();
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;
