@@ -57,6 +57,12 @@ pub enum Core1Task {
     HighPowerMode = 0xeb,
     ReceiveFrameWithPendingFFC = 0xac,
 }
+#[derive(Format)]
+
+enum StatusRecording {
+    StartupStatus = 0,
+    ShutdownStatus = 1,
+}
 
 impl Into<u32> for Core1Task {
     fn into(self) -> u32 {
@@ -574,6 +580,16 @@ pub fn core_1_task(
     };
 
     let is_cptv = flash_storage.has_cptv_files(false);
+    let mut made_startup_status_recording = is_cptv;
+
+    let current_recording_window =
+        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
+
+    let mut made_shutdown_status_recording = !device_config.time_is_in_recording_window(
+        &synced_date_time.date_time_utc,
+        &Some(current_recording_window),
+    );
+
     info!(
         "Has cptv files? {} has files? {}",
         is_cptv,
@@ -634,22 +650,22 @@ pub fn core_1_task(
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
-    let current_recording_window =
-        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
     let mut logged_frame_transfer = false;
     let mut logged_told_rpi_to_sleep = false;
     let mut logged_pi_powered_down = false;
     let mut logged_flash_storage_nearly_full = false;
     // NOTE: If there are already recordings on the flash memory,
     //  assume we've already made the startup status recording during this recording window.
-    let mut made_startup_status_recording =
-        (is_cptv && has_files_to_offload) || (is_cptv && did_offload_files);
 
-    let mut made_shutdown_status_recording = false;
     let mut making_status_recording = false;
+    let mut status_recording_pending = if !made_startup_status_recording {
+        Some(StatusRecording::StartupStatus)
+    } else {
+        None
+    };
+
     let mut high_power_recording = false;
     let mut last_rec_check = 0;
-
     let mut lost_frames = 0;
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
@@ -826,32 +842,35 @@ pub fn core_1_task(
                     this_frame_motion_detection.got_new_trigger();
 
                 should_start_new_recording = !flash_storage.is_too_full_to_start_new_recordings()
-                    && (motion_detection_triggered_this_frame || !made_startup_status_recording)
+                    && motion_detection_triggered_this_frame
                     && cptv_stream.is_none(); // wait until lepton stabilises before recording
 
                 if made_startup_status_recording
                     && !made_shutdown_status_recording
-                    && !motion_detection_triggered_this_frame
-                    && cptv_stream.is_none()
+                    && status_recording_pending.is_none()
                 {
                     if dev_mode {
                         if synced_date_time.date_time_utc + Duration::minutes(1)
                             > startup_date_time_utc + Duration::minutes(4)
                         {
                             warn!("Make shutdown status recording");
-                            should_start_new_recording = true;
-                            made_shutdown_status_recording = true;
-                            making_status_recording = true;
+                            status_recording_pending = Some(StatusRecording::ShutdownStatus);
                         }
                     } else {
                         let (_, window_end) = &current_recording_window;
                         if &(synced_date_time.date_time_utc + Duration::minutes(1)) > window_end {
                             warn!("Make shutdown status recording");
-                            should_start_new_recording = true;
-                            made_shutdown_status_recording = true;
-                            making_status_recording = true;
+                            status_recording_pending = Some(StatusRecording::ShutdownStatus);
                         }
                     }
+                }
+
+                if status_recording_pending.is_some()
+                    && !should_start_new_recording
+                    && cptv_stream.is_none()
+                {
+                    should_start_new_recording = true;
+                    making_status_recording = true;
                 }
 
                 // TODO: Do we want to have a max recording length timeout, or just pause recording if a subject stays in the frame
@@ -888,16 +907,24 @@ pub fn core_1_task(
                         should_start_new_recording && is_inside_recording_window;
                     if is_inside_recording_window {
                         // Should we make a 2-second status recording at the beginning or end of the window?
-                        if !made_startup_status_recording && !motion_detection_triggered_this_frame
-                        {
-                            warn!("Make startup status recording");
-                            made_startup_status_recording = true;
-                            making_status_recording = true;
-                        } else {
-                            // We're making a shutdown recording.
-                        }
-                    } else if made_startup_status_recording {
+                        // if !made_startup_status_recording && !motion_detection_triggered_this_frame
+                        // {
+                        //     warn!("Make startup status recording");
+                        //     made_startup_status_recording = true;
+                        //     making_status_recording = true;
+                        // } else {
+                        //     // We're making a shutdown recording.
+                        // }
+                    } else if !making_status_recording {
                         info!("Would start recording, but outside recording window");
+                    } else if made_startup_status_recording && !made_shutdown_status_recording {
+                        should_start_new_recording = true;
+                        //force shutdown status recording even outside of window
+                    } else {
+                        making_status_recording = false;
+                    }
+                    if making_status_recording {
+                        info!("Making status recording {}", status_recording_pending);
                     }
                 } else if !should_end_current_recording {
                     if let Some(cptv_stream) = &mut cptv_stream {
@@ -975,6 +1002,17 @@ pub fn core_1_task(
 
                         if making_status_recording {
                             making_status_recording = false;
+                            match status_recording_pending.unwrap() {
+                                StatusRecording::StartupStatus => {
+                                    made_startup_status_recording = true;
+                                    //only make a shutdown if we made a startup
+                                    made_shutdown_status_recording = false;
+                                }
+                                StatusRecording::ShutdownStatus => {
+                                    made_shutdown_status_recording = true;
+                                }
+                            }
+                            status_recording_pending = None;
                         }
                     }
                     cptv_stream = None;
@@ -1115,7 +1153,7 @@ pub fn core_1_task(
             info!("Got frame #{}", frame_num);
         }
 
-        let one_min_check_start = timer.get_counter();
+        // let one_min_check_start = timer.get_counter();
         // let expected_rtc_sync_time_us = 3500;
         let expected_rtc_sync_time_us = 4200; //using slower clock speed
 
@@ -1192,7 +1230,10 @@ pub fn core_1_task(
                 );
                 logged_flash_storage_nearly_full = true;
             }
-            if is_outside_recording_window || flash_storage_nearly_full {
+            if ((!device_config.use_low_power_mode() || made_shutdown_status_recording)
+                && is_outside_recording_window)
+                || flash_storage_nearly_full
+            {
                 if flash_storage_nearly_full
                     || (is_outside_recording_window && flash_storage.has_files_to_offload())
                 {
@@ -1364,6 +1405,9 @@ pub fn core_1_task(
                         &mut flash_storage,
                     );
                 }
+            } else if is_outside_recording_window && !made_shutdown_status_recording {
+                making_status_recording = true;
+                //force shutdown recording outside of window
             }
 
             // Make sure timing is as close as possible to the non-sync case
@@ -1404,7 +1448,7 @@ pub fn core_1_task(
             //  about the same
             delay.delay_us(expected_rtc_sync_time_us as u32);
         }
-        let one_min_check_end = timer.get_counter();
+        // let one_min_check_end = timer.get_counter();
 
         // info!(
         //     "Loop took {}µs, 1min check {}µs, frame transfer {}µs",
