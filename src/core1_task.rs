@@ -580,7 +580,7 @@ pub fn core_1_task(
     };
 
     let is_cptv = flash_storage.has_cptv_files(false);
-    let mut made_startup_status_recording = is_cptv && has_files_to_offload;
+    let mut made_startup_status_recording = is_cptv;
 
     let current_recording_window =
         device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
