@@ -6,7 +6,7 @@ use crate::device_config::DeviceConfig;
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::OnboardFlash;
-use crate::rp2040_flash::write_device_config_to_rp2040_flash;
+// use crate::rp2040_flash::write_device_config_to_rp2040_flash;
 use crate::FIRMWARE_VERSION;
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
@@ -407,8 +407,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
-                        let slice_to_write = &new_config_bytes[0..length_used + 2400];
-                        write_device_config_to_rp2040_flash(slice_to_write);
+                        let mut slice_to_write = &mut new_config_bytes[0..length_used + 2400];
+                        if let Some(spi_free) = pi_spi.disable() {
+                            flash_storage.take_spi(spi_free, resets, clock_freq);
+                        }
+                        flash_storage.write_device_config(&mut slice_to_write);
                         new_config.cursor_position += 2400;
                         config_was_updated = true;
                     }

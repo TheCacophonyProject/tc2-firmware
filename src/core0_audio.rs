@@ -86,8 +86,6 @@ pub fn audio_task(
         PullDown,
     >,
 ) -> ! {
-    let mut device_config = DeviceConfig::load_existing_config_from_flash().unwrap();
-
     watchdog.feed();
 
     let core = unsafe { pac::CorePeripherals::steal() };
@@ -137,6 +135,9 @@ pub fn audio_task(
     watchdog.feed();
     flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
     flash_storage.init();
+
+    let mut device_config =
+        DeviceConfig::load_existing_config_from_flash(&mut flash_storage).unwrap();
 
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut delay = Delay::new(core.SYST, clock_freq);

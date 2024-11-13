@@ -110,13 +110,55 @@ impl FrameBuffer {
     }
 }
 
+use crate::onboard_flash::OnboardFlash;
+use rp2040_hal::dma::DMAExt;
+
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let mut config = DeviceConfig::load_existing_inner_config_from_flash();
-    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+    let sio = Sio::new(peripherals.SIO);
+    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+    let pins = rp2040_hal::gpio::Pins::new(
+        peripherals.IO_BANK0,
+        peripherals.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut peripherals.RESETS,
+    );
+    let core1 = Core1Pins {
+        pi_ping: pins.gpio5.into_pull_down_input(),
+
+        pi_miso: pins.gpio15.into_floating_disabled(),
+        pi_mosi: pins.gpio12.into_floating_disabled(),
+        pi_cs: pins.gpio13.into_floating_disabled(),
+        pi_clk: pins.gpio14.into_floating_disabled(),
+
+        fs_cs: pins.gpio9.into_push_pull_output(),
+        fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+        fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+        fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+    };
+
+    // init flash
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
+
+    let mut flash_storage = OnboardFlash::new(
+        core1.fs_cs,
+        core1.fs_mosi,
+        core1.fs_clk,
+        core1.fs_miso,
+        flash_page_buf,
+        flash_page_buf_2,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        true,
+        None,
+    );
+
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -132,6 +174,16 @@ fn main() -> ! {
         clocks.system_clock.freq().to_MHz()
     );
 
+    flash_storage.take_spi(
+        peripherals.SPI1,
+        &mut peripherals.RESETS,
+        system_clock_freq.Hz(),
+    );
+    flash_storage.init();
+
+    let mut config = DeviceConfig::load_existing_inner_config_from_flash(&mut flash_storage);
+    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+
     // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
 
     let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
@@ -145,14 +197,13 @@ fn main() -> ! {
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
-    let sio = Sio::new(peripherals.SIO);
 
-    let pins = rp2040_hal::gpio::Pins::new(
-        peripherals.IO_BANK0,
-        peripherals.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut peripherals.RESETS,
-    );
+    // let pins = rp2040_hal::gpio::Pins::new(
+    //     peripherals.IO_BANK0,
+    //     peripherals.PADS_BANK0,
+    //     sio.gpio_bank0,
+    //     &mut peripherals.RESETS,
+    // );
 
     // Attiny + RTC comms
     let sda_pin = pins.gpio6.into_function::<FunctionI2C>();

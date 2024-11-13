@@ -375,7 +375,7 @@ pub fn core_1_task(
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-    let existing_config = DeviceConfig::load_existing_config_from_flash();
+    let existing_config = DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
 
     if let Some(existing_config) = &existing_config {
         info!("Existing config {:#?}", existing_config.config());

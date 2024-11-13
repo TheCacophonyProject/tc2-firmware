@@ -12,6 +12,8 @@
 // in blocks of a certain size.
 
 use crate::bsp::pac::SPI1;
+use crate::byte_slice_cursor::CursorMut;
+
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
 use crc::{Crc, CRC_16_XMODEM};
@@ -20,6 +22,7 @@ use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
+use embedded_io::Read;
 
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2};
@@ -49,7 +52,8 @@ const FEATURE_CONFIG: u8 = 0xb0;
 const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const FEATURE_DIE_SELECT: u8 = 0xd0;
 
-const NUM_RECORDING_BLOCKS: isize = 2048 - 5; // Leave 1 block between recordings and event logs
+const CONFIG_BLOCKS: isize = 2;
+const NUM_RECORDING_BLOCKS: isize = 2048 - 5 - CONFIG_BLOCKS; // Leave 1 block between recordings and event logs
 
 struct FileAllocation {
     offset: u32,
@@ -311,7 +315,9 @@ pub struct OnboardFlash {
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
     pub payload_buffer: Option<&'static mut [u8; 2115]>,
-    pub file_start_block_index: Option<u16>, //start of currently writing file, or last written
+    pub file_start_block_index: Option<u16>,
+    pub config_block: Option<isize>,
+    pub audio_block: Option<isize>, //start of currently writing file, or last written
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -351,6 +357,8 @@ impl OnboardFlash {
             payload_buffer: payload_buffer,
             file_start_block_index: None,
             previous_file_start_block_index: None,
+            config_block: None,
+            audio_block: None,
         }
     }
     pub fn init(&mut self) {
@@ -367,6 +375,157 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
+    }
+
+    pub fn set_config_block(&mut self) {
+        let mut block_i = (NUM_RECORDING_BLOCKS + CONFIG_BLOCKS) as i16;
+        while self.bad_blocks.contains(&block_i) {
+            block_i -= 1;
+            info!("Bad block {} for audio config", block_i)
+        }
+        if block_i <= 0 {
+            panic!("No good blocks found for config");
+        }
+        self.audio_block = Some(block_i as isize);
+        block_i -= 1;
+        while self.bad_blocks.contains(&block_i) {
+            block_i -= 1;
+            info!("Bad block {} for device config", block_i)
+        }
+        if block_i <= 0 {
+            panic!("No good blocks found for config");
+        }
+        self.config_block = Some(block_i as isize);
+        info!(
+            "Using {} for audio config and {} for device config",
+            self.audio_block, self.config_block
+        );
+    }
+    pub fn write_device_config(&mut self, device_bytes: &mut [u8]) {
+        if self.config_block.is_none() {
+            panic!("Config block has not been initialized, call flash_storage.init()");
+        }
+        let config_block = self.config_block.unwrap();
+        self.erase_block(config_block);
+        // let mut payload = [0xffu8; 2115];
+        let mut start = 0;
+        let mut page = 0;
+        let mut is_last = false;
+
+        while !is_last {
+            let mut end = start + 2048;
+            if start + 2048 > device_bytes.len() {
+                end = device_bytes.len();
+            }
+            let mut payload = [0xffu8; 2115];
+            let is_last = end == device_bytes.len();
+            let device_chunk = &mut device_bytes[start..end];
+            self.write_config_bytes(
+                device_chunk,
+                device_chunk.len(),
+                is_last,
+                config_block,
+                page,
+            );
+            page += 1;
+        }
+    }
+
+    pub fn write_config_bytes(
+        &mut self,
+        bytes: &mut [u8],
+        user_bytes_length: usize,
+        is_last: bool,
+        b: isize,
+        p: isize,
+    ) -> Result<(), &str> {
+        self.write_enable();
+        assert_eq!(self.write_enabled(), true);
+        // Bytes will always be a full page + metadata + command info at the start
+        assert_eq!(bytes.len(), 2112 + 4); // 2116
+
+        let address = OnboardFlash::get_address(b, p);
+        let plane = ((b % 2) << 4) as u8;
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let crc = crc_check.checksum(&bytes[4..4 + user_bytes_length]);
+        bytes[1] = PROGRAM_LOAD;
+        bytes[2] = plane;
+        bytes[3] = 0;
+        {
+            //Now write into the user meta section
+            bytes[4..][0x820..=0x83f][0] = 0; // Page is used
+            bytes[4..][0x820..=0x83f][1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
+            {
+                let space = &mut bytes[4..][0x820..=0x83f][2..=3];
+                //info!("Writing {} bytes", user_bytes_length);
+                LittleEndian::write_u16(space, user_bytes_length as u16);
+            }
+            // TODO Write user detected bad blocks into user-metadata section?
+
+            bytes[4..][0x820..=0x83f][4] = b as u8;
+            bytes[4..][0x820..=0x83f][5] = p as u8;
+            {
+                let space = &mut bytes[4..][0x820..=0x83f][6..=7];
+                LittleEndian::write_u16(space, user_bytes_length as u16);
+            }
+            {
+                let space = &mut bytes[4..][0x820..=0x83f][8..=9];
+                LittleEndian::write_u16(space, crc);
+            }
+            {
+                let space = &mut bytes[4..][0x820..=0x83f][10..=11];
+                LittleEndian::write_u16(space, crc);
+            }
+        }
+        if is_last {
+            warn!("Ending file at {}:{}", b, p);
+        }
+
+        if self.record_to_flash {
+            self.spi_write(&bytes[1..]);
+            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
+        }
+
+        // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
+        let status = self.wait_for_ready();
+
+        if status.program_failed() {
+            error!("Programming failed");
+        }
+        if !status.erase_failed() {
+            // Relocate earlier pages on this block to the next free block
+            // Re-write this page
+            // Erase and mark the earlier block as bad.
+        }
+        return Ok(());
+    }
+
+    pub fn read_device_config(&mut self) -> Result<[u8; 2505], &str> {
+        if self.config_block.is_none() {
+            panic!("Config block has not been initialized, call flash_storage.init()");
+        }
+        //guess this is the size of the config at the moment
+        let mut config_bytes = [0u8; 2400 + 105];
+
+        let block_i = self.config_block.unwrap();
+        let mut page_i = 0;
+        let mut is_last = false;
+        let mut cursor = CursorMut::new(&mut config_bytes);
+
+        while !is_last {
+            self.read_page(block_i as isize, page_i).unwrap();
+            self.read_page_metadata(block_i as isize);
+            self.wait_for_all_ready();
+            if !self.current_page.page_is_used() {
+                return Err("Config block empty");
+                // return Err(&format!("Config block {} page {} empty", block,_i page_i));
+            }
+            let length = self.current_page.page_bytes_used();
+            cursor.write_bytes(&self.current_page.user_data()[..length]);
+            is_last = self.current_page.is_last_page_for_file();
+            page_i += 1;
+        }
+        return Ok(config_bytes);
     }
 
     pub fn reset(&mut self) {
