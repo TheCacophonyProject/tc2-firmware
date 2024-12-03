@@ -231,17 +231,25 @@ impl SyncedDateTime {
 }
 
 pub fn core_1_task(
+    mut pi_spi: ExtSpiTransfers,
+    mut flash_storage: OnboardFlash,
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     clock_freq: u32,
-    pins: Core1Pins,
+    // pins: Core1Pins,
     i2c_config: I2CConfig,
     unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
     mut timer: Timer,
+    device_config: DeviceConfig,
 ) {
+    info!(
+        "core1 address is {:#x}",
+        *pi_spi.payload_buffer.as_mut().unwrap() as *const _ as usize
+    );
+
     let dev_mode = false;
     info!("=== Core 1 start ===");
     if dev_mode {
@@ -249,61 +257,24 @@ pub fn core_1_task(
     } else {
         warn!("FIELD MODE");
     }
+    let another_v = false;
+    info!(
+        "dev mode address is {:#x}  {:#x}",
+        &dev_mode as *const _ as usize, &another_v as *const _ as usize
+    );
 
     let mut synced_date_time = SyncedDateTime::default();
 
-    let mut crc_buf = [0x42u8; 32 + 104];
-    let mut payload_buf = [0x42u8; 2066];
-    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
-    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
-    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
-    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let mut peripherals = unsafe { Peripherals::steal() };
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
-    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+    // let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
 
-    let mut pi_spi = ExtSpiTransfers::new(
-        pins.pi_mosi,
-        pins.pi_cs,
-        pins.pi_clk,
-        pins.pi_miso,
-        pins.pi_ping,
-        dma_channels.ch0,
-        payload_buf,
-        crc_buf,
-        pio0,
-        sm0,
-    );
-
-    let mut spi_peripheral = Some(peripherals.SPI1);
-    let mut flash_storage = OnboardFlash::new(
-        pins.fs_cs,
-        pins.fs_mosi,
-        pins.fs_clk,
-        pins.fs_miso,
-        flash_page_buf,
-        flash_page_buf_2,
-        dma_channels.ch1,
-        dma_channels.ch2,
-        should_record_to_flash,
-        None,
-    );
     {
-        flash_storage.take_spi(
-            spi_peripheral.take().unwrap(),
-            &mut peripherals.RESETS,
-            clock_freq.Hz(),
-        );
-        flash_storage.init();
         if flash_storage.has_files_to_offload() {
             info!("Finished scan, has files to offload");
         }
@@ -375,28 +346,28 @@ pub fn core_1_task(
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-    let existing_config = DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
+    // let existing_config = DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
 
-    if let Some(existing_config) = &existing_config {
-        info!("Existing config {:#?}", existing_config.config());
-    }
-    if existing_config.is_none() {
-        // We need to wake up the rpi and get a config
-        wake_raspberry_pi(&mut shared_i2c, &mut delay);
-    }
-    let (device_config, device_config_was_updated) =
-        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-            &mut flash_storage,
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            clock_freq.Hz(),
-            radiometry_enabled,
-            lepton_serial.unwrap_or(0),
-            false,
-            &mut timer,
-            existing_config,
-        );
+    // if let Some(existing_config) = &existing_config {
+    //     info!("Existing config {:#?}", existing_config.config());
+    // }
+    // if existing_config.is_none() {
+    //     // We need to wake up the rpi and get a config
+    //     wake_raspberry_pi(&mut shared_i2c, &mut delay);
+    // }
+    // let (device_config, device_config_was_updated) =
+    //     get_existing_device_config_or_config_from_pi_on_initial_handshake(
+    //         &mut flash_storage,
+    //         &mut pi_spi,
+    //         &mut peripherals.RESETS,
+    //         &mut peripherals.DMA,
+    //         clock_freq.Hz(),
+    //         radiometry_enabled,
+    //         lepton_serial.unwrap_or(0),
+    //         false,
+    //         &mut timer,
+    //         existing_config,
+    //     );
 
     if woken_by_alarm {
         event_logger.log_event(
@@ -407,30 +378,31 @@ pub fn core_1_task(
             &mut flash_storage,
         );
     }
-    if device_config_was_updated {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::SavedNewConfig,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-        //changing from no audio to audio mode and then clicking test rec quickly
-        match shared_i2c.tc2_agent_requested_audio_recording(&mut delay) {
-            Ok(test_rec) => {
-                if test_rec.is_some() {
-                    sio.fifo.write_blocking(Core1Task::RequestReset.into());
-                    loop {
-                        // Wait to be reset
-                        nop();
-                    }
-                }
-            }
-            Err(e) => error!("Error getting tc2 agent state: {}", e),
-        }
-    }
 
-    let device_config = device_config.unwrap_or(DeviceConfig::default());
+    // if device_config_was_updated {
+    //     event_logger.log_event(
+    //         LoggerEvent::new(
+    //             LoggerEventKind::SavedNewConfig,
+    //             synced_date_time.get_timestamp_micros(&timer),
+    //         ),
+    //         &mut flash_storage,
+    //     );
+    //     //changing from no audio to audio mode and then clicking test rec quickly
+    //     match shared_i2c.tc2_agent_requested_audio_recording(&mut delay) {
+    //         Ok(test_rec) => {
+    //             if test_rec.is_some() {
+    //                 sio.fifo.write_blocking(Core1Task::RequestReset.into());
+    //                 loop {
+    //                     // Wait to be reset
+    //                     nop();
+    //                 }
+    //             }
+    //         }
+    //         Err(e) => error!("Error getting tc2 agent state: {}", e),
+    //     }
+    // }
+
+    // let device_config = device_config.unwrap_or(DeviceConfig::default());
     if let AudioMode::AudioOnly = device_config.config().audio_mode {
         let _ = shared_i2c.disable_alarm(&mut delay);
         info!("Is audio device restarting");
@@ -1071,13 +1043,23 @@ pub fn core_1_task(
                     &crc_table,
                     making_status_recording,
                 );
+                info!("STREAM NEW");
                 cptv_streamer.init_gzip_stream(&mut flash_storage, false);
+                info!("STREAM INIT");
+                let new_v = true;
+                info!(
+                    "core1 address is {:#x} another  {:#x}",
+                    *pi_spi.payload_buffer.as_mut().unwrap() as *const _ as usize,
+                    &new_v as *const _ as usize
+                );
                 cptv_streamer.push_frame(
                     &prev_frame,
                     &mut prev_frame_2, // This should be zeroed out before starting a new clip.
                     &prev_frame_telemetry.as_ref().unwrap(),
                     &mut flash_storage,
                 );
+                info!("STREAM PUSH");
+
                 frames_written += 1;
 
                 event_logger.log_event(

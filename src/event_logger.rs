@@ -151,7 +151,8 @@ impl LoggerEvent {
         NaiveDateTime::from_timestamp_micros(self.timestamp as i64)
     }
 }
-pub const MAX_EVENTS_IN_LOGGER: usize = 1024 - 4 * 64; //leave last page for config stuff
+pub const MAX_EVENTS_IN_LOGGER: usize = 1024;
+//- 4 * 64; //leave last page for config stuff
 
 const EVENT_CODE_LENGTH: usize = 2;
 const EVENT_TIMESTAMP_LENGTH: usize = 8;
@@ -159,7 +160,7 @@ const EVENT_PAYLOAD_LENGTH: usize = 8;
 const EVENT_LENGTH: usize = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH;
 
 const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: isize = 2048 - 4;
-const FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX: isize = 2047;
+const FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX: isize = 2048;
 pub struct EventLogger {
     next_event_index: Option<usize>,
 }

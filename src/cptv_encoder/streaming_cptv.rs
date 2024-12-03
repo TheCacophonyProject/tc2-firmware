@@ -496,7 +496,9 @@ impl<'a> CptvStream<'a> {
         frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
     ) {
+        info!("PUSHING");
         let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
+        info!("ENCODED");
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
         let frame_header = CptvFrameHeader {
             time_on: frame_telemetry.msec_on,
@@ -506,19 +508,22 @@ impl<'a> CptvStream<'a> {
             last_ffc_temp_c: frame_telemetry.fpa_temp_c_at_last_ffc,
             frame_temp_c: frame_telemetry.fpa_temp_c,
         };
+        info!("HEADER");
         let frame_header_iter = frame_header_iter(&frame_header);
         let delta_encoded = unsafe { &u16_slice_to_u8(&prev_frame)[0..frame_size as usize] };
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
-
+        info!("DONE DELTA");
         if self.cptv_header.total_frame_count % 10 == 0 {
             info!(
                 "Write frame #{}, {}",
                 self.cptv_header.total_frame_count, frame_telemetry.frame_num
             );
         }
+
         for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
+            info!("CHAIN");
             self.total_uncompressed += 1;
             self.crc_val = self.crc_val ^ 0xffffffff;
             self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
@@ -526,6 +531,7 @@ impl<'a> CptvStream<'a> {
             self.crc_val = self.crc_val ^ 0xffffffff;
             let entry = &self.huffman_table[byte as usize];
             self.cursor.write_bits(entry.code as u32, entry.bits as u32);
+            info!("WRITING BYTES");
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 _ = flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
                 self.cursor.flush_residual_bits();

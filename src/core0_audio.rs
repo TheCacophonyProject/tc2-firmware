@@ -67,7 +67,7 @@ pub fn audio_task(
     i2c_config: I2CConfig,
     clock_freq: u32,
     timer: &mut Timer,
-    pins: Core1Pins,
+    // pins: Core1Pins,
     gpio0: rp2040_hal::gpio::Pin<
         rp2040_hal::gpio::bank0::Gpio0,
         rp2040_hal::gpio::FunctionNull,
@@ -85,66 +85,28 @@ pub fn audio_task(
         FunctionSio<SioInput>,
         PullDown,
     >,
+
+    device_config: DeviceConfig,
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
 ) -> ! {
     watchdog.feed();
 
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
-    let sio = Sio::new(peripherals.SIO);
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
 
-    // init flash
-    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
-    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
-    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
-    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-
-    let mut flash_storage = OnboardFlash::new(
-        pins.fs_cs,
-        pins.fs_mosi,
-        pins.fs_clk,
-        pins.fs_miso,
-        flash_page_buf,
-        flash_page_buf_2,
-        dma_channels.ch1,
-        dma_channels.ch2,
-        true,
-        None,
-    );
-
-    let mut payload_buf = [0x42u8; 2066];
-    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-    let mut crc_buf = [0x42u8; 32 + 104];
-    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
-    let mut pi_spi = ExtSpiTransfers::new(
-        pins.pi_mosi,
-        pins.pi_cs,
-        pins.pi_clk,
-        pins.pi_miso,
-        pins.pi_ping,
-        dma_channels.ch0,
-        payload_buf,
-        crc_buf,
-        pio0,
-        sm0,
-    );
     let mut peripherals = unsafe { Peripherals::steal() };
 
     watchdog.feed();
-    flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS, clock_freq.Hz());
-    flash_storage.init();
-
-    let mut device_config =
-        DeviceConfig::load_existing_config_from_flash(&mut flash_storage).unwrap();
 
     let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     let mut synced_date_time = SyncedDateTime::default();
-    let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
+    let mut event_logger: EventLogger = EventLogger::new(flash_storage);
 
     match shared_i2c.get_datetime(&mut delay) {
         Ok(now) => {
@@ -154,7 +116,7 @@ pub fn audio_task(
             //cant get time so use 0 and add a time when tc2-agent uploads
             event_logger.log_event(
                 LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
-                &mut flash_storage,
+                flash_storage,
             );
             panic!("Unable to get DateTime from RTC {}", e)
         }
@@ -166,7 +128,7 @@ pub fn audio_task(
                 LoggerEventKind::Rp2040WokenByAlarm,
                 synced_date_time.get_timestamp_micros(&timer),
             ),
-            &mut flash_storage,
+            flash_storage,
         );
     }
 
@@ -204,61 +166,61 @@ pub fn audio_task(
     let mut alarm_date_time: Option<NaiveDateTime> = None;
 
     //do this so tc2-agent knows whats going on
-    let (new_config, device_config_was_updated) =
-        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-            &mut flash_storage,
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            clock_freq.Hz(),
-            2u32, //need to get radiometry and leton serial
-            1,
-            true,
-            timer,
-            Some(device_config),
-        );
-    device_config = new_config.unwrap();
+    // let (new_config, device_config_was_updated) =
+    //     get_existing_device_config_or_config_from_pi_on_initial_handshake(
+    //         flash_storage,
+    //         pi_spi,
+    //         &mut peripherals.RESETS,
+    //         &mut peripherals.DMA,
+    //         clock_freq.Hz(),
+    //         2u32, //need to get radiometry and leton serial
+    //         1,
+    //         true,
+    //         timer,
+    //         Some(device_config),
+    //     );
+    // device_config = new_config.unwrap();
 
-    if device_config_was_updated {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::SavedNewConfig,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-    }
+    // if device_config_was_updated {
+    //     event_logger.log_event(
+    //         LoggerEvent::new(
+    //             LoggerEventKind::SavedNewConfig,
+    //             synced_date_time.get_timestamp_micros(&timer),
+    //         ),
+    //         flash_storage,
+    //     );
+    // }
 
     if !user_recording_requested {
-        if device_config_was_updated {
-            let reboot;
+        // if device_config_was_updated {
+        //     let reboot;
 
-            if device_config.config().is_audio_device() && !thermal_requested_audio {
-                if let AudioMode::AudioOnly = device_config.config().audio_mode {
-                    reboot = false;
-                } else {
-                    let in_window = device_config
-                        .time_is_in_recording_window(&synced_date_time.date_time_utc, &None);
-                    reboot = in_window;
-                }
-            } else {
-                reboot = !device_config.config().is_audio_device()
-            }
+        //     if device_config.config().is_audio_device() && !thermal_requested_audio {
+        //         if let AudioMode::AudioOnly = device_config.config().audio_mode {
+        //             reboot = false;
+        //         } else {
+        //             let in_window = device_config
+        //                 .time_is_in_recording_window(&synced_date_time.date_time_utc, &None);
+        //             reboot = in_window;
+        //         }
+        //     } else {
+        //         reboot = !device_config.config().is_audio_device()
+        //     }
 
-            if reboot {
-                let _ = shared_i2c.disable_alarm(&mut delay);
-                clear_audio_alarm(&mut flash_storage);
-                info!("Restarting as should be in thermal mode");
-                restart(watchdog);
-            }
-        }
+        //     if reboot {
+        //         let _ = shared_i2c.disable_alarm(&mut delay);
+        //         clear_audio_alarm(flash_storage);
+        //         info!("Restarting as should be in thermal mode");
+        //         restart(watchdog);
+        //     }
+        // }
 
         //this isn't reliable so use alarm stored in flash
         // let mut alarm_hours = shared_i2c.get_alarm_hours();
         // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
         let mut scheduled: bool = false;
 
-        let (_, flash_alarm) = get_audio_alarm(&mut flash_storage);
+        let (_, flash_alarm) = get_audio_alarm(flash_storage);
         if let Some(alarm) = flash_alarm {
             scheduled = true;
             info!(
@@ -269,20 +231,20 @@ pub fn audio_task(
                 alarm.hour(),
                 alarm.minute(),
             );
-            if device_config_was_updated {
-                if check_alarm_still_valid(
-                    &alarm,
-                    &synced_date_time.get_adjusted_dt(timer),
-                    &device_config,
-                ) {
-                    alarm_date_time = Some(alarm);
-                } else {
-                    //if window time changed and alarm is after rec window start
-                    clear_audio_alarm(&mut flash_storage);
-                    scheduled = false;
-                    info!("Rescehduling as alarm is after window start");
-                }
-            }
+            // if device_config_was_updated {
+            //     if check_alarm_still_valid(
+            //         &alarm,
+            //         &synced_date_time.get_adjusted_dt(timer),
+            //         &device_config,
+            //     ) {
+            //         alarm_date_time = Some(alarm);
+            //     } else {
+            //         //if window time changed and alarm is after rec window start
+            //         clear_audio_alarm(flash_storage);
+            //         scheduled = false;
+            //         info!("Rescehduling as alarm is after window start");
+            //     }
+            // }
         } else {
             error!("Not scheduled");
         }
@@ -292,7 +254,7 @@ pub fn audio_task(
                 LoggerEventKind::AudioMode,
                 synced_date_time.get_timestamp_micros(&timer),
             ),
-            &mut flash_storage,
+            flash_storage,
         );
         // Unset the is_recording flag on attiny on startup
         if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
@@ -302,7 +264,7 @@ pub fn audio_task(
                         LoggerEventKind::RecordingNotFinished,
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
-                    &mut flash_storage,
+                    flash_storage,
                 );
             }
         }
@@ -330,7 +292,7 @@ pub fn audio_task(
                                 LoggerEventKind::ToldRpiToWake(WakeReason::AudioThermalEnded),
                                 synced_date_time.get_timestamp_micros(&timer),
                             ),
-                            &mut flash_storage,
+                            flash_storage,
                         );
                     }
                 }
@@ -339,7 +301,7 @@ pub fn audio_task(
         }
         if !should_wake {
             should_wake = should_offload_audio_recordings(
-                &mut flash_storage,
+                flash_storage,
                 &mut event_logger,
                 &mut delay,
                 &mut shared_i2c,
@@ -351,7 +313,7 @@ pub fn audio_task(
                         LoggerEventKind::ToldRpiToWake(WakeReason::AudioShouldOffload),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
-                    &mut flash_storage,
+                    flash_storage,
                 );
             }
         };
@@ -359,8 +321,8 @@ pub fn audio_task(
         match offload(
             &mut shared_i2c,
             clock_freq,
-            &mut flash_storage,
-            &mut pi_spi,
+            flash_storage,
+            pi_spi,
             timer,
             &mut event_logger,
             should_wake,
@@ -400,7 +362,7 @@ pub fn audio_task(
                         LoggerEventKind::Rp2040MissedAudioAlarm(alarm.timestamp_micros() as u64),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
-                    &mut flash_storage,
+                     flash_storage,
                 );
                     recording_type = Some(RecordingType::ScheduledRecording);
                 }
@@ -431,7 +393,7 @@ pub fn audio_task(
                     LoggerEventKind::StartedAudioRecording,
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
-                &mut flash_storage,
+                flash_storage,
             );
 
             let recorded = microphone.record_for_n_seconds(
@@ -441,7 +403,7 @@ pub fn audio_task(
                 timer,
                 &mut peripherals.RESETS,
                 peripherals.SPI1,
-                &mut flash_storage,
+                flash_storage,
                 timestamp,
                 watchdog,
                 &synced_date_time,
@@ -456,7 +418,7 @@ pub fn audio_task(
                         LoggerEventKind::AudioRecordingFailed,
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
-                    &mut flash_storage,
+                    flash_storage,
                 );
                 info!("Recording failed restarting and will try again");
                 restart(watchdog);
@@ -466,7 +428,7 @@ pub fn audio_task(
                         LoggerEventKind::EndedRecording,
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
-                    &mut flash_storage,
+                    flash_storage,
                 );
                 match recording_type.as_mut().unwrap() {
                     RecordingType::LongRecording | RecordingType::TestRecording => {
@@ -493,8 +455,8 @@ pub fn audio_task(
                         let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
                         offload_flash_storage_and_events(
-                            &mut flash_storage,
-                            &mut pi_spi,
+                            flash_storage,
+                            pi_spi,
                             &mut peripherals.RESETS,
                             &mut peripherals.DMA,
                             clock_freq,
@@ -512,7 +474,7 @@ pub fn audio_task(
                     _ => {
                         shared_i2c.clear_alarm(&mut delay);
                         reschedule = true;
-                        clear_audio_alarm(&mut flash_storage);
+                        clear_audio_alarm(flash_storage);
                         if thermal_requested_audio {
                             //if audio requested from thermal, the alarm will be re scheduled there
                             let _ = shared_i2c.tc2_agent_clear_and_set_flag(
@@ -539,7 +501,7 @@ pub fn audio_task(
             &mut delay,
             &synced_date_time,
             &mut shared_i2c,
-            &mut flash_storage,
+            flash_storage,
             timer,
             &mut event_logger,
             &device_config,
@@ -547,7 +509,7 @@ pub fn audio_task(
             alarm_date_time = Some(scheduled_time);
         } else {
             error!("Couldn't schedule alarm will restart");
-            clear_audio_alarm(&mut flash_storage);
+            clear_audio_alarm(flash_storage);
             restart(watchdog);
         }
     }
@@ -575,7 +537,7 @@ pub fn audio_task(
                     LoggerEventKind::ToldRpiToSleep,
                     synced_date_time.get_timestamp_micros(&timer),
                 ),
-                &mut flash_storage,
+                flash_storage,
             );
             logged_power_down = true;
         }
@@ -604,7 +566,7 @@ pub fn audio_task(
                             LoggerEventKind::Rp2040Sleep,
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
-                        &mut flash_storage,
+                        flash_storage,
                     );
 
                     if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
@@ -619,8 +581,8 @@ pub fn audio_task(
                     match offload(
                         &mut shared_i2c,
                         clock_freq,
-                        &mut flash_storage,
-                        &mut pi_spi,
+                        flash_storage,
+                        pi_spi,
                         timer,
                         &mut event_logger,
                         false,

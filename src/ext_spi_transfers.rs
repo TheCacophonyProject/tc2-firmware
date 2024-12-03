@@ -90,7 +90,7 @@ pub struct ExtSpiTransfers {
 
     ping: Option<Pin<Gpio5, FunctionSio<SioInput>, PullDown>>,
     dma_channel_0: Option<Channel<CH0>>,
-    payload_buffer: Option<&'static mut [u8; 2066]>,
+    pub payload_buffer: Option<&'static mut [u8; 2066]>,
     return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
     return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,

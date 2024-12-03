@@ -375,6 +375,7 @@ impl OnboardFlash {
         self.reset();
         self.scan();
         self.unlock_blocks();
+        self.set_config_block();
     }
 
     pub fn set_config_block(&mut self) {
@@ -406,7 +407,7 @@ impl OnboardFlash {
             panic!("Config block has not been initialized, call flash_storage.init()");
         }
         let config_block = self.config_block.unwrap();
-        self.erase_block(config_block);
+        let _ = self.erase_block(config_block);
         // let mut payload = [0xffu8; 2115];
         let mut start = 0;
         let mut page = 0;
@@ -414,20 +415,35 @@ impl OnboardFlash {
 
         while !is_last {
             let mut end = start + 2048;
-            if start + 2048 > device_bytes.len() {
+            if end > device_bytes.len() {
                 end = device_bytes.len();
             }
-            let mut payload = [0xffu8; 2115];
-            let is_last = end == device_bytes.len();
+            let mut payload = [0xffu8; 2116];
+            is_last = end == device_bytes.len();
+            info!(
+                "Is last?? {} start {} end {} len {}",
+                is_last,
+                start,
+                end,
+                device_bytes.len()
+            );
             let device_chunk = &mut device_bytes[start..end];
-            self.write_config_bytes(
-                device_chunk,
+            info!("DEvice chunk is {}", device_chunk.len());
+            payload[4..4 + device_chunk.len()].copy_from_slice(&device_chunk);
+            info!("Writing {}", payload);
+            start += 2048;
+            let _ = self.write_config_bytes(
+                &mut payload,
                 device_chunk.len(),
                 is_last,
                 config_block,
                 page,
             );
             page += 1;
+            if page >= 64 {
+                panic!("Trying to write too many pages for config");
+            }
+            info!("Is last {}", is_last);
         }
     }
 
@@ -504,6 +520,7 @@ impl OnboardFlash {
         if self.config_block.is_none() {
             panic!("Config block has not been initialized, call flash_storage.init()");
         }
+        info!("Reading config from {}", self.config_block);
         //guess this is the size of the config at the moment
         let mut config_bytes = [0u8; 2400 + 105];
 
@@ -514,13 +531,15 @@ impl OnboardFlash {
 
         while !is_last {
             self.read_page(block_i as isize, page_i).unwrap();
-            self.read_page_metadata(block_i as isize);
+            self.read_page_from_cache(block_i as isize);
             self.wait_for_all_ready();
+            info!("Reading {} {} ", block_i, page_i);
             if !self.current_page.page_is_used() {
                 return Err("Config block empty");
                 // return Err(&format!("Config block {} page {} empty", block,_i page_i));
             }
             let length = self.current_page.page_bytes_used();
+
             cursor.write_bytes(&self.current_page.user_data()[..length]);
             is_last = self.current_page.is_last_page_for_file();
             page_i += 1;

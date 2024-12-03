@@ -25,7 +25,7 @@ mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::core0_audio::audio_task;
 pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
+use crate::core1_task::{core_1_task, wake_raspberry_pi, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
 use crate::onboard_flash::extend_lifetime_generic;
@@ -110,14 +110,35 @@ impl FrameBuffer {
     }
 }
 
+use crate::core1_sub_tasks::{
+    get_existing_device_config_or_config_from_pi_on_initial_handshake,
+    offload_flash_storage_and_events,
+};
+use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
 use rp2040_hal::dma::DMAExt;
+use rp2040_hal::pio::PIOExt;
 
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
+
+    let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
+        peripherals.CLOCKS,
+        peripherals.XOSC,
+        peripherals.ROSC,
+        ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
+    );
+    let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
+
+    let system_clock_freq = clocks.system_clock.freq().to_Hz();
+
+    info!(
+        "System clock speed {}MHz",
+        clocks.system_clock.freq().to_MHz()
+    );
     let sio = Sio::new(peripherals.SIO);
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let pins = rp2040_hal::gpio::Pins::new(
@@ -159,51 +180,47 @@ fn main() -> ! {
         None,
     );
 
-    let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
-        peripherals.CLOCKS,
-        peripherals.XOSC,
-        peripherals.ROSC,
-        ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
+    let mut payload_buf = [0x42u8; 2066];
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+
+    let mut pi_spi = ExtSpiTransfers::new(
+        core1.pi_mosi,
+        core1.pi_cs,
+        core1.pi_clk,
+        core1.pi_miso,
+        core1.pi_ping,
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
     );
-    let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
-
-    let system_clock_freq = clocks.system_clock.freq().to_Hz();
-
+    let arra = pi_spi.payload_buffer.as_mut().unwrap();
     info!(
-        "System clock speed {}MHz",
-        clocks.system_clock.freq().to_MHz()
+        "payload address is {:#x}",
+        *pi_spi.payload_buffer.as_mut().unwrap() as *const _ as usize
     );
-
     flash_storage.take_spi(
         peripherals.SPI1,
         &mut peripherals.RESETS,
         system_clock_freq.Hz(),
     );
+    flash_storage.erase_all_blocks();
     flash_storage.init();
 
-    let mut config = DeviceConfig::load_existing_inner_config_from_flash(&mut flash_storage);
-    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+    let mut config: Option<DeviceConfig> =
+        DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
+    //do all the get config crap here
 
-    // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
-
-    let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
-    watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
-
-    watchdog.pause_on_debug(true);
-    watchdog.start(8388607.micros());
-
-    info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
+    if let Some(config) = &config {
+        info!("Existing config {:#?}", config.config());
+    }
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
-
-    // let pins = rp2040_hal::gpio::Pins::new(
-    //     peripherals.IO_BANK0,
-    //     peripherals.PADS_BANK0,
-    //     sio.gpio_bank0,
-    //     &mut peripherals.RESETS,
-    // );
 
     // Attiny + RTC comms
     let sda_pin = pins.gpio6.into_function::<FunctionI2C>();
@@ -226,11 +243,50 @@ fn main() -> ! {
 
     let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
     info!("Got shared i2c");
+
+    // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
+
+    let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
+    watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
+
+    watchdog.pause_on_debug(true);
+    watchdog.start(8388607.micros());
+
+    info!("Enabled watchdog timer");
+
+    if config.is_none() {
+        info!("Waking pi to get config");
+        // We need to wake up the rpi and get a config
+        wake_raspberry_pi(&mut shared_i2c, &mut delay);
+    }
+
+    let mut timer: rp2040_hal::Timer =
+        bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
+
+    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+    let (device_config, device_config_was_updated) =
+        get_existing_device_config_or_config_from_pi_on_initial_handshake(
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            system_clock_freq.Hz(),
+            2u32,
+            0,
+            false,
+            &mut timer,
+            config,
+        );
+    let config = device_config.unwrap();
+
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
+
+    let mut is_audio: bool = config.config().is_audio_device();
 
     if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
         info!("EEPROM audio device: {}", audio_only);
@@ -254,8 +310,7 @@ fn main() -> ! {
     }
 
     if is_audio {
-        let config = config.unwrap().0;
-        match config.audio_mode {
+        match config.config().audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                 if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
                     if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
@@ -288,30 +343,20 @@ fn main() -> ! {
     if is_audio {
         let gpio0 = pins.gpio0;
         let gpio1 = pins.gpio1;
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
 
         audio_branch(
             i2c1,
             system_clock_freq,
             timer,
-            pins,
+            // core1,
             gpio0,
             gpio1,
             watchdog,
             alarm_woke_us,
             unlocked_pin,
+            config,
+            &mut flash_storage,
+            &mut pi_spi,
         );
     } else {
         let lepton_pins = LeptonPins {
@@ -331,23 +376,12 @@ fn main() -> ! {
             clk_disable: pins.gpio27.into_push_pull_output(),
             master_clk: pins.gpio26.into_floating_input(),
         };
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
 
         thermal_code(
+            pi_spi,
+            flash_storage,
             lepton_pins,
-            pins,
+            // core1,
             watchdog,
             system_clock_freq,
             delay,
@@ -357,6 +391,7 @@ fn main() -> ! {
             rosc,
             alarm_woke_us,
             unlocked_pin,
+            config,
         );
     }
 }
@@ -366,7 +401,7 @@ pub fn audio_branch(
     i2c_config: I2CConfig,
     clock_freq: u32,
     mut timer: bsp::hal::Timer,
-    pins: Core1Pins,
+    // pins: Core1Pins,
     gpio0: rp2040_hal::gpio::Pin<
         rp2040_hal::gpio::bank0::Gpio0,
         rp2040_hal::gpio::FunctionNull,
@@ -384,22 +419,30 @@ pub fn audio_branch(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    config: DeviceConfig,
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
 ) -> ! {
     audio_task(
         i2c_config,
         clock_freq,
         &mut timer,
-        pins,
+        // pins,
         gpio0,
         gpio1,
         &mut watchdog,
         alarm_triggered,
         unlocked_pin,
+        config,
+        flash_storage,
+        pi_spi,
     );
 }
 pub fn thermal_code(
+    pi_spi: ExtSpiTransfers,
+    onboard_flash: OnboardFlash,
     lepton_pins: LeptonPins,
-    pins: Core1Pins,
+    // pins: Core1Pins,
     mut watchdog: Watchdog,
     system_clock_freq: u32,
     mut delay: Delay,
@@ -413,6 +456,7 @@ pub fn thermal_code(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    config: DeviceConfig,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -445,7 +489,10 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<44900> = Stack::new();
+
+    let mut core1_stack: Stack<40000> = Stack::new();
+    let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
+
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
@@ -460,26 +507,29 @@ pub fn thermal_code(
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
     watchdog.disable();
-
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
-        let _ = core1.spawn(
-            unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) },
-            move || {
-                core_1_task(
-                    frame_buffer_local,
-                    frame_buffer_local_2,
-                    system_clock_freq,
-                    pins,
-                    i2c1,
-                    unlocked_pin,
-                    lepton_serial,
-                    lepton_firmware_version,
-                    alarm_woke_us,
-                    timer,
-                )
-            },
-        );
+        let _ = core1.spawn(mem, move || {
+            core_1_task(
+                pi_spi,
+                onboard_flash,
+                frame_buffer_local,
+                frame_buffer_local_2,
+                system_clock_freq,
+                // pins,
+                i2c1,
+                unlocked_pin,
+                lepton_serial,
+                lepton_firmware_version,
+                alarm_woke_us,
+                timer,
+                config,
+            )
+        });
+    }
+    loop {
+        info!("DONE {} {} ", fb0.0[0], fb1.0[0]);
+        nop();
     }
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
