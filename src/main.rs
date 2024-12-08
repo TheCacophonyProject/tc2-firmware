@@ -208,17 +208,19 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         system_clock_freq.Hz(),
     );
-    flash_storage.erase_all_blocks();
     flash_storage.init();
 
-    let mut config: Option<DeviceConfig> =
-        DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
-    //do all the get config crap here
+    // let mut config: Option<DeviceConfig> =
+    //     DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
+    // // do all the get config crap here
 
-    if let Some(config) = &config {
-        info!("Existing config {:#?}", config.config());
-    }
-
+    // if let Some(config) = &config {
+    //     info!("Existing config {:#?}", config.config());
+    // }
+    // loop {
+    //     nop();
+    // }
+    //  used 14.64KIB
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
 
@@ -254,39 +256,39 @@ fn main() -> ! {
 
     info!("Enabled watchdog timer");
 
-    if config.is_none() {
-        info!("Waking pi to get config");
-        // We need to wake up the rpi and get a config
-        wake_raspberry_pi(&mut shared_i2c, &mut delay);
-    }
+    // if config.is_none() {
+    //     info!("Waking pi to get config");
+    //     // We need to wake up the rpi and get a config
+    //     wake_raspberry_pi(&mut shared_i2c, &mut delay);
+    // }
 
     let mut timer: rp2040_hal::Timer =
         bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
-    let (device_config, device_config_was_updated) =
-        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-            &mut flash_storage,
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            system_clock_freq.Hz(),
-            2u32,
-            0,
-            false,
-            &mut timer,
-            config,
-        );
-    let config = device_config.unwrap();
+    // let (device_config, device_config_was_updated) =
+    //     get_existing_device_config_or_config_from_pi_on_initial_handshake(
+    //         &mut flash_storage,
+    //         &mut pi_spi,
+    //         &mut peripherals.RESETS,
+    //         &mut peripherals.DMA,
+    //         system_clock_freq.Hz(),
+    //         2u32,
+    //         0,
+    //         false,
+    //         &mut timer,
+    //         config,
+    //     );
+    // let config = config.unwrap();
 
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
-
-    let mut is_audio: bool = config.config().is_audio_device();
+    let mut is_audio: bool = false;
+    // config.config().is_audio_device();
 
     if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
         info!("EEPROM audio device: {}", audio_only);
@@ -309,55 +311,58 @@ fn main() -> ! {
         Err(_) => crate::panic!("Unable to get DateTime from RTC"),
     }
 
-    if is_audio {
-        match config.config().audio_mode {
-            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
-                    if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
-                        let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
-                        info!("Audio request thermal mode");
-                        //audio mode wants to go in thermal mode
-                        is_audio = false;
-                    } else {
-                        let (start_time, end_time) =
-                            config.next_or_current_recording_window(&date_time);
+    // if is_audio {
+    //     match config.config().audio_mode {
+    //         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+    //             if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
+    //                 if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
+    //                     let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
+    //                     info!("Audio request thermal mode");
+    //                     //audio mode wants to go in thermal mode
+    //                     is_audio = false;
+    //                 } else {
+    //                     let (start_time, end_time) =
+    //                         config.next_or_current_recording_window(&date_time);
 
-                        let in_window = config.time_is_in_recording_window(&date_time, &None);
-                        if in_window {
-                            is_audio = (state
-                                & (tc2_agent_state::LONG_AUDIO_RECORDING
-                                    | tc2_agent_state::TAKE_AUDIO
-                                    | tc2_agent_state::TEST_AUDIO_RECORDING))
-                                > 0;
-                            if is_audio {
-                                info!("Is audio because thermal requested or test rec");
-                            }
-                        }
-                    }
-                }
-            }
-            _ => (),
-        }
-    }
+    //                     let in_window = config.time_is_in_recording_window(&date_time, &None);
+    //                     if in_window {
+    //                         is_audio = (state
+    //                             & (tc2_agent_state::LONG_AUDIO_RECORDING
+    //                                 | tc2_agent_state::TAKE_AUDIO
+    //                                 | tc2_agent_state::TEST_AUDIO_RECORDING))
+    //                             > 0;
+    //                         if is_audio {
+    //                             info!("Is audio because thermal requested or test rec");
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //         _ => (),
+    //     }
+    // }
     let (i2c1, unlocked_pin) = shared_i2c.free();
     if is_audio {
         let gpio0 = pins.gpio0;
         let gpio1 = pins.gpio1;
 
-        audio_branch(
-            i2c1,
-            system_clock_freq,
-            timer,
-            // core1,
-            gpio0,
-            gpio1,
-            watchdog,
-            alarm_woke_us,
-            unlocked_pin,
-            config,
-            &mut flash_storage,
-            &mut pi_spi,
-        );
+        // audio_branch(
+        //     i2c1,
+        //     system_clock_freq,
+        //     timer,
+        //     // core1,
+        //     gpio0,
+        //     gpio1,
+        //     watchdog,
+        //     alarm_woke_us,
+        //     unlocked_pin,
+        //     config,
+        //     &mut flash_storage,
+        //     &mut pi_spi,
+        // );
+        loop {
+            nop();
+        }
     } else {
         let lepton_pins = LeptonPins {
             tx: pins.gpio23.into_function(),
@@ -391,7 +396,7 @@ fn main() -> ! {
             rosc,
             alarm_woke_us,
             unlocked_pin,
-            config,
+            // config,
         );
     }
 }
@@ -456,7 +461,7 @@ pub fn thermal_code(
         FunctionSio<SioInput>,
         PullDown,
     >,
-    config: DeviceConfig,
+    // config: DeviceConfig,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -490,7 +495,11 @@ pub fn thermal_code(
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
 
-    let mut core1_stack: Stack<40000> = Stack::new();
+    // should have removed need for a bunch of stuff in here
+    // about 7kib (7168bytes which is 1792 (32 bits))
+    // 44900 - 1792
+    let mut core1_stack: Stack<43200> = Stack::new();
+
     let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
 
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
@@ -499,6 +508,12 @@ pub fn thermal_code(
     let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb1)
     })));
+
+    info!(
+        "id address is {:#x}",
+        &config.config().device_id as *const _ as usize
+    );
+    // let r_config = RefCell::new(unsafe { extend_lifetime_generic(&config) });
     // Shenanigans to convince the second thread that all these values exist for the lifetime of the
     // program.
     let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
@@ -507,7 +522,7 @@ pub fn thermal_code(
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
     watchdog.disable();
-    let peripheral_clock_freq = clocks.peripheral_clock.freq();
+
     {
         let _ = core1.spawn(mem, move || {
             core_1_task(
@@ -523,14 +538,13 @@ pub fn thermal_code(
                 lepton_firmware_version,
                 alarm_woke_us,
                 timer,
-                config,
+                // &config,
             )
         });
     }
-    loop {
-        info!("DONE {} {} ", fb0.0[0], fb1.0[0]);
-        nop();
-    }
+
+    let peripheral_clock_freq = clocks.peripheral_clock.freq();
+
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
     sio.fifo

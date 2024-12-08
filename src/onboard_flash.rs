@@ -533,12 +533,11 @@ impl OnboardFlash {
             self.read_page(block_i as isize, page_i).unwrap();
             self.read_page_from_cache(block_i as isize);
             self.wait_for_all_ready();
-            info!("Reading {} {} ", block_i, page_i);
             if !self.current_page.page_is_used() {
                 return Err("Config block empty");
-                // return Err(&format!("Config block {} page {} empty", block,_i page_i));
             }
             let length = self.current_page.page_bytes_used();
+            let data = &self.current_page.user_data()[..length];
 
             cursor.write_bytes(&self.current_page.user_data()[..length]);
             is_last = self.current_page.is_last_page_for_file();

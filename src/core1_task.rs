@@ -11,7 +11,7 @@ use crate::core1_sub_tasks::{
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use crate::device_config::{self, get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
 };
@@ -243,24 +243,23 @@ pub fn core_1_task(
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
     mut timer: Timer,
-    device_config: DeviceConfig,
+    // device_config: &DeviceConfig,
 ) {
-    info!(
-        "core1 address is {:#x}",
-        *pi_spi.payload_buffer.as_mut().unwrap() as *const _ as usize
-    );
+    // let device_config = device_config.borrow();
+    let device_config: Option<DeviceConfig> =
+        DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
+    let device_config = device_config.unwrap();
 
-    let dev_mode = false;
+    let dev_mode = true;
     info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
     } else {
         warn!("FIELD MODE");
     }
-    let another_v = false;
     info!(
-        "dev mode address is {:#x}  {:#x}",
-        &dev_mode as *const _ as usize, &another_v as *const _ as usize
+        "config in core1 address is {:#x}",
+        &device_config.config().device_id as *const _ as usize
     );
 
     let mut synced_date_time = SyncedDateTime::default();
@@ -1043,22 +1042,14 @@ pub fn core_1_task(
                     &crc_table,
                     making_status_recording,
                 );
-                info!("STREAM NEW");
                 cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-                info!("STREAM INIT");
                 let new_v = true;
-                info!(
-                    "core1 address is {:#x} another  {:#x}",
-                    *pi_spi.payload_buffer.as_mut().unwrap() as *const _ as usize,
-                    &new_v as *const _ as usize
-                );
                 cptv_streamer.push_frame(
                     &prev_frame,
                     &mut prev_frame_2, // This should be zeroed out before starting a new clip.
                     &prev_frame_telemetry.as_ref().unwrap(),
                     &mut flash_storage,
                 );
-                info!("STREAM PUSH");
 
                 frames_written += 1;
 
