@@ -468,6 +468,19 @@ impl OnboardFlash {
                 }
             }
         }
+        // flash full
+        if self.last_used_block_index.is_none() && self.first_used_block_index.is_some() {
+            self.last_used_block_index = Some(NUM_RECORDING_BLOCKS - 1);
+            self.file_start_block_index = self.prev_page.file_start_block_index();
+
+            self.current_block_index = NUM_RECORDING_BLOCKS;
+            self.current_page_index = 0;
+            println!(
+                "Setting next starting block index {}",
+                self.current_block_index
+            );
+        }
+
         self.bad_blocks = bad_blocks;
     }
 
@@ -931,6 +944,9 @@ impl OnboardFlash {
     pub fn start_file(&mut self, start_page: isize) -> isize {
         // CPTV always start writing a new file at page 1, reserving page 0 for when we come back
         // and write the header once we've finished writing the file.
+        if self.current_block_index >= NUM_RECORDING_BLOCKS {
+            panic!("Flash is full cannnot start new file");
+        }
         self.previous_file_start_block_index = self.file_start_block_index;
         self.current_page_index = start_page;
         warn!(

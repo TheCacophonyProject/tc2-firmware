@@ -703,6 +703,7 @@ pub fn offload(
                 false,
             ) && flash_storage.has_files_to_offload()
             {
+                info!("Failed to offload events and storage");
                 return Err(());
             }
         }
