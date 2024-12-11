@@ -28,6 +28,7 @@ pub use crate::core0_task::frame_acquisition_loop;
 use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::lepton::{init_lepton_module, LeptonPins};
+use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::extend_lifetime_generic;
 use attiny_rtc_i2c::tc2_agent_state;
 use bsp::{
@@ -115,8 +116,31 @@ fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let mut config = DeviceConfig::load_existing_inner_config_from_flash();
-    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+    let config = DeviceConfig::load_existing_inner_config_from_flash();
+    let mask = DetectionMask::new(Some([0u8; 2400]));
+
+    if config.is_none() {
+        // Device config is uninitialised in flash
+        info!("was none");
+    }
+    let (unwrapped, cursor) = config.unwrap();
+
+    let config = Some(DeviceConfig {
+        config_inner: unwrapped,
+        motion_detection_mask: mask,
+        cursor_position: cursor,
+    });
+    let config = config.unwrap();
+    loop {
+        info!(
+            "Extra used is config is {} mask {}",
+            config.config(),
+            config.motion_detection_mask
+        );
+        nop();
+    }
+    let mut is_audio = false;
+    // let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -202,37 +226,37 @@ fn main() -> ! {
         Err(_) => crate::panic!("Unable to get DateTime from RTC"),
     }
 
-    if is_audio {
-        let config = config.unwrap().0;
-        match config.audio_mode {
-            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
-                    if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
-                        let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
-                        info!("Audio request thermal mode");
-                        //audio mode wants to go in thermal mode
-                        is_audio = false;
-                    } else {
-                        let (start_time, end_time) =
-                            config.next_or_current_recording_window(&date_time);
+    // if is_audio {
+    //     let config = config.as_mut().unwrap().config();
+    //     match config.audio_mode {
+    //         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+    //             if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
+    //                 if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
+    //                     let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
+    //                     info!("Audio request thermal mode");
+    //                     //audio mode wants to go in thermal mode
+    //                     is_audio = false;
+    //                 } else {
+    //                     let (start_time, end_time) =
+    //                         config.next_or_current_recording_window(&date_time);
 
-                        let in_window = config.time_is_in_recording_window(&date_time, &None);
-                        if in_window {
-                            is_audio = (state
-                                & (tc2_agent_state::LONG_AUDIO_RECORDING
-                                    | tc2_agent_state::TAKE_AUDIO
-                                    | tc2_agent_state::TEST_AUDIO_RECORDING))
-                                > 0;
-                            if is_audio {
-                                info!("Is audio because thermal requested or test rec");
-                            }
-                        }
-                    }
-                }
-            }
-            _ => (),
-        }
-    }
+    //                     let in_window = config.time_is_in_recording_window(&date_time, &None);
+    //                     if in_window {
+    //                         is_audio = (state
+    //                             & (tc2_agent_state::LONG_AUDIO_RECORDING
+    //                                 | tc2_agent_state::TAKE_AUDIO
+    //                                 | tc2_agent_state::TEST_AUDIO_RECORDING))
+    //                             > 0;
+    //                         if is_audio {
+    //                             info!("Is audio because thermal requested or test rec");
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //         _ => (),
+    //     }
+    // }
     let (i2c1, unlocked_pin) = shared_i2c.free();
     if is_audio {
         let gpio0 = pins.gpio0;
@@ -293,20 +317,24 @@ fn main() -> ! {
             fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
             fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
         };
+        loop {
+            nop();
+        }
 
-        thermal_code(
-            lepton_pins,
-            pins,
-            watchdog,
-            system_clock_freq,
-            delay,
-            timer,
-            i2c1,
-            clocks,
-            rosc,
-            alarm_woke_us,
-            unlocked_pin,
-        );
+        // thermal_code(
+        //     lepton_pins,
+        //     pins,
+        //     watchdog,
+        //     system_clock_freq,
+        //     delay,
+        //     timer,
+        //     i2c1,
+        //     clocks,
+        //     rosc,
+        //     alarm_woke_us,
+        //     unlocked_pin,
+        //     config.unwrap(),
+        // );
     }
 }
 use crate::attiny_rtc_i2c::I2CConfig;
@@ -362,6 +390,7 @@ pub fn thermal_code(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    device_config: DeviceConfig,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -394,7 +423,7 @@ pub fn thermal_code(
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<44900> = Stack::new();
+    let mut core1_stack: Stack<44250> = Stack::new();
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
     })));
@@ -409,6 +438,12 @@ pub fn thermal_code(
         unsafe { extend_lifetime_generic(&frame_buffer_2) };
     watchdog.feed();
     watchdog.disable();
+    info!(
+        "id address is {:#x}",
+        &device_config.config().device_id as *const _ as usize
+    );
+    let device_config = unsafe { extend_lifetime_generic(&device_config) };
+    let config = RefCell::new(device_config);
 
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
     {
@@ -426,6 +461,7 @@ pub fn thermal_code(
                     lepton_firmware_version,
                     alarm_woke_us,
                     timer,
+                    config,
                 )
             },
         );
