@@ -110,13 +110,70 @@ impl FrameBuffer {
             [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
     }
 }
+use crate::byte_slice_cursor::Cursor;
+use crate::rp2040_flash::read_device_config_from_rp2040_flash;
+use embedded_io::Read;
 
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
-    // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let config = DeviceConfig::load_existing_inner_config_from_flash();
+
+    //this uses 5Kib
+    let config = DeviceConfig::load_existing_config_from_flash();
+    let config = config.unwrap();
+    loop {
+        info!(
+            "Extra used is config is {} mask {}",
+            config.config(),
+            config.motion_detection_mask
+        );
+        nop();
+    }
+
+    //this also use 5kib
+    let slice = read_device_config_from_rp2040_flash();
+    let inner = DeviceConfig::inner_from_bytes(slice);
+
+    // if inner.is_none() {
+    //     // Device config is uninitialised in flash
+    //     return None;
+    // }
+    let (inner, mut cursor_pos) = inner.unwrap();
+    // let mask_length = cursor.read_i32();
+    let mut cursor = Cursor::new(slice);
+    cursor.set_position(cursor_pos);
+    let mut motion_detection_mask;
+    motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
+
+    //thius line is what uses extra 2.46Kib
+    let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
+
+    if len != motion_detection_mask.inner.len() {
+        // This payload came without the mask attached (i.e. from the rPi)
+        motion_detection_mask.set_empty();
+    } else {
+        cursor_pos = cursor.position();
+    }
+
+    let config = Some(DeviceConfig {
+        config_inner: inner,
+        motion_detection_mask,
+        cursor_position: cursor_pos,
+    });
+    let config = config.unwrap();
+    loop {
+        info!(
+            "Extra used is config is {} mask {}",
+            config.config(),
+            config.motion_detection_mask
+        );
+        nop();
+    }
+
+    //this uses 2.48KIB
+    let config: Option<(device_config::DeviceConfigInner, usize)> =
+        DeviceConfig::load_existing_inner_config_from_flash();
     let mask = DetectionMask::new(Some([0u8; 2400]));
 
     if config.is_none() {
@@ -139,6 +196,7 @@ fn main() -> ! {
         );
         nop();
     }
+
     let mut is_audio = false;
     // let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
@@ -461,7 +519,7 @@ pub fn thermal_code(
                     lepton_firmware_version,
                     alarm_woke_us,
                     timer,
-                    config,
+                    // config,
                 )
             },
         );

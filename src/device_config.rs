@@ -227,7 +227,7 @@ impl DeviceConfigInner {
 }
 
 pub struct DeviceConfig {
-    config_inner: DeviceConfigInner,
+    pub config_inner: DeviceConfigInner,
     pub motion_detection_mask: DetectionMask,
     pub cursor_position: usize,
 }
