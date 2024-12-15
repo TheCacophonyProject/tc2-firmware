@@ -4,10 +4,7 @@
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
-use crate::core1_sub_tasks::{
-    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    offload_flash_storage_and_events,
-};
+use crate::core1_sub_tasks::{maybe_offload_events, offload_flash_storage_and_events};
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -243,13 +240,8 @@ pub fn core_1_task(
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
     mut timer: Timer,
-    // device_config: &DeviceConfig,
+    device_config: &DeviceConfig,
 ) {
-    // let device_config = device_config.borrow();
-    let device_config: Option<DeviceConfig> =
-        DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
-    let device_config = device_config.unwrap();
-
     let dev_mode = true;
     info!("=== Core 1 start ===");
     if dev_mode {
@@ -261,7 +253,10 @@ pub fn core_1_task(
         "config in core1 address is {:#x}",
         &device_config.config().device_id as *const _ as usize
     );
-
+    info!(
+        "page in core1 is {:#x}",
+        &flash_storage.current_page.inner as *const _ as usize
+    );
     let mut synced_date_time = SyncedDateTime::default();
 
     let mut peripherals = unsafe { Peripherals::steal() };
@@ -402,104 +397,104 @@ pub fn core_1_task(
     // }
 
     // let device_config = device_config.unwrap_or(DeviceConfig::default());
-    if let AudioMode::AudioOnly = device_config.config().audio_mode {
-        let _ = shared_i2c.disable_alarm(&mut delay);
-        info!("Is audio device restarting");
-        sio.fifo.write_blocking(Core1Task::RequestReset.into());
-        loop {
-            // Wait to be reset
-            nop();
-        }
-    }
+    // if let AudioMode::AudioOnly = device_config.config().audio_mode {
+    //     let _ = shared_i2c.disable_alarm(&mut delay);
+    //     info!("Is audio device restarting");
+    //     sio.fifo.write_blocking(Core1Task::RequestReset.into());
+    //     loop {
+    //         // Wait to be reset
+    //         nop();
+    //     }
+    // }
 
     let record_audio: bool;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
 
-    match device_config.config().audio_mode {
-        AudioMode::AudioAndThermal => {
-            let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
-            record_audio = true;
-            let mut schedule_alarm = true;
+    // match device_config.config().audio_mode {
+    //     AudioMode::AudioAndThermal => {
+    //         let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
+    //         record_audio = true;
+    //         let mut schedule_alarm = true;
 
-            if let Some(audio_alarm) = audio_alarm {
-                if let Ok(audio_mode) = audio_mode {
-                    if audio_mode == AlarmMode::AUDIO {
-                        schedule_alarm = false;
-                    }
-                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
-                }
-                if !schedule_alarm {
-                    let synced = synced_date_time.date_time_utc;
-                    let until_alarm = (audio_alarm - synced).num_minutes();
-                    if until_alarm <= MAX_GAP_MIN as i64 {
-                        info!(
-                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                            audio_alarm.year(),
-                            audio_alarm.month(),
-                            audio_alarm.day(),
-                            audio_alarm.hour(),
-                            audio_alarm.minute()
-                        );
-                        if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
-                            next_audio_alarm = Some(audio_alarm);
-                            schedule_alarm = false;
-                        } else {
-                            schedule_alarm = true;
-                            //if window time changed and alarm is after rec window start
-                            info!("Rescehduling as alarm is after window start");
-                        }
-                    } else {
-                        info!("Alarm is missed");
-                    }
-                }
-            }
-            if schedule_alarm {
-                if let Ok(next_alarm) = schedule_audio_rec(
-                    &mut delay,
-                    &synced_date_time,
-                    &mut shared_i2c,
-                    &mut flash_storage,
-                    &mut timer,
-                    &mut event_logger,
-                    &device_config,
-                ) {
-                    next_audio_alarm = Some(next_alarm);
-                    info!("Setting a pending audio alarm");
-                } else {
-                    error!("Couldn't schedule alarm");
-                }
-            }
-        }
-        _ => {
-            clear_audio_alarm(&mut flash_storage);
-            record_audio = false
-        }
-    }
+    //         if let Some(audio_alarm) = audio_alarm {
+    //             if let Ok(audio_mode) = audio_mode {
+    //                 if audio_mode == AlarmMode::AUDIO {
+    //                     schedule_alarm = false;
+    //                 }
+    //                 //otherwise alarm is for thermal so reschedule an audio alarm during recording window
+    //             }
+    //             if !schedule_alarm {
+    //                 let synced = synced_date_time.date_time_utc;
+    //                 let until_alarm = (audio_alarm - synced).num_minutes();
+    //                 if until_alarm <= MAX_GAP_MIN as i64 {
+    //                     info!(
+    //                         "Audio alarm already scheduled for {}-{}-{} {}:{}",
+    //                         audio_alarm.year(),
+    //                         audio_alarm.month(),
+    //                         audio_alarm.day(),
+    //                         audio_alarm.hour(),
+    //                         audio_alarm.minute()
+    //                     );
+    //                     if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
+    //                         next_audio_alarm = Some(audio_alarm);
+    //                         schedule_alarm = false;
+    //                     } else {
+    //                         schedule_alarm = true;
+    //                         //if window time changed and alarm is after rec window start
+    //                         info!("Rescehduling as alarm is after window start");
+    //                     }
+    //                 } else {
+    //                     info!("Alarm is missed");
+    //                 }
+    //             }
+    //         }
+    //         if schedule_alarm {
+    //             if let Ok(next_alarm) = schedule_audio_rec(
+    //                 &mut delay,
+    //                 &synced_date_time,
+    //                 &mut shared_i2c,
+    //                 &mut flash_storage,
+    //                 &mut timer,
+    //                 &mut event_logger,
+    //                 &device_config,
+    //             ) {
+    //                 next_audio_alarm = Some(next_alarm);
+    //                 info!("Setting a pending audio alarm");
+    //             } else {
+    //                 error!("Couldn't schedule alarm");
+    //             }
+    //         }
+    //     }
+    //     _ => {
+    //         clear_audio_alarm(&mut flash_storage);
+    //         record_audio = false
+    //     }
+    // }
 
-    if !device_config.use_low_power_mode() {
-        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                &mut flash_storage,
-            );
-        }
-        maybe_offload_events(
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            &mut delay,
-            &mut timer,
-            &mut event_logger,
-            &mut flash_storage,
-            clock_freq,
-            &synced_date_time,
-            None,
-        );
-    }
+    // if !device_config.use_low_power_mode() {
+    //     if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+    //         event_logger.log_event(
+    //             LoggerEvent::new(
+    //                 LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+    //                 synced_date_time.get_timestamp_micros(&timer),
+    //             ),
+    //             &mut flash_storage,
+    //         );
+    //     }
+    //     maybe_offload_events(
+    //         &mut pi_spi,
+    //         &mut peripherals.RESETS,
+    //         &mut peripherals.DMA,
+    //         &mut delay,
+    //         &mut timer,
+    //         &mut event_logger,
+    //         &mut flash_storage,
+    //         clock_freq,
+    //         &synced_date_time,
+    //         None,
+    //     );
+    // }
     // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
     //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
     //  Otherwise, if the rp2040 happens to restart, we'll pretty much
@@ -584,7 +579,7 @@ pub fn core_1_task(
     } else {
         false
     };
-
+    let record_audio = false;
     if record_audio {
         if let Some(audio_alarm) = next_audio_alarm {
             info!(

@@ -210,8 +210,8 @@ fn main() -> ! {
     );
     flash_storage.init();
 
-    // let mut config: Option<DeviceConfig> =
-    //     DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
+    let mut config: Option<DeviceConfig> =
+        DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
     // // do all the get config crap here
 
     // if let Some(config) = &config {
@@ -396,7 +396,7 @@ fn main() -> ! {
             rosc,
             alarm_woke_us,
             unlocked_pin,
-            // config,
+            config,
         );
     }
 }
@@ -461,7 +461,7 @@ pub fn thermal_code(
         FunctionSio<SioInput>,
         PullDown,
     >,
-    // config: DeviceConfig,
+    config: DeviceConfig,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -492,6 +492,16 @@ pub fn thermal_code(
     info!("Camera serial #{}", lepton_serial);
     info!("Radiometry enabled? {}", radiometric_mode);
 
+    info!(
+        "id address is {:#x}",
+        &config.config().device_id as *const _ as usize
+    );
+    info!(
+        "page inner {:#x}",
+        &onboard_flash.current_page.inner as *const _ as usize
+    );
+    let config = unsafe { extend_lifetime_generic(&config) };
+    let ref_config = RefCell::new(config);
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
 
@@ -509,10 +519,6 @@ pub fn thermal_code(
         extend_lifetime_generic_mut(&mut fb1)
     })));
 
-    info!(
-        "id address is {:#x}",
-        &config.config().device_id as *const _ as usize
-    );
     // let r_config = RefCell::new(unsafe { extend_lifetime_generic(&config) });
     // Shenanigans to convince the second thread that all these values exist for the lifetime of the
     // program.
@@ -538,7 +544,7 @@ pub fn thermal_code(
                 lepton_firmware_version,
                 alarm_woke_us,
                 timer,
-                // &config,
+                ref_config,
             )
         });
     }

@@ -188,7 +188,7 @@ impl FrameData {
 }
 
 fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u16) {
-    let mut output = [0i32; FRAME_WIDTH * FRAME_HEIGHT];
+    let mut output = [0u8; FRAME_WIDTH * FRAME_HEIGHT];
     // We need to work out after the delta encoding what the range is, and how many bits we can pack
     // this into.
 
@@ -233,6 +233,7 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
         min_value = min_value.min(*curr_px);
         let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
         let val = *curr_px as i32 - *prev_raw as i32;
+
         let delta = val - prev_val;
         assert!(
             delta >= min,
@@ -254,7 +255,11 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
             curr_px,
             prev_raw
         );
-        *unsafe { output.get_unchecked_mut(i) } = delta;
+        //add 2 ^ 17 to ensure always positive
+        let le_bytes = (delta+131072).to_le_bytes();
+        for b_i in 0..17 {
+            *unsafe { output.get_unchecked_mut(i + b_i) } = le_bytes[14 + b_i];
+        }
         i += 1;
         prev_val = val;
     }

@@ -152,7 +152,7 @@ impl OnboardFlashStatus {
 }
 
 pub struct Page {
-    inner: Option<&'static mut [u8; 4 + 2048 + 128]>,
+    pub inner: Option<&'static mut [u8; 4 + 2048 + 128]>,
 }
 
 impl Page {
