@@ -68,8 +68,11 @@ pub fn maybe_offload_events(
                             }
                             //takes tc2-agent about this long to poll again will always fail otherwise
                             let time_since = (timer.get_counter() - counter).to_micros();
-                            if time_since < TIME_BETWEEN_TRANSFER {
-                                delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                            let extra_delay = attempts * 50;
+                            if time_since < (TIME_BETWEEN_TRANSFER + extra_delay) {
+                                delay.delay_us(
+                                    (TIME_BETWEEN_TRANSFER + extra_delay - time_since) as u32,
+                                );
                             }
                         } else {
                             break 'transfer_event;
@@ -210,6 +213,7 @@ pub fn offload_flash_storage_and_events(
                     part_count, block_index, page_index
                 );
             }
+            18474
 
             let mut attempts = 0;
             'transfer_part: loop {
@@ -222,15 +226,18 @@ pub fn offload_flash_storage_and_events(
                 if !did_transfer {
                     attempts += 1;
                     if attempts > 100 {
+                        info!("Failed because attmpets {}", attempts);
                         success = false;
                         break 'transfer_part;
                     }
                     //takes tc2-agent about this long to poll again will fail a lot otherwise
                     let time_since = (timer.get_counter() - counter).to_micros();
-                    if time_since < TIME_BETWEEN_TRANSFER {
-                        delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
+                    let extra_delay = attempts * 20;
+                    if time_since < (TIME_BETWEEN_TRANSFER + extra_delay) {
+                        delay.delay_us((TIME_BETWEEN_TRANSFER + extra_delay - time_since) as u32);
                     }
                 } else {
+                    info!("Sucess after {}", attempts);
                     break 'transfer_part;
                 }
             }
@@ -311,6 +318,8 @@ pub fn offload_flash_storage_and_events(
         );
         flash_storage.scan();
         warn!("File transfer to pi failed");
+        delay.delay_ms(2000);
+
         false
     }
 }

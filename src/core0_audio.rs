@@ -61,7 +61,7 @@ impl TryFrom<u8> for AlarmMode {
     }
 }
 
-const DEV_MODE: bool = false;
+const DEV_MODE: bool = true;
 pub const MAX_GAP_MIN: u8 = 60;
 pub fn audio_task(
     i2c_config: I2CConfig,
@@ -197,6 +197,9 @@ pub fn audio_task(
                 }
             }
         }
+    }
+    if DEV_MODE {
+        duration = 5;
     }
 
     let mut reschedule = false;
@@ -703,6 +706,7 @@ pub fn offload(
                 false,
             ) && flash_storage.has_files_to_offload()
             {
+                delay.delay_ms(2000);
                 return Err(());
             }
         }

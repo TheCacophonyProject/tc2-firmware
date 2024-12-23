@@ -70,6 +70,12 @@ impl DeviceConfigInner {
         }
         let (start_time, end_time) =
             window.unwrap_or(self.next_or_current_recording_window(date_time_utc));
+        info!(
+            "Start {} end is {} ",
+            start_time.time().hour(),
+            end_time.time().hour()
+        );
+
         let starts_in = start_time - *date_time_utc;
         let starts_in_hours = starts_in.num_hours();
         let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
@@ -144,7 +150,6 @@ impl DeviceConfigInner {
                 tomorrow_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
             let tomorrow_sunset =
                 tomorrow_sunset.naive_utc() + Duration::seconds(start_offset as i64);
-
             if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
                 let two_days_from_now_utc = *now_utc + Duration::days(2);
                 let (two_days_sunrise, _) = sun_times(
@@ -160,11 +165,14 @@ impl DeviceConfigInner {
             } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
             {
+                info!("Calculated today sunset {}", today_sunset.time().hour());
                 (Some(today_sunset), Some(tomorrow_sunrise))
             } else if *now_utc < tomorrow_sunset
                 && *now_utc < today_sunrise
                 && *now_utc > yesterday_sunset
             {
+                info!("Calculated today sunset {}", yesterday_sunset.time().hour());
+
                 (Some(yesterday_sunset), Some(today_sunrise))
             } else {
                 panic!("Unable to calculate relative time window");

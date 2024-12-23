@@ -643,7 +643,10 @@ pub fn core_1_task(
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
     let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
-
+    info!(
+        "Current utc time is {}",
+        &synced_date_time.date_time_utc.time().hour()
+    );
     info!(
         "Current time is in recording window? {}",
         device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
