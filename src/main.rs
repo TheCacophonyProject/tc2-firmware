@@ -21,6 +21,8 @@ mod pdm_microphone;
 mod pdmfilter;
 mod rp2040_flash;
 mod sun_times;
+use fugit::HertzU32;
+
 mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::core0_audio::audio_task;
@@ -43,6 +45,7 @@ use bsp::{
 use chrono::NaiveDateTime;
 use cortex_m::asm::nop;
 use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use rp2040_hal::pac::resets;
 use rp2040_hal::rosc::RingOscillator;
 
 use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
@@ -109,7 +112,13 @@ impl FrameBuffer {
             [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
     }
 }
+use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
+use byteorder::{ByteOrder, LittleEndian};
+use crc::{Crc, CRC_16_XMODEM};
+use rp2040_hal::dma::DMAExt;
+use rp2040_hal::pio::PIOExt;
 
+use crate::onboard_flash::OnboardFlash;
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
@@ -138,10 +147,10 @@ fn main() -> ! {
     watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
 
     watchdog.pause_on_debug(true);
-    watchdog.start(8388607.micros());
+    // watchdog.start(8388607.micros());
 
     info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
+    let mut timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
@@ -165,150 +174,257 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &clocks.system_clock,
     );
+    let gpio0 = pins.gpio0;
+    let gpio1 = pins.gpio1;
+    let pins = Core1Pins {
+        pi_ping: pins.gpio5.into_pull_down_input(),
 
-    info!("Initing shared i2c");
-    // We need to get the GPIO pin for determining who is using the I2C bus.
-    let unlocked_pin = pins
-        .gpio3
-        .into_function::<FunctionSio<SioInput>>()
-        .into_pull_type::<PullDown>();
+        pi_miso: pins.gpio15.into_floating_disabled(),
+        pi_mosi: pins.gpio12.into_floating_disabled(),
+        pi_cs: pins.gpio13.into_floating_disabled(),
+        pi_clk: pins.gpio14.into_floating_disabled(),
 
-    let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
-    info!("Got shared i2c");
-    let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
-    info!("Woken by RTC alarm? {}", alarm_woke_us);
-    if alarm_woke_us {
-        shared_i2c.clear_alarm(&mut delay);
+        fs_cs: pins.gpio9.into_push_pull_output(),
+        fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+        fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+        fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+    };
+    // init flash
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
+
+    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
+
+    let mut flash_storage = OnboardFlash::new(
+        pins.fs_cs,
+        pins.fs_mosi,
+        pins.fs_clk,
+        pins.fs_miso,
+        flash_page_buf,
+        flash_page_buf_2,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        true,
+        None,
+    );
+
+    let mut payload_buf = [0x42u8; 2066];
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+    let mut pi_spi = ExtSpiTransfers::new(
+        pins.pi_mosi,
+        pins.pi_cs,
+        pins.pi_clk,
+        pins.pi_miso,
+        pins.pi_ping,
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
+    );
+    let mut peripherals = unsafe { Peripherals::steal() };
+
+    watchdog.feed();
+    flash_storage.take_spi(
+        peripherals.SPI1,
+        &mut peripherals.RESETS,
+        system_clock_freq.Hz(),
+    );
+    flash_storage.init();
+    delay.delay_ms(4000);
+    loop {
+        nop();
     }
 
-    if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
-        info!("EEPROM audio device: {}", audio_only);
-        is_audio = is_audio || audio_only;
-    }
+    if let Some(free_spi) = flash_storage.free_spi() {
+        let mut payload = [0u8; 16];
 
-    if !is_audio {
-        let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
-        if disabled_alarm.is_err() {
-            error!("{}", disabled_alarm.unwrap());
-        }
-    }
+        pi_spi.enable(free_spi, &mut peripherals.RESETS);
 
-    let date_time: NaiveDateTime;
-    match shared_i2c.get_datetime(&mut delay) {
-        Ok(now) => {
-            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
-            date_time = get_naive_datetime(now)
-        }
-        Err(_) => crate::panic!("Unable to get DateTime from RTC"),
-    }
+        LittleEndian::write_u32(&mut payload[0..4], 1);
+        LittleEndian::write_u32(&mut payload[4..8], 14);
+        LittleEndian::write_u32(&mut payload[8..12], 1);
+        LittleEndian::write_u32(&mut payload[12..16], 1);
 
-    if is_audio {
-        let config = config.unwrap().0;
-        match config.audio_mode {
-            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
-                    if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
-                        let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
-                        info!("Audio request thermal mode");
-                        //audio mode wants to go in thermal mode
-                        is_audio = false;
-                    } else {
-                        let (start_time, end_time) =
-                            config.next_or_current_recording_window(&date_time);
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let crc = crc_check.checksum(&payload);
+        info!("SEDNGIN CONNECT");
+        loop {
+            let start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
+            // let success = pi_spi.ping2(&mut timer, true, &mut delay);
 
-                        let in_window = config.time_is_in_recording_window(&date_time, &None);
-                        if in_window {
-                            is_audio = (state
-                                & (tc2_agent_state::LONG_AUDIO_RECORDING
-                                    | tc2_agent_state::TAKE_AUDIO
-                                    | tc2_agent_state::TEST_AUDIO_RECORDING))
-                                > 0;
-                            if is_audio {
-                                info!("Is audio because thermal requested or test rec");
-                            }
-                        }
-                    }
-                }
+            let success = pi_spi.send_message(
+                ExtTransferMessage::CameraConnectInfo,
+                &payload,
+                crc,
+                &mut peripherals.DMA,
+                &mut timer,
+                &mut peripherals.RESETS,
+            );
+            info!(
+                "Send message took {} micros",
+                (timer.get_counter() - start).to_micros(),
+            );
+            if !success {
+                info!("SUCCCES FAILED");
+                delay.delay_ms(10000);
             }
-            _ => (),
+
+            // delay.delay_ms(2000);
         }
     }
-    let (i2c1, unlocked_pin) = shared_i2c.free();
-    if is_audio {
-        let gpio0 = pins.gpio0;
-        let gpio1 = pins.gpio1;
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
 
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
-
-        audio_branch(
-            i2c1,
-            system_clock_freq,
-            timer,
-            pins,
-            gpio0,
-            gpio1,
-            watchdog,
-            alarm_woke_us,
-            unlocked_pin,
-        );
-    } else {
-        let lepton_pins = LeptonPins {
-            tx: pins.gpio23.into_function(),
-            rx: pins.gpio20.into_function(),
-            clk: pins.gpio22.into_function(),
-            cs: pins.gpio21.into_function(),
-
-            vsync: pins.gpio19.into_function(),
-
-            sda: pins.gpio24.into_function(),
-            scl: pins.gpio25.into_function(),
-
-            power_down: pins.gpio28.into_push_pull_output(),
-            power_enable: pins.gpio18.into_push_pull_output(),
-            reset: pins.gpio29.into_push_pull_output(),
-            clk_disable: pins.gpio27.into_push_pull_output(),
-            master_clk: pins.gpio26.into_floating_input(),
-        };
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
-
-        thermal_code(
-            lepton_pins,
-            pins,
-            watchdog,
-            system_clock_freq,
-            delay,
-            timer,
-            i2c1,
-            clocks,
-            rosc,
-            alarm_woke_us,
-            unlocked_pin,
-        );
+    loop {
+        nop();
     }
+    // info!("Initing shared i2c");
+    // // We need to get the GPIO pin for determining who is using the I2C bus.
+    // let unlocked_pin = pins
+    //     .gpio3
+    //     .into_function::<FunctionSio<SioInput>>()
+    //     .into_pull_type::<PullDown>();
+
+    // let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
+    // info!("Got shared i2c");
+    // let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
+    // info!("Woken by RTC alarm? {}", alarm_woke_us);
+    // if alarm_woke_us {
+    //     shared_i2c.clear_alarm(&mut delay);
+    // }
+
+    // if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
+    //     info!("EEPROM audio device: {}", audio_only);
+    //     is_audio = is_audio || audio_only;
+    // }
+
+    // if !is_audio {
+    //     let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+    //     if disabled_alarm.is_err() {
+    //         error!("{}", disabled_alarm.unwrap());
+    //     }
+    // }
+
+    // let date_time: NaiveDateTime;
+    // match shared_i2c.get_datetime(&mut delay) {
+    //     Ok(now) => {
+    //         info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
+    //         date_time = get_naive_datetime(now)
+    //     }
+    //     Err(_) => crate::panic!("Unable to get DateTime from RTC"),
+    // }
+
+    // if is_audio {
+    //     let config = config.unwrap().0;
+    //     match config.audio_mode {
+    //         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
+    //             if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
+    //                 if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
+    //                     let _ = shared_i2c.tc2_agent_clear_thermal_mode(&mut delay);
+    //                     info!("Audio request thermal mode");
+    //                     //audio mode wants to go in thermal mode
+    //                     is_audio = false;
+    //                 } else {
+    //                     let (start_time, end_time) =
+    //                         config.next_or_current_recording_window(&date_time);
+
+    //                     let in_window = config.time_is_in_recording_window(&date_time, &None);
+    //                     if in_window {
+    //                         is_audio = (state
+    //                             & (tc2_agent_state::LONG_AUDIO_RECORDING
+    //                                 | tc2_agent_state::TAKE_AUDIO
+    //                                 | tc2_agent_state::TEST_AUDIO_RECORDING))
+    //                             > 0;
+    //                         if is_audio {
+    //                             info!("Is audio because thermal requested or test rec");
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //         _ => (),
+    //     }
+    // }
+    // let (i2c1, unlocked_pin) = shared_i2c.free();
+    // if is_audio {
+    //     let gpio0 = pins.gpio0;
+    //     let gpio1 = pins.gpio1;
+    //     let pins = Core1Pins {
+    //         pi_ping: pins.gpio5.into_pull_down_input(),
+
+    //         pi_miso: pins.gpio15.into_floating_disabled(),
+    //         pi_mosi: pins.gpio12.into_floating_disabled(),
+    //         pi_cs: pins.gpio13.into_floating_disabled(),
+    //         pi_clk: pins.gpio14.into_floating_disabled(),
+
+    //         fs_cs: pins.gpio9.into_push_pull_output(),
+    //         fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+    //         fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+    //         fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+    //     };
+
+    //     audio_branch(
+    //         i2c1,
+    //         system_clock_freq,
+    //         timer,
+    //         pins,
+    //         gpio0,
+    //         gpio1,
+    //         watchdog,
+    //         alarm_woke_us,
+    //         unlocked_pin,
+    //     );
+    // } else {
+    //     let lepton_pins = LeptonPins {
+    //         tx: pins.gpio23.into_function(),
+    //         rx: pins.gpio20.into_function(),
+    //         clk: pins.gpio22.into_function(),
+    //         cs: pins.gpio21.into_function(),
+
+    //         vsync: pins.gpio19.into_function(),
+
+    //         sda: pins.gpio24.into_function(),
+    //         scl: pins.gpio25.into_function(),
+
+    //         power_down: pins.gpio28.into_push_pull_output(),
+    //         power_enable: pins.gpio18.into_push_pull_output(),
+    //         reset: pins.gpio29.into_push_pull_output(),
+    //         clk_disable: pins.gpio27.into_push_pull_output(),
+    //         master_clk: pins.gpio26.into_floating_input(),
+    //     };
+    //     let pins = Core1Pins {
+    //         pi_ping: pins.gpio5.into_pull_down_input(),
+
+    //         pi_miso: pins.gpio15.into_floating_disabled(),
+    //         pi_mosi: pins.gpio12.into_floating_disabled(),
+    //         pi_cs: pins.gpio13.into_floating_disabled(),
+    //         pi_clk: pins.gpio14.into_floating_disabled(),
+
+    //         fs_cs: pins.gpio9.into_push_pull_output(),
+    //         fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+    //         fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+    //         fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+    //     };
+
+    //     thermal_code(
+    //         lepton_pins,
+    //         pins,
+    //         watchdog,
+    //         system_clock_freq,
+    //         delay,
+    //         timer,
+    //         i2c1,
+    //         clocks,
+    //         rosc,
+    //         alarm_woke_us,
+    //         unlocked_pin,
+    //     );
 }
+// }
 use crate::attiny_rtc_i2c::I2CConfig;
 
 pub fn audio_branch(

@@ -396,6 +396,7 @@ pub fn core_1_task(
             false,
             &mut timer,
             existing_config,
+            &mut delay,
         );
 
     if woken_by_alarm {

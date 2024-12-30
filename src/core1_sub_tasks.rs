@@ -213,7 +213,7 @@ pub fn offload_flash_storage_and_events(
                     part_count, block_index, page_index
                 );
             }
-            18474
+            // 18474
 
             let mut attempts = 0;
             'transfer_part: loop {
@@ -224,6 +224,8 @@ pub fn offload_flash_storage_and_events(
                     pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
                 let counter = timer.get_counter();
                 if !did_transfer {
+                    info!("FAILED TRANSFER");
+                    delay.delay_ms(10000);
                     attempts += 1;
                     if attempts > 100 {
                         info!("Failed because attmpets {}", attempts);
@@ -237,7 +239,9 @@ pub fn offload_flash_storage_and_events(
                         delay.delay_us((TIME_BETWEEN_TRANSFER + extra_delay - time_since) as u32);
                     }
                 } else {
-                    info!("Sucess after {}", attempts);
+                    if attempts > 0 {
+                        info!("Sucess after {}", attempts);
+                    }
                     break 'transfer_part;
                 }
             }
@@ -336,6 +340,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     audio_mode: bool,
     timer: &mut Timer,
     existing_config: Option<DeviceConfig>,
+    delay: &mut Delay,
 ) -> (Option<DeviceConfig>, bool) {
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
@@ -349,6 +354,18 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
+        info!("SEDNGIN CONNECT");
+        let success = pi_spi.send_message(
+            ExtTransferMessage::CameraConnectInfo,
+            &payload,
+            crc,
+            dma,
+            timer,
+            resets,
+        );
+        info!("DELAY {}", success);
+        // delay.delay_ms(100);
+        info!("SEND AGAIN");
         if pi_spi.send_message(
             ExtTransferMessage::CameraConnectInfo,
             &payload,
@@ -375,6 +392,8 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                         let crc = crc_check.checksum(&payload);
                         loop {
+                            info!("GETTING MASK");
+
                             if pi_spi.send_message(
                                 ExtTransferMessage::GetMotionDetectionMask,
                                 &payload,
@@ -400,6 +419,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                     }
                                 }
                             }
+                            info!("GOT MASK");
                         }
                     }
 

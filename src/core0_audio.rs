@@ -142,7 +142,7 @@ pub fn audio_task(
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
-    let mut synced_date_time = SyncedDateTime::default();
+    let mut synced_date_time: SyncedDateTime = SyncedDateTime::default();
     let mut event_logger: EventLogger = EventLogger::new(&mut flash_storage);
 
     match shared_i2c.get_datetime(&mut delay) {
@@ -204,6 +204,7 @@ pub fn audio_task(
 
     let mut reschedule = false;
     let mut alarm_date_time: Option<NaiveDateTime> = None;
+    watchdog.disable();
 
     //do this so tc2-agent knows whats going on
     let (new_config, device_config_was_updated) =
@@ -218,7 +219,10 @@ pub fn audio_task(
             true,
             timer,
             Some(device_config),
+            &mut delay,
         );
+    watchdog.start(8388607.micros());
+
     device_config = new_config.unwrap();
 
     if device_config_was_updated {

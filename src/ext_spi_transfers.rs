@@ -10,10 +10,12 @@ use core::cell::RefCell;
 use core::ops::Not;
 use critical_section::Mutex;
 use defmt::{info, warn, Format};
+use embedded_hal::digital::v2::{InputPin, OutputPin};
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
 
+use cortex_m::delay::Delay;
 use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, CH0};
@@ -25,6 +27,7 @@ use rp2040_hal::gpio::{
 use rp2040_hal::pio::{
     PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM0,
 };
+
 use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
 #[repr(u8)]
@@ -49,8 +52,11 @@ static GLOBAL_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(No
 fn IO_IRQ_BANK0() {
     critical_section::with(|cs| {
         let mut this_ref = GLOBAL_PING_PIN.borrow_ref_mut(cs);
-        let ping_pin = this_ref.as_mut().unwrap();
+        let ping_pin: &mut Pin<Gpio5, FunctionSio<SioInput>, PullUp> = this_ref.as_mut().unwrap();
+        // info!("INTERRUPTED {}", ping_pin.is_high());
         if ping_pin.interrupt_status(LevelLow) {
+            info!("CLEARING stats clearing {}", ping_pin.is_high());
+
             ping_pin.clear_interrupt(LevelLow);
         }
     });
@@ -60,7 +66,7 @@ fn IO_IRQ_BANK0() {
 fn TIMER_IRQ_0() {
     critical_section::with(|cs| {
         let mut this_ref = GLOBAL_ALARM.borrow_ref_mut(cs);
-        let alarm = this_ref.as_mut().unwrap();
+        let alarm: &mut Alarm0 = this_ref.as_mut().unwrap();
         alarm.clear_interrupt();
     });
 }
@@ -178,11 +184,94 @@ impl ExtSpiTransfers {
             self.spi = Some(spi);
         }
     }
+
+    pub fn ping2(&mut self, timer: &mut Timer, pi_is_awake: bool, delay: &mut Delay) -> bool {
+        let start = timer.get_counter();
+        let ping_pin = self.ping.take().unwrap();
+        info!("Ping pin is high? {}", ping_pin.is_high());
+        // let mut ping_pin = ping_pin.into_push_pull_output();
+        // let _ = ping_pin.set_high();
+        let mut ping_pin = ping_pin.into_pull_up_input();
+        info!("pre set enabled is high? {}", ping_pin.is_high());
+        // delay.delay_ms(4000);
+        ping_pin.set_interrupt_enabled(LevelLow, true);
+        // info!("set enabled is high? {}", ping_pin.is_high());
+        // // delay.delay_ms(4000);
+        // if ping_pin.interrupt_status(LevelLow) {
+        //     info!("ping status checking status{}", ping_pin.is_high());
+
+        //     ping_pin.clear_interrupt(LevelLow);
+        // }
+        let mut alarm: Alarm0 = timer.alarm_0().unwrap();
+
+        // Give away our pins by moving them into the `GLOBAL_PINS` variable.
+        // We won't need to access them in the main thread again
+        critical_section::with(|cs| {
+            GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
+        });
+        // let _ = alarm.schedule(MicrosDurationU32::micros(300)).unwrap();
+        // alarm.enable_interrupt();
+        // critical_section::with(|cs| {
+        //     GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
+        // });
+        // Unmask the IO_BANK0/TIMER_0) IRQ so that the NVIC interrupt controller
+        // will jump to the interrupt function when the interrupt occurs.
+        // We do this last so that the interrupt can't go off while
+        // it is in the middle of being configured
+        unsafe {
+            pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+            pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
+        }
+
+        info!("Waiting for interrupt");
+        // Block until resumed by an interrupt from either the pin or from the alarm
+        cortex_m::asm::wfi();
+
+        pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
+        pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
+
+        let ping_time = (timer.get_counter() - start).to_micros();
+        let ping_pin = critical_section::with(|cs| {
+            GLOBAL_PING_PIN.borrow(cs).take().unwrap()
+            // GLOBAL_ALARM.borrow(cs).take().unwrap(),
+        });
+        // let finished = alarm.finished();
+        // alarm.clear_interrupt();
+        // let _ = alarm.cancel().unwrap();
+        // alarm.disable_interrupt();
+        ping_pin.set_interrupt_enabled(LevelLow, false);
+        info!("Ping pin high at end? {}", ping_pin.is_high());
+
+        self.ping = Some(ping_pin.into_pull_down_input());
+
+        return true;
+        // FIXME - Can we print this when we think the Pi should be awake?
+        // if finished && pi_is_awake {
+        //warn!("Alarm triggered, ping took {}", ping_time);
+        // }
+        // else if pi_is_awake {
+        //     warn!("Pi responded, ping took {}", ping_time);
+        // }
+        // !finished
+    }
+
     pub fn ping(&mut self, timer: &mut Timer, pi_is_awake: bool) -> bool {
         let start = timer.get_counter();
-        let ping_pin = self.ping.take().unwrap().into_pull_up_input();
+        let ping_pin = self.ping.take().unwrap();
+        info!("Ping pin is high? {}", ping_pin.is_high());
+        // let mut ping_pin = ping_pin.into_push_pull_output();
+        // let _ = ping_pin.set_high();
+        let mut ping_pin = ping_pin.into_pull_up_input();
+        info!("pre set enabled is high? {}", ping_pin.is_high());
+
         ping_pin.set_interrupt_enabled(LevelLow, true);
-        let mut alarm = timer.alarm_0().unwrap();
+        // info!("set enabled is high? {}", ping_pin.is_high());
+        // if ping_pin.interrupt_status(LevelLow) {
+        //     info!("ping status checking status{}", ping_pin.is_high());
+
+        //     ping_pin.clear_interrupt(LevelLow);
+        // }
+        let mut alarm: Alarm0 = timer.alarm_0().unwrap();
 
         // Give away our pins by moving them into the `GLOBAL_PINS` variable.
         // We won't need to access them in the main thread again
@@ -190,7 +279,8 @@ impl ExtSpiTransfers {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
 
-        let _ = alarm.schedule(MicrosDurationU32::micros(300)).unwrap();
+        // time it takes tc2 agent from reading a message to return to handling intterupt
+        let _ = alarm.schedule(MicrosDurationU32::micros(1000)).unwrap();
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
@@ -203,6 +293,8 @@ impl ExtSpiTransfers {
             pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
             pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
         }
+
+        // info!("Waiting for interrupt");
         // Block until resumed by an interrupt from either the pin or from the alarm
         cortex_m::asm::wfi();
 
@@ -218,15 +310,17 @@ impl ExtSpiTransfers {
         });
         let finished = alarm.finished();
         alarm.clear_interrupt();
-        let _ = alarm.cancel();
+        let _ = alarm.cancel().unwrap();
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
+        info!("Ping pin high at end? {}", ping_pin.is_high());
+
         self.ping = Some(ping_pin.into_pull_down_input());
+
         // FIXME - Can we print this when we think the Pi should be awake?
-        if finished && pi_is_awake {
-            //warn!("Alarm triggered, ping took {}", ping_time);
-        }
-        // else if pi_is_awake {
+        // if finished && pi_is_awake {
+        //     warn!("Alarm triggered, ping took {}", ping_time);
+        // } else if pi_is_awake {
         //     warn!("Pi responded, ping took {}", ping_time);
         // }
         !finished
@@ -490,6 +584,7 @@ impl ExtSpiTransfers {
                         1,
                     );
                     //gp 5th August 2024 this was sometimes hanging, added the abort. maybe fixed??
+                    // info!("WAITING FOR SEND");
                     let (r_ch0, spi, r_buf) = transfer.wait();
                     self.dma_channel_0 = Some(r_ch0);
                     // Find offset crc in buffer:
@@ -521,11 +616,12 @@ impl ExtSpiTransfers {
                     } else {
                         info!("Failed to find return data start in {:?}", r_buf);
                     }
+                    // info!("MESSAGE SENT");
                     self.return_payload_buffer = Some(r_buf);
                     self.spi = Some(spi);
                 }
             } else {
-                // warn!("Pi failed to receive");
+                warn!("Pi failed to receive");
                 finished_transfer = false;
                 transmit_success = true;
             }
