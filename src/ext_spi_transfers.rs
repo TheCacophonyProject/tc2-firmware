@@ -178,7 +178,7 @@ impl ExtSpiTransfers {
             self.spi = Some(spi);
         }
     }
-    pub fn ping(&mut self, timer: &mut Timer, pi_is_awake: bool) -> bool {
+    pub fn ping(&mut self, timer: &mut Timer, pi_is_awake: bool, timeout: Option<u32>) -> bool {
         let start = timer.get_counter();
         let ping_pin = self.ping.take().unwrap().into_pull_up_input();
         ping_pin.set_interrupt_enabled(LevelLow, true);
@@ -189,8 +189,10 @@ impl ExtSpiTransfers {
         critical_section::with(|cs| {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
-
-        let _ = alarm.schedule(MicrosDurationU32::micros(300)).unwrap();
+        let alarm_timeout = timeout.unwrap_or(600);
+        let _ = alarm
+            .schedule(MicrosDurationU32::micros(alarm_timeout))
+            .unwrap();
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
@@ -232,7 +234,7 @@ impl ExtSpiTransfers {
         !finished
     }
 
-    pub fn begin_message(
+    pub fn begin_message_pio(
         &mut self,
         message_type: ExtTransferMessage,
         payload: &mut [u8],
@@ -275,7 +277,7 @@ impl ExtSpiTransfers {
                     break;
                 }
             }
-            if self.ping(timer, false) {
+            if self.ping(timer, false, None) {
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
@@ -401,7 +403,7 @@ impl ExtSpiTransfers {
         }
     }
 
-    pub fn send_message(
+    pub fn send_message_over_spi(
         &mut self,
         message_type: ExtTransferMessage,
         payload: &[u8],
@@ -444,7 +446,7 @@ impl ExtSpiTransfers {
         let mut transmit_success = false;
         let mut finished_transfer = false;
         while !transmit_success {
-            if self.ping(timer, true) {
+            if self.ping(timer, true, Some(3000)) {
                 finished_transfer = true;
                 let start = timer.get_counter();
 

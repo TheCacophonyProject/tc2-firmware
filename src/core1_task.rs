@@ -768,7 +768,7 @@ pub fn core_1_task(
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame to pi if it is available.
         let transfer = if frame_header_is_valid {
-            pi_spi.begin_message(
+            pi_spi.begin_message_pio(
                 ExtTransferMessage::CameraRawFrameTransfer,
                 &mut thread_local_frame_buffer
                     .as_mut()
