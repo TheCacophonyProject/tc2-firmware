@@ -117,8 +117,11 @@ use byteorder::{ByteOrder, LittleEndian};
 use crc::{Crc, CRC_16_XMODEM};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::pio::PIOExt;
-
+// use hal::
 use crate::onboard_flash::OnboardFlash;
+
+const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
@@ -126,6 +129,25 @@ fn main() -> ! {
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     let mut config = DeviceConfig::load_existing_inner_config_from_flash();
     let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+
+    // let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
+    // watchdog.enable_tick_generation((XTAL_FREQ_HZ / 1_000_000) as u8);
+
+    // watchdog.pause_on_debug(true);
+
+    // Configure the clocks
+    // let clocks = rp2040_hal::clocks::init_clocks_and_plls(
+    //     XTAL_FREQ_HZ,
+    //     peripherals.XOSC,
+    //     peripherals.CLOCKS,
+    //     peripherals.PLL_SYS,
+    //     peripherals.PLL_USB,
+    //     &mut peripherals.RESETS,
+    //     &mut watchdog,
+    // )
+    // .ok()
+    // .unwrap();
+
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -237,12 +259,12 @@ fn main() -> ! {
     );
     flash_storage.init();
     delay.delay_ms(4000);
-    loop {
-        nop();
-    }
+    // loop {
+    //     nop();
+    // }
 
     if let Some(free_spi) = flash_storage.free_spi() {
-        let mut payload = [0u8; 16];
+        let mut payload = [1u8; 2048];
 
         pi_spi.enable(free_spi, &mut peripherals.RESETS);
 
@@ -253,27 +275,74 @@ fn main() -> ! {
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
-        info!("SEDNGIN CONNECT");
-        loop {
-            let start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
-            // let success = pi_spi.ping2(&mut timer, true, &mut delay);
+        let mut i = 0;
+        let mut msg_type: ExtTransferMessage;
+        let parts = 2000;
+        let mut stopping = false;
 
-            let success = pi_spi.send_message(
-                ExtTransferMessage::CameraConnectInfo,
-                &payload,
-                crc,
-                &mut peripherals.DMA,
-                &mut timer,
-                &mut peripherals.RESETS,
-            );
-            info!(
-                "Send message took {} micros",
-                (timer.get_counter() - start).to_micros(),
-            );
-            if !success {
-                info!("SUCCCES FAILED");
-                delay.delay_ms(10000);
+        loop {
+            if i == 0 {
+                msg_type = ExtTransferMessage::BeginFileTransfer;
+            } else if i == parts {
+                msg_type = ExtTransferMessage::EndFileTransfer;
+            } else if i > parts {
+                info!("File finished starting again in 10 seconds");
+                delay.delay_ms(10 * 1000);
+                i = 0;
+                msg_type = ExtTransferMessage::BeginFileTransfer;
+                loop {
+                    nop();
+                }
+            } else {
+                msg_type = ExtTransferMessage::ResumeFileTransfer
             }
+
+            let start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
+            let mut success = false;
+            let mut attempts: i32 = 0;
+            while !(success) {
+                success = pi_spi.send_message(
+                    msg_type,
+                    &payload,
+                    crc,
+                    &mut peripherals.DMA,
+                    &mut timer,
+                    &mut peripherals.RESETS,
+                );
+                let time_took = (timer.get_counter() - start).to_micros();
+
+                // info!("Send message took {} micros", time_took);
+                if time_took > 7000 {
+                    info!(
+                        "TOOK TOO LONG WHY??? num pings {} attempts {}",
+                        pi_spi.num_pings, attempts
+                    );
+                }
+                if !success {
+                    info!("SUCCCES FAILED");
+                    // if i > 1 {
+                    delay.delay_ms(10000);
+                    // }
+                }
+                attempts += 1;
+                if stopping {
+                    info!("STOPPED");
+                    loop {
+                        nop();
+                    }
+                }
+                if time_took > 7000 {
+                    stopping = true;
+                }
+            }
+            if i > 1 && attempts > 1 {
+                info!("Took {} attempts at message {}", attempts, i);
+                loop {
+                    nop();
+                }
+            }
+            // info!("Sent message {}", i);
+            i += 1;
 
             // delay.delay_ms(2000);
         }

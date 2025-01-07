@@ -16,7 +16,7 @@ use embedded_hal::prelude::{
 };
 
 use cortex_m::delay::Delay;
-use fugit::MicrosDurationU32;
+use fugit::{MicrosDurationU32, TimerInstantU64};
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, CH0};
 use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
@@ -55,7 +55,7 @@ fn IO_IRQ_BANK0() {
         let ping_pin: &mut Pin<Gpio5, FunctionSio<SioInput>, PullUp> = this_ref.as_mut().unwrap();
         // info!("INTERRUPTED {}", ping_pin.is_high());
         if ping_pin.interrupt_status(LevelLow) {
-            info!("CLEARING stats clearing {}", ping_pin.is_high());
+            // info!("CLEARING stats clearing {}", ping_pin.is_high());
 
             ping_pin.clear_interrupt(LevelLow);
         }
@@ -68,6 +68,7 @@ fn TIMER_IRQ_0() {
         let mut this_ref = GLOBAL_ALARM.borrow_ref_mut(cs);
         let alarm: &mut Alarm0 = this_ref.as_mut().unwrap();
         alarm.clear_interrupt();
+        info!("CLEAR ALARM");
     });
 }
 
@@ -103,6 +104,8 @@ pub struct ExtSpiTransfers {
     state_machine_0_uninit: Option<UninitStateMachine<(PIO0, SM0)>>,
     state_machine_0_running: Option<(StateMachine<(PIO0, SM0), Running>, Rx<(PIO0, SM0)>)>,
     pio_tx: Option<Tx<(PIO0, SM0)>>,
+    pub last_ping: fugit::Instant<u64, 1, 1000000>,
+    pub num_pings: u16,
 }
 const DMA_CHANNEL_NUM: usize = 0;
 impl ExtSpiTransfers {
@@ -139,6 +142,8 @@ impl ExtSpiTransfers {
             state_machine_0_uninit: Some(state_machine_0_uninit),
             state_machine_0_running: None,
             pio_tx: None,
+            last_ping: fugit::Instant::<u64, 1, 1000000>::from_ticks(1),
+            num_pings: 0,
         }
     }
 
@@ -258,12 +263,24 @@ impl ExtSpiTransfers {
     pub fn ping(&mut self, timer: &mut Timer, pi_is_awake: bool) -> bool {
         let start = timer.get_counter();
         let ping_pin = self.ping.take().unwrap();
-        info!("Ping pin is high? {}", ping_pin.is_high());
+        // info!("Last ping is {}", self.last_ping);
+        let since_last = (start - self.last_ping).to_micros();
+        // info!(
+        //     "Ping pin is high? {} micros since last ping {}",
+        //     ping_pin.is_high(),
+        //     since_last
+        // );
         // let mut ping_pin = ping_pin.into_push_pull_output();
         // let _ = ping_pin.set_high();
         let mut ping_pin = ping_pin.into_pull_up_input();
-        info!("pre set enabled is high? {}", ping_pin.is_high());
+        let ping_time = (timer.get_counter() - start).to_micros();
 
+        // info!(
+        //     "pre set enabled is high? {} TOOK {}",
+        //     ping_pin.is_high(),
+        //     ping_time
+        // );
+        self.num_pings += 1;
         ping_pin.set_interrupt_enabled(LevelLow, true);
         // info!("set enabled is high? {}", ping_pin.is_high());
         // if ping_pin.interrupt_status(LevelLow) {
@@ -280,7 +297,7 @@ impl ExtSpiTransfers {
         });
 
         // time it takes tc2 agent from reading a message to return to handling intterupt
-        let _ = alarm.schedule(MicrosDurationU32::micros(1000)).unwrap();
+        let _ = alarm.schedule(MicrosDurationU32::micros(600)).unwrap();
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
@@ -293,8 +310,9 @@ impl ExtSpiTransfers {
             pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
             pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
         }
+        let ping_time = (timer.get_counter() - start).to_micros();
 
-        // info!("Waiting for interrupt");
+        // info!("Waiting for interrupt {}", ping_time);
         // Block until resumed by an interrupt from either the pin or from the alarm
         cortex_m::asm::wfi();
 
@@ -313,17 +331,16 @@ impl ExtSpiTransfers {
         let _ = alarm.cancel().unwrap();
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
-        info!("Ping pin high at end? {}", ping_pin.is_high());
+        // info!("Ping pin high at end? {}", ping_pin.is_high());
 
         self.ping = Some(ping_pin.into_pull_down_input());
-
         // FIXME - Can we print this when we think the Pi should be awake?
         // if finished && pi_is_awake {
-        //     warn!("Alarm triggered, ping took {}", ping_time);
+        // warn!("Alarm triggered, ping took {}", ping_time);
         // } else if pi_is_awake {
         //     warn!("Pi responded, ping took {}", ping_time);
         // }
-        !finished
+        return !finished;
     }
 
     pub fn begin_message(
@@ -504,6 +521,8 @@ impl ExtSpiTransfers {
         timer: &mut Timer,
         resets: &mut RESETS,
     ) -> bool {
+        let start_counter = timer.get_counter();
+
         // The transfer header contains the transfer type (2x)
         // the number of bytes to read for the payload (should this be twice?)
         // the 16 bit crc of the payload (twice)
@@ -537,18 +556,38 @@ impl ExtSpiTransfers {
         let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
+        let mut transmit_count = 0;
         while !transmit_success {
+            transmit_count += 1;
+            // info!(
+            //     "UNtil PINGING:  {}",
+            //     (timer.get_counter() - start_counter).to_micros()
+            // );
             if self.ping(timer, true) {
                 finished_transfer = true;
-                let start = timer.get_counter();
-
+                // info!(
+                //     "UNtil send wait  0:  {}",
+                //     (timer.get_counter() - start_counter).to_micros()
+                // );
                 let transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
                     self.spi.take().unwrap(),
                 );
+                // info!(
+                //     "UNtil send wait 1:  {}",
+                //     (timer.get_counter() - start_counter).to_micros()
+                // );
                 let transfer = transfer.start();
+                // info!(
+                //     "UNtil send wait 2:  {}",
+                //     (timer.get_counter() - start_counter).to_micros()
+                // );
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
+                // info!(
+                //     "UNtil send wait 4:  {}",
+                //     (timer.get_counter() - start_counter).to_micros()
+                // );
                 maybe_abort_dma_transfer(
                     dma_peripheral,
                     DMA_CHANNEL_NUM,
@@ -556,7 +595,15 @@ impl ExtSpiTransfers {
                     transfer_read_address,
                     1,
                 );
+                // info!(
+                //     "UNtil send wait {}",
+                //     (timer.get_counter() - start_counter).to_micros()
+                // );
                 let (r_ch0, r_buf, tx) = transfer.wait();
+                // info!(
+                //     "UNtil sent wait {}",
+                //     (timer.get_counter() - start_counter).to_micros()
+                // );
                 self.dma_channel_0 = Some(r_ch0);
                 self.payload_buffer = Some(r_buf);
                 self.spi = Some(tx);
@@ -585,10 +632,24 @@ impl ExtSpiTransfers {
                     );
                     //gp 5th August 2024 this was sometimes hanging, added the abort. maybe fixed??
                     // info!("WAITING FOR SEND");
+                    // info!(
+                    //     "Until response wait {}",
+                    //     (timer.get_counter() - start_counter).to_micros()
+                    // );
                     let (r_ch0, spi, r_buf) = transfer.wait();
+                    self.last_ping = timer.get_counter();
+                    // info!(
+                    //     "UNtil responsed {}",
+                    //     (timer.get_counter() - start_counter).to_micros()
+                    // );
                     self.dma_channel_0 = Some(r_ch0);
                     // Find offset crc in buffer:
                     if let Some(start) = r_buf.iter().position(|&x| x == 1) {
+                        // info!(
+                        //     "UNtil reponse pos iter {} start is {}",
+                        //     (timer.get_counter() - start_counter).to_micros(),
+                        //     start
+                        // );
                         if start < r_buf.len() - 8 {
                             let prelude = &r_buf[start + 1..start + 4];
                             if prelude[0] == 2 && prelude[1] == 3 && prelude[2] == 4 {
@@ -596,36 +657,56 @@ impl ExtSpiTransfers {
                                     LittleEndian::read_u16(&r_buf[start + 4..start + 6]);
                                 let crc_from_remote_dup =
                                     LittleEndian::read_u16(&r_buf[start + 6..start + 8]);
+                                // info!(
+                                //     "Crc {} from remote {} dup {} ms {}",
+                                //     crc,
+                                //     crc_from_remote,
+                                //     crc_from_remote_dup,
+                                //     (timer.get_counter() - start_counter).to_micros()
+                                // );
+                                // (transmit_count > 2 || self.num_pings == 1)
+                                //     &&
                                 if crc_from_remote == crc_from_remote_dup && crc_from_remote == crc
                                 {
                                     transmit_success = true;
-                                    //info!("Transfer success");
-                                    if message_type == ExtTransferMessage::CameraConnectInfo {
-                                        // We also expect to get a bunch of device config handshake info:
-                                        self.return_payload_offset = Some(start + 4);
-                                    } else if message_type
-                                        == ExtTransferMessage::GetMotionDetectionMask
-                                    {
-                                        self.return_payload_offset = Some(start + 8);
-                                    }
+                                    // info!(
+                                    //     "CRC comparison took {}",
+                                    //     (timer.get_counter() - start_counter).to_micros()
+                                    // );
                                 } else {
-                                    info!("Return crc mismatch");
+                                    info!("Return crc mismatch {}", r_buf);
                                 }
                             }
                         }
                     } else {
                         info!("Failed to find return data start in {:?}", r_buf);
                     }
+                    // info!(
+                    //     "UNtil handled response {}",
+                    //     (timer.get_counter() - start_counter).to_micros()
+                    // );
                     // info!("MESSAGE SENT");
                     self.return_payload_buffer = Some(r_buf);
                     self.spi = Some(spi);
+                    // info!(
+                    //     "UNtil handled response 2  {}",
+                    //     (timer.get_counter() - start_counter).to_micros()
+                    // );
                 }
             } else {
-                warn!("Pi failed to receive");
+                panic!("Pi failed to receive");
                 finished_transfer = false;
                 transmit_success = true;
             }
+
+            if !transmit_success {
+                // info!("LOOPING AGAIN AS TRANSMIT FAILED");
+            }
         }
+        // info!(
+        //     "UNtil return response Ultimate  {}",
+        //     (timer.get_counter() - start_counter).to_micros()
+        // );
         finished_transfer
     }
 
