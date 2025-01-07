@@ -189,7 +189,7 @@ impl ExtSpiTransfers {
         critical_section::with(|cs| {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
-        let alarm_timeout = timeout.unwrap_or(600);
+        let alarm_timeout = timeout.unwrap_or(300);
         let _ = alarm
             .schedule(MicrosDurationU32::micros(alarm_timeout))
             .unwrap();
