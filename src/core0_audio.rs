@@ -380,7 +380,6 @@ pub fn audio_task(
 
         if recording_type.is_none() && scheduled {
             // check we haven't missed the alarm somehow
-
             if let Some(alarm) = alarm_date_time {
                 let synced = synced_date_time.get_adjusted_dt(timer);
                 let until_alarm = (alarm - synced_date_time.get_adjusted_dt(timer)).num_minutes();
@@ -728,7 +727,6 @@ pub fn schedule_audio_rec(
 
     if device_config.config().audio_seed > 0 {
         // need 4  bytes for the month so shift day by 4
-
         seed = current_time.month() as u64
             + ((current_time.day() as u64) << 4)
             + device_config.config().audio_seed as u64;
@@ -749,6 +747,7 @@ pub fn schedule_audio_rec(
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
 
+    // if a seed is set always start alarm from 0am to keep consistent accross devices.So  will need to generate numbers until alarm is valid
     while wakeup <= current_time {
         let r = rng.generate();
         let mut wake_in;
