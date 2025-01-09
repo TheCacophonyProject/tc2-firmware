@@ -20,7 +20,7 @@ use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
 use rp2040_hal::{Sio, Timer};
 
-use chrono::{Datelike, NaiveDateTime, Timelike};
+use chrono::{Datelike, NaiveDateTime, NaiveTime, Timelike};
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
     _embedded_hal_watchdog_WatchdogEnable,
@@ -268,14 +268,13 @@ pub fn audio_task(
                 alarm.hour(),
                 alarm.minute(),
             );
+            alarm_date_time = Some(alarm);
             if device_config_was_updated {
-                if check_alarm_still_valid(
+                if !check_alarm_still_valid(
                     &alarm,
                     &synced_date_time.get_adjusted_dt(timer),
                     &device_config,
                 ) {
-                    alarm_date_time = Some(alarm);
-                } else {
                     //if window time changed and alarm is after rec window start
                     clear_audio_alarm(&mut flash_storage);
                     scheduled = false;
@@ -381,6 +380,7 @@ pub fn audio_task(
 
         if recording_type.is_none() && scheduled {
             // check we haven't missed the alarm somehow
+
             if let Some(alarm) = alarm_date_time {
                 let synced = synced_date_time.get_adjusted_dt(timer);
                 let until_alarm = (alarm - synced_date_time.get_adjusted_dt(timer)).num_minutes();
@@ -527,7 +527,6 @@ pub fn audio_task(
             }
         }
     }
-
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
 
@@ -723,30 +722,56 @@ pub fn schedule_audio_rec(
         error!("Failed to disable alarm");
         return Err(());
     }
-    let seed = if device_config.config().audio_seed == 0 {
-        synced_date_time.date_time_utc.timestamp() as u64
+    let mut wakeup: NaiveDateTime;
+    let seed: u64;
+    let current_time = synced_date_time.get_adjusted_dt(timer);
+
+    if device_config.config().audio_seed > 0 {
+        // need 4  bytes for the month so shift day by 4
+
+        seed = current_time.month() as u64
+            + ((current_time.day() as u64) << 4)
+            + device_config.config().audio_seed as u64;
+        wakeup = NaiveDateTime::new(
+            current_time.date(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
     } else {
-        device_config.config().audio_seed as u64
+        seed = synced_date_time.date_time_utc.and_utc().timestamp() as u64;
+        wakeup = current_time;
     };
+
     let mut rng = RNG::<WyRand, u16>::new(seed);
-    let r = rng.generate();
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;
     let short_pause: u64 = 2 * 60;
     let short_window: u64 = 5 * 60;
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
-    let mut wake_in;
-    if r <= short_chance {
-        wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
-    } else {
-        wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
+
+    while wakeup <= current_time {
+        let r = rng.generate();
+        let mut wake_in;
+
+        if r <= short_chance {
+            wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
+        } else {
+            wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
+        }
+
+        if DEV_MODE {
+            wake_in = 120;
+        }
+        wakeup = wakeup + chrono::Duration::seconds(wake_in as i64);
     }
-    if DEV_MODE {
-        wake_in = 120;
-    }
-    let current_time = synced_date_time.get_adjusted_dt(timer);
-    let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);
+    info!(
+        "Set alarm, current time is {}:{} Next alarm is {}:{}",
+        synced_date_time.date_time_utc.time().hour(),
+        synced_date_time.date_time_utc.time().minute(),
+        wakeup.hour(),
+        wakeup.minute()
+    );
+
     let mut alarm_mode = AlarmMode::AUDIO;
 
     match device_config.config().audio_mode {
@@ -777,11 +802,6 @@ pub fn schedule_audio_rec(
         }
         _ => (),
     }
-    info!(
-        "Current time is {}:{}",
-        synced_date_time.date_time_utc.time().hour(),
-        synced_date_time.date_time_utc.time().minute()
-    );
 
     if let Err(err) = i2c.enable_alarm(delay) {
         error!("Failed to enable alarm");
