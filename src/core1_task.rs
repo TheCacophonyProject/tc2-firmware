@@ -40,7 +40,9 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{check_alarm_still_valid, schedule_audio_rec, AlarmMode, MAX_GAP_MIN};
+use crate::core0_audio::{
+    check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
+};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -446,40 +448,40 @@ pub fn core_1_task(
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
 
     match device_config.config().audio_mode {
-        AudioMode::AudioAndThermal => {
+        AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
             let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
             record_audio = true;
             let mut schedule_alarm = true;
-
+            // if audio alarm is set check it's within 60 minutes and before or on thermal window start
             if let Some(audio_alarm) = audio_alarm {
                 if let Ok(audio_mode) = audio_mode {
                     if audio_mode == AlarmMode::AUDIO {
-                        schedule_alarm = false;
-                    }
-                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
-                }
-                if !schedule_alarm {
-                    let synced = synced_date_time.date_time_utc;
-                    let until_alarm = (audio_alarm - synced).num_minutes();
-                    if until_alarm <= MAX_GAP_MIN as i64 {
-                        info!(
-                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                            audio_alarm.year(),
-                            audio_alarm.month(),
-                            audio_alarm.day(),
-                            audio_alarm.hour(),
-                            audio_alarm.minute()
-                        );
-                        if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
-                            next_audio_alarm = Some(audio_alarm);
-                            schedule_alarm = false;
+                        let synced = synced_date_time.date_time_utc;
+                        let until_alarm = (audio_alarm - synced).num_minutes();
+                        if until_alarm <= MAX_GAP_MIN as i64 {
+                            info!(
+                                "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                                audio_alarm.year(),
+                                audio_alarm.month(),
+                                audio_alarm.day(),
+                                audio_alarm.hour(),
+                                audio_alarm.minute()
+                            );
+                            if check_alarm_still_valid_with_thermal_window(
+                                &audio_alarm,
+                                &synced,
+                                &device_config,
+                            ) {
+                                next_audio_alarm = Some(audio_alarm);
+                                schedule_alarm = false;
+                            } else {
+                                schedule_alarm = true;
+                                //if window time changed and alarm is after rec window start
+                                info!("Rescehduling as alarm is after window start");
+                            }
                         } else {
-                            schedule_alarm = true;
-                            //if window time changed and alarm is after rec window start
-                            info!("Rescehduling as alarm is after window start");
+                            info!("Alarm is missed");
                         }
-                    } else {
-                        info!("Alarm is missed");
                     }
                 }
             }
@@ -501,6 +503,7 @@ pub fn core_1_task(
             }
         }
         _ => {
+            info!("Clearing audio alarm");
             clear_audio_alarm(&mut flash_storage);
             record_audio = false
         }

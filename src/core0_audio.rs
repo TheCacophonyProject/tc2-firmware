@@ -270,7 +270,7 @@ pub fn audio_task(
             );
             alarm_date_time = Some(alarm);
             if device_config_was_updated {
-                if !check_alarm_still_valid(
+                if !check_alarm_still_valid_with_thermal_window(
                     &alarm,
                     &synced_date_time.get_adjusted_dt(timer),
                     &device_config,
@@ -278,6 +278,7 @@ pub fn audio_task(
                     //if window time changed and alarm is after rec window start
                     clear_audio_alarm(&mut flash_storage);
                     scheduled = false;
+                    alarm_date_time = None;
                     info!("Rescehduling as alarm is after window start");
                 }
             }
@@ -857,15 +858,16 @@ fn should_offload_audio_recordings(
     return false;
 }
 
-pub fn check_alarm_still_valid(
+pub fn check_alarm_still_valid_with_thermal_window(
     alarm: &NaiveDateTime,
     now: &NaiveDateTime,
     device_config: &DeviceConfig,
 ) -> bool {
+    // config has changed so check if not in audio only that alarm is still going to trigger on rec window start
     if device_config.config().audio_mode != AudioMode::AudioOnly {
         let (start, end) = device_config.next_or_current_recording_window(now);
         //alarm before start or we are in rec window
         return alarm <= &start || now >= &start;
     }
-    false
+    true
 }
