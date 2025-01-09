@@ -528,7 +528,6 @@ pub fn audio_task(
     }
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
-
     if reschedule {
         watchdog.feed();
         info!("Scheduling new recording");
@@ -726,19 +725,19 @@ pub fn schedule_audio_rec(
     let current_time = synced_date_time.get_adjusted_dt(timer);
 
     if device_config.config().audio_seed > 0 {
-        // need 4  bytes for the month so shift day by 4
-        seed = current_time.month() as u64
-            + ((current_time.day() as u64) << 4)
-            + device_config.config().audio_seed as u64;
         wakeup = NaiveDateTime::new(
             current_time.date(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+
+        seed = u64::wrapping_add(
+            wakeup.and_utc().timestamp_millis() as u64,
+            device_config.config().audio_seed as u64,
         );
     } else {
         seed = synced_date_time.date_time_utc.and_utc().timestamp() as u64;
         wakeup = current_time;
     };
-
     let mut rng = RNG::<WyRand, u16>::new(seed);
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;
