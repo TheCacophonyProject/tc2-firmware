@@ -209,6 +209,7 @@ impl SyncedDateTime {
             + chrono::Duration::microseconds(
                 (timer.get_counter() - self.timer_offset).to_micros() as i64
             ))
+        .and_utc()
         .timestamp_micros() as u64
     }
 
@@ -1327,7 +1328,8 @@ pub fn core_1_task(
                                 event_logger.log_event(
                                     LoggerEvent::new(
                                         LoggerEventKind::SetAlarm(
-                                            next_recording_window_start.timestamp_micros() as u64,
+                                            next_recording_window_start.and_utc().timestamp_micros()
+                                                as u64,
                                         ),
                                         synced_date_time.get_timestamp_micros(&timer),
                                     ),

@@ -395,12 +395,14 @@ pub fn audio_task(
 
                     // should take recording now
                     event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::Rp2040MissedAudioAlarm(alarm.timestamp_micros() as u64),
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    &mut flash_storage,
-                );
+                        LoggerEvent::new(
+                            LoggerEventKind::Rp2040MissedAudioAlarm(
+                                alarm.and_utc().timestamp_micros() as u64,
+                            ),
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
                     recording_type = Some(RecordingType::ScheduledRecording);
                 }
             }
@@ -811,7 +813,7 @@ pub fn schedule_audio_rec(
             if alarm_enabled {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
+                        LoggerEventKind::SetAlarm(wakeup.and_utc().timestamp_micros() as u64),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     flash_storage,

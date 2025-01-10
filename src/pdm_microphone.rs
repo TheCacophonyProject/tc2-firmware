@@ -414,12 +414,11 @@ impl AudioBuffer {
     }
     pub fn slice_for(&mut self, raw_data_length: usize) -> &mut [u16] {
         let end = self.index + raw_data_length / 8;
-        let slice;
-        if end > USER_BUFFER_LENGTH {
-            slice = &mut self.data[self.index..USER_BUFFER_LENGTH];
+        let slice = if end > USER_BUFFER_LENGTH {
+            &mut self.data[self.index..USER_BUFFER_LENGTH]
         } else {
-            slice = &mut self.data[self.index..self.index + raw_data_length / 8];
-        }
+            &mut self.data[self.index..self.index + raw_data_length / 8]
+        };
         self.index += slice.len();
         return slice;
     }
