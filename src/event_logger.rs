@@ -367,7 +367,7 @@ pub fn write_audio_alarm(
     let page_offset = 0;
     let mut event_data = [0u8; 18];
     event_data[0] = mode as u8;
-    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.timestamp_millis());
+    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.and_utc().timestamp_millis());
     flash_storage.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset as u16);
 }
 
