@@ -270,7 +270,7 @@ pub fn audio_task(
             );
             alarm_date_time = Some(alarm);
             if device_config_was_updated {
-                if !check_alarm_still_valid(
+                if !check_alarm_still_valid_with_thermal_window(
                     &alarm,
                     &synced_date_time.get_adjusted_dt(timer),
                     &device_config,
@@ -278,6 +278,7 @@ pub fn audio_task(
                     //if window time changed and alarm is after rec window start
                     clear_audio_alarm(&mut flash_storage);
                     scheduled = false;
+                    alarm_date_time = None;
                     info!("Rescehduling as alarm is after window start");
                 }
             }
@@ -394,12 +395,14 @@ pub fn audio_task(
 
                     // should take recording now
                     event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::Rp2040MissedAudioAlarm(alarm.timestamp_micros() as u64),
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    &mut flash_storage,
-                );
+                        LoggerEvent::new(
+                            LoggerEventKind::Rp2040MissedAudioAlarm(
+                                alarm.and_utc().timestamp_micros() as u64,
+                            ),
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
                     recording_type = Some(RecordingType::ScheduledRecording);
                 }
             }
@@ -810,7 +813,7 @@ pub fn schedule_audio_rec(
             if alarm_enabled {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
+                        LoggerEventKind::SetAlarm(wakeup.and_utc().timestamp_micros() as u64),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     flash_storage,
@@ -857,15 +860,16 @@ fn should_offload_audio_recordings(
     return false;
 }
 
-pub fn check_alarm_still_valid(
+pub fn check_alarm_still_valid_with_thermal_window(
     alarm: &NaiveDateTime,
     now: &NaiveDateTime,
     device_config: &DeviceConfig,
 ) -> bool {
+    // config has changed so check if not in audio only that alarm is still going to trigger on rec window start
     if device_config.config().audio_mode != AudioMode::AudioOnly {
         let (start, end) = device_config.next_or_current_recording_window(now);
         //alarm before start or we are in rec window
         return alarm <= &start || now >= &start;
     }
-    false
+    true
 }
