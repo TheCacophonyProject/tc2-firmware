@@ -813,7 +813,7 @@ pub fn core_1_task(
             .frame_data_as_u8_slice_mut();
 
         let frame_num = frame_telemetry.frame_num;
-        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 10000
+        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 20000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
             || frame_telemetry.ffc_status == FFCStatus::InProgress;
         let mut ended_recording = false;
