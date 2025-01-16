@@ -979,7 +979,6 @@ pub fn core_1_task(
                                 "Ending current recording start block {} end block{}",
                                 cptv_start_block_index, flash_storage.last_used_block_index
                             );
-                            prev_frame_2.fill(0);
                             event_logger.log_event(
                                 LoggerEvent::new(
                                     LoggerEventKind::EndedRecording,
@@ -998,6 +997,7 @@ pub fn core_1_task(
                                 );
                             }
                         }
+                        prev_frame_2.fill(0);
 
                         ended_recording = true;
                         let _ = shared_i2c
