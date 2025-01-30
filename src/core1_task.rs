@@ -1486,18 +1486,28 @@ pub fn core_1_task(
                 && audio_pending
                 && (frame_telemetry.frame_num - last_rec_check) > 9 * 20
             {
-                //hanldes case where thermal recorder is doing recording
-                if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
-                    if !is_recording {
-                        info!("Taking audio recording");
-                        //make audio rec now
-                        let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
-                        sio.fifo.write(Core1Task::RequestReset.into());
-                        loop {
-                            // Wait to be reset
-                            nop();
+                let (_, window_end) = &current_recording_window;
+
+                // if within 2 minutes of end of a window make status before doing audio rec
+                // this ensures we always make the status recording
+                if made_shutdown_status_recording
+                    || &(synced_date_time.date_time_utc + Duration::minutes(2)) < window_end
+                {
+                    //hanldes case where thermal recorder is doing recording
+                    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+                        if !is_recording {
+                            info!("Taking audio recording");
+                            //make audio rec now
+                            let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
+                            sio.fifo.write(Core1Task::RequestReset.into());
+                            loop {
+                                // Wait to be reset
+                                nop();
+                            }
                         }
                     }
+                } else {
+                    info!("Not doing audio until after shutdown status")
                 }
                 last_rec_check = frame_telemetry.frame_num;
             }

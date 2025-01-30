@@ -170,6 +170,9 @@ pub fn audio_task(
     }
 
     let mut duration = 60;
+    if DEV_MODE {
+        duration = 10;
+    }
     let mut recording_type = None;
     let mut user_recording_requested = false;
     let mut thermal_requested_audio = false;
@@ -192,6 +195,9 @@ pub fn audio_task(
                     RecordingType::ThermalRequestedScheduledRecording => {
                         duration = 60;
                         thermal_requested_audio = true;
+                        if DEV_MODE {
+                            duration = 10;
+                        }
                     }
                     _ => {}
                 }
@@ -257,6 +263,8 @@ pub fn audio_task(
         // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
         let mut scheduled: bool = false;
 
+        // GP 30th Jan if alarm is set we always need to check against current time if the alarm wasnt triggered
+        // otherwise can have edge cases where tc2 agent code thinks we should rec but the alarm is later
         let (_, flash_alarm) = get_audio_alarm(&mut flash_storage);
         if let Some(alarm) = flash_alarm {
             scheduled = true;
@@ -785,7 +793,7 @@ pub fn schedule_audio_rec(
                 start.hour(),
                 start.minute(),
             );
-            if wakeup > start {
+            if wakeup >= start {
                 if start < current_time {
                     if let AudioMode::AudioAndThermal = device_config.config().audio_mode {
                         //audio recording inside recording window
