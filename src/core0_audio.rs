@@ -574,6 +574,10 @@ pub fn audio_task(
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => true,
         _ => false,
     };
+    let in_window = device_config.config().audio_mode == AudioMode::AudioAndThermal
+        && device_config
+            .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(timer), &None);
+
     loop {
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         if !logged_power_down {
@@ -605,19 +609,22 @@ pub fn audio_task(
                             continue;
                         }
                     }
-                    info!("Ask Attiny to power down rp2040");
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::Rp2040Sleep,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        &mut flash_storage,
-                    );
 
-                    if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
-                        info!("Sleeping");
-                    } else {
-                        error!("Failed sending sleep request to attiny");
+                    if !in_window {
+                        info!("Ask Attiny to power down rp2040");
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::Rp2040Sleep,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
+
+                        if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
+                            info!("Sleeping");
+                        } else {
+                            error!("Failed sending sleep request to attiny");
+                        }
                     }
                 }
 
