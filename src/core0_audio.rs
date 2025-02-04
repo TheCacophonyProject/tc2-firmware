@@ -170,9 +170,6 @@ pub fn audio_task(
     }
 
     let mut duration = 60;
-    if DEV_MODE {
-        duration = 10;
-    }
     let mut recording_type = None;
     let mut user_recording_requested = false;
     let mut thermal_requested_audio = false;
@@ -195,9 +192,6 @@ pub fn audio_task(
                     RecordingType::ThermalRequestedScheduledRecording => {
                         duration = 60;
                         thermal_requested_audio = true;
-                        if DEV_MODE {
-                            duration = 10;
-                        }
                     }
                     _ => {}
                 }
