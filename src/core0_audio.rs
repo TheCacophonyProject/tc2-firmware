@@ -257,8 +257,8 @@ pub fn audio_task(
         // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
         let mut scheduled: bool = false;
 
-        // GP 30th Jan if alarm is set we always need to check against current time if the alarm wasnt triggered
-        // otherwise can have edge cases where tc2 agent code thinks we should rec but the alarm is later
+        // GP 30th Jan TODO if alarm is set we always need to check alarm against current time if the alarm wasnt triggered
+        // otherwise can have edge cases where tc2 agent status code thinks we should rec but the alarm is later
         let (_, flash_alarm) = get_audio_alarm(&mut flash_storage);
         if let Some(alarm) = flash_alarm {
             scheduled = true;
