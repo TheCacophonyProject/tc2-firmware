@@ -1490,7 +1490,8 @@ pub fn core_1_task(
 
                 // if within 2 minutes of end of a window make status before doing audio rec
                 // this ensures we always make the status recording
-                if made_shutdown_status_recording
+                if !device_config.use_low_power_mode()
+                    || made_shutdown_status_recording
                     || &(synced_date_time.date_time_utc + Duration::minutes(2)) < window_end
                 {
                     //hanldes case where thermal recorder is doing recording
