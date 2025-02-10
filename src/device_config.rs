@@ -292,7 +292,6 @@ impl DeviceConfig {
         let audio_mode = AudioMode::try_from(cursor.read_u8())
             .ok()
             .unwrap_or(AudioMode::Disabled);
-        let audio_seed = cursor.read_u32();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -318,6 +317,7 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
+        let audio_seed = cursor.read_u32();
 
         Some((
             DeviceConfigInner {
