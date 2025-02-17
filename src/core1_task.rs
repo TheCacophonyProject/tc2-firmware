@@ -885,10 +885,10 @@ pub fn core_1_task(
                 let should_end_current_recording = cptv_stream.is_some()
                     && ((this_frame_motion_detection.triggering_ended()
                         || frames_written >= max_length_in_frames
-                        || flash_storage.is_nearly_full())
+                        || (!making_status_recording && flash_storage.is_nearly_full()))
                         || (making_status_recording
                             && (frames_written >= status_recording_length_in_frames
-                                || flash_storage.is_nearly_full())));
+                                || flash_storage.is_full())));
 
                 motion_detection = Some(this_frame_motion_detection);
 
