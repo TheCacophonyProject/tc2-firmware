@@ -238,7 +238,7 @@ impl EventLogger {
     }
 
     pub fn clear(&mut self, flash_storage: &mut OnboardFlash) {
-        if true || self.has_events_to_offload() {
+        if self.has_events_to_offload() {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
             let end_block_index = FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX;
             for block_index in start_block_index..end_block_index {

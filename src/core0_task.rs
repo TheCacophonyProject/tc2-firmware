@@ -110,7 +110,7 @@ pub fn frame_acquisition_loop(
 
     watchdog.pause_on_debug(true);
     watchdog.start(8388607.micros());
-
+    // should not feed watchdog if we dont receive a message and are in low power mode
     'frame_loop: loop {
         if got_sync || is_recording {
             watchdog.feed();
@@ -467,33 +467,20 @@ pub fn frame_acquisition_loop(
 
                 if transferring_prev_frame {
                     // Could read blocking, but need to increment current_segment_num appropriately?
+                    let mut next_message = None;
+
                     if let Some(message) = sio_fifo.read() {
                         if message == Core1Task::StartRecording.into() {
                             is_recording = true;
-                            if let Some(message) = sio_fifo.read() {
-                                if message == Core1Task::FrameProcessingComplete.into() {
-                                    transferring_prev_frame = false;
-                                    prev_frame_needs_transfer = false;
-                                }
-                            }
+                            next_message = sio_fifo.read();
                         } else if message == Core1Task::EndRecording.into() {
                             recording_ended = true;
                             can_do_ffc = true;
-                            if let Some(message) = sio_fifo.read() {
-                                if message == Core1Task::FrameProcessingComplete.into() {
-                                    transferring_prev_frame = false;
-                                    prev_frame_needs_transfer = false;
-                                }
-                            }
+                            next_message = sio_fifo.read();
                         } else if message == Core1Task::ReadyToSleep.into() {
                             info!("Powering down lepton module");
                             lepton.power_down_sequence(delay);
-                            if let Some(message) = sio_fifo.read() {
-                                if message == Core1Task::FrameProcessingComplete.into() {
-                                    transferring_prev_frame = false;
-                                    prev_frame_needs_transfer = false;
-                                }
-                            }
+                            next_message = sio_fifo.read();
                             sio_fifo.write(255);
                         } else if message == Core1Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
@@ -506,6 +493,18 @@ pub fn frame_acquisition_loop(
                             }
                         } else if message == Core1Task::HighPowerMode.into() {
                             high_power_mode = true;
+                        }
+                        if let Some(message) = next_message {
+                            if message == Core1Task::FrameProcessingComplete.into() {
+                                transferring_prev_frame = false;
+                                prev_frame_needs_transfer = false;
+                            } else if message == Core1Task::RequestReset.into() {
+                                watchdog.start(100.micros());
+                                loop {
+                                    // Wait until the watchdog timer kills us.
+                                    nop();
+                                }
+                            }
                         }
                     }
                     // if !transferring_prev_frame || recording_started {

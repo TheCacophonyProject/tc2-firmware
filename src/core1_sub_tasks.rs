@@ -353,7 +353,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 if new_config.is_some() {
                     length_used = new_config.as_mut().unwrap().cursor_position;
                 }
-                let mut new_config_bytes = [0u8; 2400 + 105];
+                let mut new_config_bytes = [0u8; 2400 + 112];
                 new_config_bytes[0..length_used]
                     .copy_from_slice(&device_config[4..4 + length_used]);
                 if let Some(new_config) = &mut new_config {
@@ -401,7 +401,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 *existing_config.as_ref().unwrap() != *new_config
                             );
                         }
-
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let slice_to_write = &new_config_bytes[0..length_used + 2400];
