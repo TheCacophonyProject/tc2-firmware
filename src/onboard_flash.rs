@@ -50,9 +50,7 @@ const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const FEATURE_DIE_SELECT: u8 = 0xd0;
 
 const NUM_RECORDING_BLOCKS: isize = 2048 - 5; // Leave 1 block between recordings and event logs
-// event logger starts at 2044
-//last recording block should be 2042 
-2043
+
 struct FileAllocation {
     offset: u32,
     length: u32,
@@ -481,7 +479,7 @@ impl OnboardFlash {
                 self.current_block_index = last_good_block + 1;
                 self.current_page_index = 0;
                 println!(
-                    "Setting next starting block index {}",
+                    "Setting next starting block as last good block index {}",
                     self.current_block_index
                 );
             }
@@ -542,8 +540,10 @@ impl OnboardFlash {
         self.current_block_index > (NUM_RECORDING_BLOCKS - 44)
     }
     pub fn is_full(&self) -> bool {
-        // check for page 62 incase it has to write one more page worth of data
-        self.current_block_index >= NUM_RECORDING_BLOCKS || (self.current_block_index == (NUM_RECORDING_BLOCKS-1) && self.current_page_index >= 62)
+        // check for page 62 incase it has to write one more page worth of data when finalising
+        self.current_block_index >= NUM_RECORDING_BLOCKS
+            || (self.current_block_index == (NUM_RECORDING_BLOCKS - 1)
+                && self.current_page_index >= 62)
     }
     pub fn is_nearly_full(&self) -> bool {
         // Lets us know when we should end the current recording.
