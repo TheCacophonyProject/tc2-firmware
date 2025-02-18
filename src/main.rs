@@ -259,15 +259,17 @@ fn main() -> ! {
     );
     flash_storage.init();
     delay.delay_ms(4000);
-    // loop {
-    //     nop();
-    // }
 
     if let Some(free_spi) = flash_storage.free_spi() {
         let mut payload = [1u8; 2048];
 
         pi_spi.enable(free_spi, &mut peripherals.RESETS);
-
+        // pi_spi.ping2(&mut timer, true, &mut delay);
+        // pi_spi.ping2(&mut timer, true, &mut delay);
+        // pi_spi.ping2(&mut timer, true, &mut delay);
+        // loop {
+        //     nop();
+        // }
         LittleEndian::write_u32(&mut payload[0..4], 1);
         LittleEndian::write_u32(&mut payload[4..8], 14);
         LittleEndian::write_u32(&mut payload[8..12], 1);
@@ -277,9 +279,9 @@ fn main() -> ! {
         let crc = crc_check.checksum(&payload);
         let mut i = 0;
         let mut msg_type: ExtTransferMessage;
-        let parts = 2000;
+        let parts = 100 * 1;
         let mut stopping = false;
-
+        let mut done_two = false;
         loop {
             if i == 0 {
                 msg_type = ExtTransferMessage::BeginFileTransfer;
@@ -287,12 +289,18 @@ fn main() -> ! {
                 msg_type = ExtTransferMessage::EndFileTransfer;
             } else if i > parts {
                 info!("File finished starting again in 10 seconds");
-                delay.delay_ms(10 * 1000);
+                // delay.delay_ms(10 * 1000);
                 i = 0;
                 msg_type = ExtTransferMessage::BeginFileTransfer;
-                loop {
-                    nop();
+                if done_two {
+                    loop {
+                        nop()
+                    }
                 }
+                // loop {
+                //     nop();
+                // }
+                done_two = true;
             } else {
                 msg_type = ExtTransferMessage::ResumeFileTransfer
             }
@@ -312,7 +320,7 @@ fn main() -> ! {
                 let time_took = (timer.get_counter() - start).to_micros();
 
                 // info!("Send message took {} micros", time_took);
-                if time_took > 7000 {
+                if time_took > 70000 {
                     info!(
                         "TOOK TOO LONG WHY??? num pings {} attempts {}",
                         pi_spi.num_pings, attempts
@@ -321,7 +329,7 @@ fn main() -> ! {
                 if !success {
                     info!("SUCCCES FAILED");
                     // if i > 1 {
-                    delay.delay_ms(10000);
+                    // delay.delay_ms(10000);
                     // }
                 }
                 attempts += 1;
@@ -332,14 +340,15 @@ fn main() -> ! {
                     }
                 }
                 if time_took > 7000 {
-                    stopping = true;
+                    info!("TOOK TO LONG STOPPING");
+                    // stopping = true;
                 }
             }
             if i > 1 && attempts > 1 {
                 info!("Took {} attempts at message {}", attempts, i);
-                loop {
-                    nop();
-                }
+                // loop {
+                //     nop();
+                // }
             }
             // info!("Sent message {}", i);
             i += 1;
