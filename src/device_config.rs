@@ -145,7 +145,9 @@ impl DeviceConfigInner {
             let tomorrow_sunset =
                 tomorrow_sunset.naive_utc() + Duration::seconds(start_offset as i64);
 
-            if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
+            if *now_utc < yesterday_sunset {
+                (Some(yesterday_sunset), Some(today_sunrise))
+            } else if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
                 let two_days_from_now_utc = *now_utc + Duration::days(2);
                 let (two_days_sunrise, _) = sun_times(
                     two_days_from_now_utc.date(),
