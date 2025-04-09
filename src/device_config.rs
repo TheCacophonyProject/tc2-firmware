@@ -161,10 +161,7 @@ impl DeviceConfigInner {
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
             {
                 (Some(today_sunset), Some(tomorrow_sunrise))
-            } else if *now_utc < tomorrow_sunset
-                && *now_utc < today_sunrise
-                && *now_utc > yesterday_sunset
-            {
+            } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
                 (Some(yesterday_sunset), Some(today_sunrise))
             } else {
                 panic!("Unable to calculate relative time window");
