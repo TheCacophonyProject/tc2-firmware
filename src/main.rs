@@ -64,7 +64,7 @@ use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 15;
+pub const FIRMWARE_VERSION: u32 = 19;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version. // TODO Check against minor version also.
                                                     // const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 150_000_000;
 
