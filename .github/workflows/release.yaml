@@ -21,7 +21,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.86.0 # If changing this also change the `rust-toolchain.toml`
           override: true
 
       - name: Add target for cross-compilation
