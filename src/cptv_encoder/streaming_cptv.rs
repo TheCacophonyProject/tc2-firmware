@@ -269,11 +269,14 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
     //  and work out the ranges there.\
 
     // NOTE: To play nice with lz77, we only want to pack to bytes
-    let bits_per_pixel = if output[1..].iter().find(|&&x| x < -127 || x > 127).is_some() {
-        16
-    } else {
-        8
-    };
+
+    //TODO need to check this.... GP 2025 16/05
+    // let bits_per_pixel = if output[1..].iter().find(|&&x| x < -127 || x > 127).is_some() {
+    //     16
+    // } else {
+    //     8
+    // };
+    let bits_per_pixel = 8;
     {
         let px = output[0];
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };

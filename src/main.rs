@@ -396,7 +396,7 @@ fn main() -> ! {
             rosc,
             alarm_woke_us,
             unlocked_pin,
-            config,
+            config.unwrap(),
         );
     }
 }
@@ -500,8 +500,8 @@ pub fn thermal_code(
         "page inner {:#x}",
         &onboard_flash.current_page.inner as *const _ as usize
     );
-    let config = unsafe { extend_lifetime_generic(&config) };
-    let ref_config = RefCell::new(config);
+    // let config = unsafe { extend_lifetime_generic(&config) };
+    // let ref_config = RefCell::new(config);
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
 
@@ -544,7 +544,7 @@ pub fn thermal_code(
                 lepton_firmware_version,
                 alarm_woke_us,
                 timer,
-                ref_config,
+                &config,
             )
         });
     }

@@ -222,7 +222,7 @@ pub fn audio_task(
 
         // GP 30th Jan TODO if alarm is set we always need to check alarm against current time if the alarm wasnt triggered
         // otherwise can have edge cases where tc2 agent status code thinks we should rec but the alarm is later
-        let (_, flash_alarm) = get_audio_alarm(&mut flash_storage);
+        let (_, flash_alarm) = get_audio_alarm(flash_storage);
         if let Some(alarm) = flash_alarm {
             scheduled = true;
             info!(
@@ -366,7 +366,7 @@ pub fn audio_task(
                             ),
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
-                        &mut flash_storage,
+                        flash_storage,
                     );
                     recording_type = Some(RecordingType::ScheduledRecording);
                 }
@@ -574,7 +574,7 @@ pub fn audio_task(
                                 LoggerEventKind::Rp2040Sleep,
                                 synced_date_time.get_timestamp_micros(&timer),
                             ),
-                            &mut flash_storage,
+                            flash_storage,
                         );
 
                         if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
