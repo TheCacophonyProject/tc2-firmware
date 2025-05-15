@@ -256,7 +256,7 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
             prev_raw
         );
         //add 2 ^ 17 to ensure always positive
-        let le_bytes = (delta+131072).to_le_bytes();
+        let le_bytes = (delta + 131072).to_le_bytes();
         for b_i in 0..17 {
             *unsafe { output.get_unchecked_mut(i + b_i) } = le_bytes[14 + b_i];
         }

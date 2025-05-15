@@ -6,4 +6,4 @@ set -e
 
 cargo build
 
-probe-rs-cli run ./target/thumbv6m-none-eabi/debug/tc2-firmware --chip RP2040
+probe-rs run ./target/thumbv6m-none-eabi/debug/tc2-firmware --chip RP2040

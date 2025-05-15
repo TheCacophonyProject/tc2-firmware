@@ -37,7 +37,9 @@ use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{check_alarm_still_valid, schedule_audio_rec, AlarmMode, MAX_GAP_MIN};
+use crate::core0_audio::{
+    check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
+};
 #[repr(u32)]
 #[derive(Format)]
 pub enum Core1Task {
@@ -204,6 +206,7 @@ impl SyncedDateTime {
             + chrono::Duration::microseconds(
                 (timer.get_counter() - self.timer_offset).to_micros() as i64
             ))
+        .and_utc()
         .timestamp_micros() as u64
     }
 
@@ -734,7 +737,7 @@ pub fn core_1_task(
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame to pi if it is available.
         let transfer = if frame_header_is_valid {
-            pi_spi.begin_message(
+            pi_spi.begin_message_pio(
                 ExtTransferMessage::CameraRawFrameTransfer,
                 &mut thread_local_frame_buffer
                     .as_mut()
@@ -775,7 +778,7 @@ pub fn core_1_task(
             .frame_data_as_u8_slice_mut();
 
         let frame_num = frame_telemetry.frame_num;
-        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 10000
+        let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 20000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
             || frame_telemetry.ffc_status == FFCStatus::InProgress;
         let mut ended_recording = false;
@@ -847,10 +850,10 @@ pub fn core_1_task(
                 let should_end_current_recording = cptv_stream.is_some()
                     && ((this_frame_motion_detection.triggering_ended()
                         || frames_written >= max_length_in_frames
-                        || flash_storage.is_nearly_full())
+                        || (!making_status_recording && flash_storage.is_nearly_full()))
                         || (making_status_recording
                             && (frames_written >= status_recording_length_in_frames
-                                || flash_storage.is_nearly_full())));
+                                || flash_storage.is_full())));
 
                 motion_detection = Some(this_frame_motion_detection);
 
@@ -941,7 +944,6 @@ pub fn core_1_task(
                                 "Ending current recording start block {} end block{}",
                                 cptv_start_block_index, flash_storage.last_used_block_index
                             );
-                            prev_frame_2.fill(0);
                             event_logger.log_event(
                                 LoggerEvent::new(
                                     LoggerEventKind::EndedRecording,
@@ -960,6 +962,7 @@ pub fn core_1_task(
                                 );
                             }
                         }
+                        prev_frame_2.fill(0);
 
                         ended_recording = true;
                         let _ = shared_i2c
@@ -1292,7 +1295,8 @@ pub fn core_1_task(
                                 event_logger.log_event(
                                     LoggerEvent::new(
                                         LoggerEventKind::SetAlarm(
-                                            next_recording_window_start.timestamp_micros() as u64,
+                                            next_recording_window_start.and_utc().timestamp_micros()
+                                                as u64,
                                         ),
                                         synced_date_time.get_timestamp_micros(&timer),
                                     ),
@@ -1449,18 +1453,29 @@ pub fn core_1_task(
                 && audio_pending
                 && (frame_telemetry.frame_num - last_rec_check) > 9 * 20
             {
-                //hanldes case where thermal recorder is doing recording
-                if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
-                    if !is_recording {
-                        info!("Taking audio recording");
-                        //make audio rec now
-                        let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
-                        sio.fifo.write(Core1Task::RequestReset.into());
-                        loop {
-                            // Wait to be reset
-                            nop();
+                let (_, window_end) = &current_recording_window;
+
+                // if within 2 minutes of end of a window make status before doing audio rec
+                // this ensures we always make the status recording
+                if !device_config.use_low_power_mode()
+                    || made_shutdown_status_recording
+                    || &(synced_date_time.date_time_utc + Duration::minutes(2)) < window_end
+                {
+                    //hanldes case where thermal recorder is doing recording
+                    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+                        if !is_recording {
+                            info!("Taking audio recording");
+                            //make audio rec now
+                            let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
+                            sio.fifo.write(Core1Task::RequestReset.into());
+                            loop {
+                                // Wait to be reset
+                                nop();
+                            }
                         }
                     }
+                } else {
+                    info!("Not doing audio until after shutdown status")
                 }
                 last_rec_check = frame_telemetry.frame_num;
             }

@@ -590,6 +590,7 @@ impl OnboardFlash {
         self.last_used_block_index = None;
         self.current_page_index = 0;
         self.current_block_index = 0;
+        let mut last_good_block = None;
         // Find first good free block:
         {
             self.read_page(0, 1).unwrap();
@@ -619,6 +620,7 @@ impl OnboardFlash {
                 }
             } else if block_index < NUM_RECORDING_BLOCKS {
                 good_block = true;
+                last_good_block = Some(block_index);
                 if !self.current_page.page_is_used() {
                     // This will be the starting block of the next file to be written.
                     if self.last_used_block_index.is_none() && self.first_used_block_index.is_some()
@@ -631,7 +633,6 @@ impl OnboardFlash {
                         println!("Setting next starting block index {}", block_index);
                     }
                 } else {
-                    let address = OnboardFlash::get_address(block_index, 0);
                     if self.first_used_block_index.is_none() {
                         // This is the starting block of the first file stored.
                         println!("Storing first used block {}", block_index);
@@ -643,6 +644,21 @@ impl OnboardFlash {
                     // need to transfer them one by one.  We won't remove any files until all
                     // the files have been transferred.
                 }
+            }
+        }
+
+        // if we have written write to the end of the flash need to handle this
+        if self.last_used_block_index.is_none() && self.first_used_block_index.is_some() {
+            if let Some(last_good_block) = last_good_block {
+                self.last_used_block_index = Some(last_good_block);
+                self.file_start_block_index = self.prev_page.file_start_block_index();
+
+                self.current_block_index = last_good_block + 1;
+                self.current_page_index = 0;
+                println!(
+                    "Setting next starting block as last good block index {}",
+                    self.current_block_index
+                );
             }
         }
         self.bad_blocks = bad_blocks;
@@ -700,7 +716,12 @@ impl OnboardFlash {
         // Need about 43 blocks for a 60 seconds recording at 48khz
         self.current_block_index > (NUM_RECORDING_BLOCKS - 44)
     }
-
+    pub fn is_full(&self) -> bool {
+        // check for page 62 incase it has to write one more page worth of data when finalising
+        self.current_block_index >= NUM_RECORDING_BLOCKS
+            || (self.current_block_index == (NUM_RECORDING_BLOCKS - 1)
+                && self.current_page_index >= 62)
+    }
     pub fn is_nearly_full(&self) -> bool {
         // Lets us know when we should end the current recording.
         // We only need to allow a single frames worth – 2–3 blocks should be more than enough!

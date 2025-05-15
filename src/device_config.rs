@@ -162,10 +162,7 @@ impl DeviceConfigInner {
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
             {
                 (Some(today_sunset), Some(tomorrow_sunrise))
-            } else if *now_utc < tomorrow_sunset
-                && *now_utc < today_sunrise
-                && *now_utc > yesterday_sunset
-            {
+            } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
                 (Some(yesterday_sunset), Some(today_sunrise))
             } else {
                 panic!("Unable to calculate relative time window");
@@ -305,7 +302,6 @@ impl DeviceConfig {
         let audio_mode = AudioMode::try_from(cursor.read_u8())
             .ok()
             .unwrap_or(AudioMode::Disabled);
-        let audio_seed = cursor.read_u32();
         let latitude = cursor.read_f32();
         let longitude = cursor.read_f32();
         let has_location_timestamp = cursor.read_bool();
@@ -331,6 +327,7 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
+        let audio_seed = cursor.read_u32();
 
         Some((
             DeviceConfigInner {

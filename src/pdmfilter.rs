@@ -103,7 +103,7 @@ impl PDMFilter {
         let mut out_index = 0;
 
         for i in (0..=data.len() - 8).step_by(PDM_DECIMATION as usize >> 3) {
-            let index = i as usize;
+            let index = i;
             // 3 polyphase FIR?
             let z0 = filter_table_mono_64(&self.lut, &data[index..index + 8], 0);
             let z1 = filter_table_mono_64(&self.lut, &data[index..index + 8], 1);
@@ -112,7 +112,7 @@ impl PDMFilter {
 
             self.coef[1] = self.coef[0] + z1 as u32;
 
-            self.coef[0] = z0 as u32;
+            self.coef[0] = z0;
 
             old_out = (self.hp_alpha as i64 * (old_out + z - old_in)) >> 8;
             old_in = z;
@@ -121,7 +121,7 @@ impl PDMFilter {
             z = oldz * volume as i64;
 
             z = round_div(z, self.div_const as i64);
-            z = satural_lh(z, -32700 as i64, 32700 as i64);
+            z = satural_lh(z, -32700_i64, 32700_i64);
 
             if saveout {
                 dataout[out_index] = z as u16;
@@ -155,14 +155,14 @@ fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
 fn filter_table_mono_64(lut: &[u32], data: &[u8], s: u8) -> u32 {
     let s_offset: usize = s as usize * 256 * 8;
     // because of endiness the first byte of a 32 bit is at index 3, 2, 1 .. 0
-    return lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8) as usize]
-        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 1) as usize]
-        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 2) as usize]
-        + lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8 + 3) as usize]
-        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 4) as usize]
-        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 5) as usize]
-        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 6) as usize]
-        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7) as usize];
+    return lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8)]
+        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 1)]
+        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 2)]
+        + lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8 + 3)]
+        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 4)]
+        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 5)]
+        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 6)]
+        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7)];
 }
 fn convolve(
     signal: &[u16],

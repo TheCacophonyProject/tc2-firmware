@@ -239,7 +239,7 @@ impl EventLogger {
     }
 
     pub fn clear(&mut self, flash_storage: &mut OnboardFlash) {
-        if true || self.has_events_to_offload() {
+        if self.has_events_to_offload() {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
             let end_block_index = FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX;
             for block_index in start_block_index..end_block_index {
@@ -368,7 +368,7 @@ pub fn write_audio_alarm(
     let page_offset = 0;
     let mut event_data = [0u8; 18];
     event_data[0] = mode as u8;
-    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.timestamp_millis());
+    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.and_utc().timestamp_millis());
     flash_storage.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset as u16);
 }
 

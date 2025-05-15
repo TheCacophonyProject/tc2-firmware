@@ -20,7 +20,7 @@ use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
 use rp2040_hal::{Sio, Timer};
 
-use chrono::{Datelike, NaiveDateTime, Timelike};
+use chrono::{Datelike, NaiveDateTime, NaiveTime, Timelike};
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
     _embedded_hal_watchdog_WatchdogEnable,
@@ -220,7 +220,9 @@ pub fn audio_task(
         // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
         let mut scheduled: bool = false;
 
-        let (_, flash_alarm) = get_audio_alarm(flash_storage);
+        // GP 30th Jan TODO if alarm is set we always need to check alarm against current time if the alarm wasnt triggered
+        // otherwise can have edge cases where tc2 agent status code thinks we should rec but the alarm is later
+        let (_, flash_alarm) = get_audio_alarm(&mut flash_storage);
         if let Some(alarm) = flash_alarm {
             scheduled = true;
             info!(
@@ -358,12 +360,14 @@ pub fn audio_task(
 
                     // should take recording now
                     event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::Rp2040MissedAudioAlarm(alarm.timestamp_micros() as u64),
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                     flash_storage,
-                );
+                        LoggerEvent::new(
+                            LoggerEventKind::Rp2040MissedAudioAlarm(
+                                alarm.and_utc().timestamp_micros() as u64,
+                            ),
+                            synced_date_time.get_timestamp_micros(&timer),
+                        ),
+                        &mut flash_storage,
+                    );
                     recording_type = Some(RecordingType::ScheduledRecording);
                 }
             }
@@ -490,10 +494,8 @@ pub fn audio_task(
             }
         }
     }
-
     let mut should_sleep = true;
     let mut alarm_time: Option<NaiveDateTime>;
-
     if reschedule {
         watchdog.feed();
         info!("Scheduling new recording");
@@ -529,6 +531,10 @@ pub fn audio_task(
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => true,
         _ => false,
     };
+    let in_window = device_config.config().audio_mode == AudioMode::AudioAndThermal
+        && device_config
+            .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(timer), &None);
+
     loop {
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         if !logged_power_down {
@@ -560,19 +566,22 @@ pub fn audio_task(
                             continue;
                         }
                     }
-                    info!("Ask Attiny to power down rp2040");
-                    event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::Rp2040Sleep,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
-                        flash_storage,
-                    );
 
-                    if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
-                        info!("Sleeping");
-                    } else {
-                        error!("Failed sending sleep request to attiny");
+                    if !in_window {
+                        info!("Ask Attiny to power down rp2040");
+                        event_logger.log_event(
+                            LoggerEvent::new(
+                                LoggerEventKind::Rp2040Sleep,
+                                synced_date_time.get_timestamp_micros(&timer),
+                            ),
+                            &mut flash_storage,
+                        );
+
+                        if let Ok(_) = shared_i2c.tell_attiny_to_power_down_rp2040(&mut delay) {
+                            info!("Sleeping");
+                        } else {
+                            error!("Failed sending sleep request to attiny");
+                        }
                     }
                 }
 
@@ -686,30 +695,56 @@ pub fn schedule_audio_rec(
         error!("Failed to disable alarm");
         return Err(());
     }
-    let seed = if device_config.config().audio_seed == 0 {
-        synced_date_time.date_time_utc.timestamp() as u64
+    let mut wakeup: NaiveDateTime;
+    let seed: u64;
+    let current_time = synced_date_time.get_adjusted_dt(timer);
+
+    if device_config.config().audio_seed > 0 {
+        wakeup = NaiveDateTime::new(
+            current_time.date(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+
+        seed = u64::wrapping_add(
+            wakeup.and_utc().timestamp_millis() as u64,
+            device_config.config().audio_seed as u64,
+        );
     } else {
-        device_config.config().audio_seed as u64
+        seed = synced_date_time.date_time_utc.and_utc().timestamp() as u64;
+        wakeup = current_time;
     };
     let mut rng = RNG::<WyRand, u16>::new(seed);
-    let r = rng.generate();
     let r_max: u16 = 65535u16;
     let short_chance: u16 = r_max / 4;
     let short_pause: u64 = 2 * 60;
     let short_window: u64 = 5 * 60;
     let long_pause: u64 = 40 * 60;
     let long_window: u64 = 20 * 60;
-    let mut wake_in;
-    if r <= short_chance {
-        wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
-    } else {
-        wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
+
+    // if a seed is set always start alarm from 0am to keep consistent accross devices.So  will need to generate numbers until alarm is valid
+    while wakeup <= current_time {
+        let r = rng.generate();
+        let mut wake_in;
+
+        if r <= short_chance {
+            wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
+        } else {
+            wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
+        }
+
+        if DEV_MODE {
+            wake_in = 120;
+        }
+        wakeup = wakeup + chrono::Duration::seconds(wake_in as i64);
     }
-    if DEV_MODE {
-        wake_in = 120;
-    }
-    let current_time = synced_date_time.get_adjusted_dt(timer);
-    let mut wakeup = current_time + chrono::Duration::seconds(wake_in as i64);
+    info!(
+        "Set alarm, current time is {}:{} Next alarm is {}:{}",
+        synced_date_time.date_time_utc.time().hour(),
+        synced_date_time.date_time_utc.time().minute(),
+        wakeup.hour(),
+        wakeup.minute()
+    );
+
     let mut alarm_mode = AlarmMode::AUDIO;
 
     match device_config.config().audio_mode {
@@ -722,7 +757,7 @@ pub fn schedule_audio_rec(
                 start.hour(),
                 start.minute(),
             );
-            if wakeup > start {
+            if wakeup >= start {
                 if start < current_time {
                     if let AudioMode::AudioAndThermal = device_config.config().audio_mode {
                         //audio recording inside recording window
@@ -740,11 +775,6 @@ pub fn schedule_audio_rec(
         }
         _ => (),
     }
-    info!(
-        "Current time is {}:{}",
-        synced_date_time.date_time_utc.time().hour(),
-        synced_date_time.date_time_utc.time().minute()
-    );
 
     if let Err(err) = i2c.enable_alarm(delay) {
         error!("Failed to enable alarm");
@@ -755,7 +785,7 @@ pub fn schedule_audio_rec(
             if alarm_enabled {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
+                        LoggerEventKind::SetAlarm(wakeup.and_utc().timestamp_micros() as u64),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     flash_storage,
@@ -802,15 +832,16 @@ fn should_offload_audio_recordings(
     return false;
 }
 
-pub fn check_alarm_still_valid(
+pub fn check_alarm_still_valid_with_thermal_window(
     alarm: &NaiveDateTime,
     now: &NaiveDateTime,
     device_config: &DeviceConfig,
 ) -> bool {
+    // config has changed so check if not in audio only that alarm is still going to trigger on rec window start
     if device_config.config().audio_mode != AudioMode::AudioOnly {
         let (start, end) = device_config.next_or_current_recording_window(now);
         //alarm before start or we are in rec window
         return alarm <= &start || now >= &start;
     }
-    false
+    true
 }

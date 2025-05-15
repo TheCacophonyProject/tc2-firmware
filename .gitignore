@@ -1,9 +1,10 @@
 **/*.rs.bk
 .#*
 .gdb_history
-Cargo.lock
 target/
 .DS_Store
+rp-hal/
+rp-hal-0.9.0/
 
 # editor files
 .vscode/*

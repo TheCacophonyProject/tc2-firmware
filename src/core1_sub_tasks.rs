@@ -50,7 +50,7 @@ pub fn maybe_offload_events(
                     let current_crc = crc_check.checksum(&event_bytes);
                     let mut attempts = 0;
                     'transfer_event: loop {
-                        let did_transfer = pi_spi.send_message(
+                        let did_transfer = pi_spi.send_message_over_spi(
                             transfer_type,
                             &event_bytes,
                             current_crc,
@@ -58,7 +58,6 @@ pub fn maybe_offload_events(
                             timer,
                             resets,
                         );
-                        let counter = timer.get_counter();
                         if !did_transfer {
                             attempts += 1;
                             if attempts > 100 {
@@ -66,12 +65,10 @@ pub fn maybe_offload_events(
                                 success = false;
                                 break 'transfer_event;
                             }
-                            //takes tc2-agent about this long to poll again will always fail otherwise
-                            let time_since = (timer.get_counter() - counter).to_micros();
-                            if time_since < TIME_BETWEEN_TRANSFER {
-                                delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
-                            }
                         } else {
+                            if attempts > 0 {
+                                warn!("File part took multiple attempts: {}", attempts);
+                            }
                             break 'transfer_event;
                         }
                     }
@@ -111,9 +108,6 @@ pub fn maybe_offload_events(
     }
     return success;
 }
-
-//feels like should be longer but seems to work
-const TIME_BETWEEN_TRANSFER: u64 = 1000;
 
 pub fn offload_flash_storage_and_events(
     flash_storage: &mut OnboardFlash,
@@ -216,21 +210,24 @@ pub fn offload_flash_storage_and_events(
                 if watchdog.is_some() {
                     watchdog.as_mut().unwrap().feed();
                 }
-                let did_transfer =
-                    pi_spi.send_message(transfer_type, &part, current_crc, dma, timer, resets);
-                let counter = timer.get_counter();
+                let did_transfer = pi_spi.send_message_over_spi(
+                    transfer_type,
+                    &part,
+                    current_crc,
+                    dma,
+                    timer,
+                    resets,
+                );
                 if !did_transfer {
                     attempts += 1;
                     if attempts > 100 {
                         success = false;
                         break 'transfer_part;
                     }
-                    //takes tc2-agent about this long to poll again will fail a lot otherwise
-                    let time_since = (timer.get_counter() - counter).to_micros();
-                    if time_since < TIME_BETWEEN_TRANSFER {
-                        delay.delay_us((TIME_BETWEEN_TRANSFER - time_since) as u32);
-                    }
                 } else {
+                    if attempts > 0 {
+                        warn!("File part took multiple attempts: {}", attempts);
+                    }
                     break 'transfer_part;
                 }
             }
@@ -340,7 +337,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
-        if pi_spi.send_message(
+        if pi_spi.send_message_over_spi(
             ExtTransferMessage::CameraConnectInfo,
             &payload,
             crc,
@@ -356,7 +353,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 if new_config.is_some() {
                     length_used = new_config.as_mut().unwrap().cursor_position;
                 }
-                let mut new_config_bytes = [0u8; 2400 + 105];
+                let mut new_config_bytes = [0u8; 2400 + 112];
                 new_config_bytes[0..length_used]
                     .copy_from_slice(&device_config[4..4 + length_used]);
                 if let Some(new_config) = &mut new_config {
@@ -366,7 +363,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                         let crc = crc_check.checksum(&payload);
                         loop {
-                            if pi_spi.send_message(
+                            if pi_spi.send_message_over_spi(
                                 ExtTransferMessage::GetMotionDetectionMask,
                                 &payload,
                                 crc,
@@ -404,7 +401,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 *existing_config.as_ref().unwrap() != *new_config
                             );
                         }
-
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let mut slice_to_write = &mut new_config_bytes[0..length_used + 2400];
