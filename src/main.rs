@@ -76,6 +76,8 @@ pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
 
+static CORE1_STACK: Stack<38200> = Stack::new();
+
 #[repr(C, align(32))]
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
 
@@ -214,19 +216,17 @@ fn main() -> ! {
         DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
     // // do all the get config crap here
 
-    // if let Some(config) = &config {
-    //     info!("Existing config {:#?}", config.config());
-    // }
-    // loop {
-    //     nop();
-    // }
+    if let Some(config) = &config {
+        info!("Existing config {:#?}", config.config());
+    }
+
     //  used 14.64KIB
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
 
     // Attiny + RTC comms
-    let sda_pin = pins.gpio6.into_function::<FunctionI2C>();
-    let scl_pin = pins.gpio7.into_function::<FunctionI2C>();
+    let sda_pin = pins.gpio6.into_function::<FunctionI2C>().reconfigure();
+    let scl_pin = pins.gpio7.into_function::<FunctionI2C>().reconfigure();
     let i2c1 = I2C::i2c1(
         peripherals.I2C1,
         sda_pin,
@@ -256,32 +256,34 @@ fn main() -> ! {
 
     info!("Enabled watchdog timer");
 
-    // if config.is_none() {
-    //     info!("Waking pi to get config");
-    //     // We need to wake up the rpi and get a config
-    //     wake_raspberry_pi(&mut shared_i2c, &mut delay);
-    // }
+    if config.is_none() {
+        info!("Waking pi to get config");
+        // We need to wake up the rpi and get a config
+        wake_raspberry_pi(&mut shared_i2c, &mut delay);
+    }
 
     let mut timer: rp2040_hal::Timer =
         bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
-    // let (device_config, device_config_was_updated) =
-    //     get_existing_device_config_or_config_from_pi_on_initial_handshake(
-    //         &mut flash_storage,
-    //         &mut pi_spi,
-    //         &mut peripherals.RESETS,
-    //         &mut peripherals.DMA,
-    //         system_clock_freq.Hz(),
-    //         2u32,
-    //         0,
-    //         false,
-    //         &mut timer,
-    //         config,
-    //     );
-    // let config = config.unwrap();
-
+    let (device_config, device_config_was_updated) =
+        get_existing_device_config_or_config_from_pi_on_initial_handshake(
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            system_clock_freq.Hz(),
+            2u32,
+            0,
+            false,
+            &mut timer,
+            config,
+        );
+    let config = device_config;
+    // loop {
+    //     nop();
+    // }
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
@@ -372,8 +374,8 @@ fn main() -> ! {
 
             vsync: pins.gpio19.into_function(),
 
-            sda: pins.gpio24.into_function(),
-            scl: pins.gpio25.into_function(),
+            sda: pins.gpio24.into_function::<FunctionI2C>().reconfigure(),
+            scl: pins.gpio25.into_function::<FunctionI2C>().reconfigure(),
 
             power_down: pins.gpio28.into_push_pull_output(),
             power_enable: pins.gpio18.into_push_pull_output(),
@@ -508,9 +510,9 @@ pub fn thermal_code(
     // should have removed need for a bunch of stuff in here
     // about 7kib (7168bytes which is 1792 (32 bits))
     // 44900 - 1792
-    let mut core1_stack: Stack<43200> = Stack::new();
+    // let mut core1_stack: Stack<43200> = Stack::new();
 
-    let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
+    // let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
 
     let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
         extend_lifetime_generic_mut(&mut fb0)
@@ -530,7 +532,7 @@ pub fn thermal_code(
     watchdog.disable();
 
     {
-        let _ = core1.spawn(mem, move || {
+        let _ = core1.spawn(CORE1_STACK.take().unwrap(), move || {
             core_1_task(
                 pi_spi,
                 onboard_flash,

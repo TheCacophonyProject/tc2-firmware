@@ -18,8 +18,8 @@ use rp2040_hal::I2C;
 pub type I2CConfig = I2C<
     I2C1,
     (
-        Pin<Gpio6, FunctionI2C, PullDown>,
-        Pin<Gpio7, FunctionI2C, PullDown>,
+        Pin<Gpio6, FunctionI2C, PullUp>,
+        Pin<Gpio7, FunctionI2C, PullUp>,
     ),
 >;
 pub struct SharedI2C {

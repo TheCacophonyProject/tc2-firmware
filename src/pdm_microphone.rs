@@ -98,7 +98,7 @@ impl PdmMicrophone {
         // Data gets streamed in via a DMA channel, filtered, and then decimated.
         // We may also need to apply a gain step.
 
-        let program_with_defines = pio_proc::pio_file!("./src/pdm_microphone.pio");
+        let program_with_defines = pio::pio_file!("./src/pdm_microphone.pio");
         let installed_program: rp2040_hal::pio::InstalledProgram<PIO1> =
             self.pio.install(&program_with_defines.program).unwrap();
 

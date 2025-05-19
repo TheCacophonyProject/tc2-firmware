@@ -19,41 +19,42 @@ use embedded_hal::prelude::{
 use fugit::{ExtU32, HertzU32, RateExtU32};
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
-fn go_dormant_until_next_vsync(
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
-    lepton: &mut LeptonModule,
-    rosc_freq: HertzU32,
-    got_sync: bool,
-) -> RingOscillator<bsp::hal::rosc::Enabled> {
-    if got_sync && lepton.is_awake() {
-        lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-        let dormant_rosc = unsafe { rosc.dormant() };
-        let disabled_rosc = RingOscillator::new(dormant_rosc.free());
-        let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
-        lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-        initialized_rosc
-    } else {
-        rosc
-    }
-}
 
-fn go_dormant_until_woken<T: PinId>(
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
-    wake_pin: &mut Pin<T, FunctionSio<SioInput>, PullNone>,
-    lepton: &mut LeptonModule,
-    rosc_freq: HertzU32,
-) -> RingOscillator<bsp::hal::rosc::Enabled> {
-    lepton
-        .vsync
-        .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
-    wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
-    let dormant_rosc = unsafe { rosc.dormant() };
-    // Woken by pin
-    let disabled_rosc = RingOscillator::new(dormant_rosc.free());
-    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
-    wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
-    initialized_rosc
-}
+// fn go_dormant_until_next_vsync(
+//     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+//     lepton: &mut LeptonModule,
+//     rosc_freq: HertzU32,
+//     got_sync: bool,
+// ) -> RingOscillator<bsp::hal::rosc::Enabled> {
+//     if got_sync && lepton.is_awake() {
+//         lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+//         let dormant_rosc = unsafe { rosc.dormant() };
+//         let disabled_rosc = RingOscillator::new(dormant_rosc.free());
+//         let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
+//         lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
+//         initialized_rosc
+//     } else {
+//         rosc
+//     }
+// }
+
+// fn go_dormant_until_woken<T: PinId>(
+//     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+//     wake_pin: &mut Pin<T, FunctionSio<SioInput>, PullNone>,
+//     lepton: &mut LeptonModule,
+//     rosc_freq: HertzU32,
+// ) -> RingOscillator<bsp::hal::rosc::Enabled> {
+//     lepton
+//         .vsync
+//         .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
+//     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
+//     let dormant_rosc = unsafe { rosc.dormant() };
+//     // Woken by pin
+//     let disabled_rosc = RingOscillator::new(dormant_rosc.free());
+//     let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
+//     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
+//     initialized_rosc
+// }
 
 pub fn frame_acquisition_loop(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut

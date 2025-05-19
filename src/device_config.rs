@@ -286,6 +286,7 @@ impl DeviceConfig {
         let slice = flash_storage.read_device_config();
         if let Ok(slice) = slice {
             let device_config = DeviceConfig::inner_from_bytes(&slice);
+            info!("Loaded device config {}", device_config);
             device_config
         } else {
             None
@@ -297,6 +298,7 @@ impl DeviceConfig {
         let device_id = cursor.read_u32();
         if device_id == u32::MAX {
             // Device config is uninitialised in flash
+            info!("IS NONE");
             return None;
         }
         let audio_mode = AudioMode::try_from(cursor.read_u8())

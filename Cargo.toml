@@ -28,11 +28,11 @@ crc = "3.0.1"
 chrono = { version  = "0.4.31", default-features = false }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 
-rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "bcb7683512363d0bf17675217bbafe7b050b7dcb", features = ["defmt", "eh1_0_alpha"] }
-#rp2040-hal = "0.9.0"
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "ba7aec89e9229f766de7f93e45cb200222ff106e", features = ["defmt"] }
+#rp2040-hal = "0.11.0"
 pcf8563 = "0.1.2"
 
-pio = "0.2.1"
+pio = "0.3.0"
 pio-proc = "0.2.1"
 picorand = "0.1.2"
 
