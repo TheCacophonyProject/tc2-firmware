@@ -244,7 +244,7 @@ pub fn core_1_task(
     woken_by_alarm: bool,
     mut timer: Timer,
     device_config: &DeviceConfig,
-) {
+) -> ! {
     let dev_mode = true;
     info!("=== Core 1 start ===");
     if dev_mode {
@@ -564,6 +564,7 @@ pub fn core_1_task(
         is_cptv,
         flash_storage.has_files_to_offload()
     );
+    let should_offload = true;
     let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
@@ -627,6 +628,7 @@ pub fn core_1_task(
     //  assume we've already made the startup status recording during this recording window.
 
     let mut making_status_recording = false;
+    made_startup_status_recording = false;
     let mut status_recording_pending = if !made_startup_status_recording {
         Some(StatusRecording::StartupStatus)
     } else {
@@ -1048,7 +1050,6 @@ pub fn core_1_task(
                     &prev_frame_telemetry.as_ref().unwrap(),
                     &mut flash_storage,
                 );
-
                 frames_written += 1;
 
                 event_logger.log_event(
@@ -1064,8 +1065,7 @@ pub fn core_1_task(
                 prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
                     &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
                 }); // Telemetry skipped
-
-                // release the buffer before writing the frame so core0 can continue working
+                    // release the buffer before writing the frame so core0 can continue working
                 critical_section::with(|cs| {
                     // Now we just swap the buffers?
                     let buffer = if selected_frame_buffer == 0 {

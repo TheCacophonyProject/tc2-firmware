@@ -188,7 +188,9 @@ impl FrameData {
 }
 
 fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u16) {
-    let mut output = [0u8; FRAME_WIDTH * FRAME_HEIGHT];
+    // let mut output = [0u8; FRAME_WIDTH * FRAME_HEIGHT];
+    // let mut output = [0i32; FRAME_WIDTH];
+
     // We need to work out after the delta encoding what the range is, and how many bits we can pack
     // this into.
 
@@ -226,15 +228,26 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
     // TODO: Try having a separate buffer for prev_frame?
     let max = i16::MAX as i32;
     let min = i16::MIN as i32;
+    let mut bits_per_pixel = 8;
     let mut i = 0;
     for input_index in snake_iter {
         let curr_px = unsafe { curr.get_unchecked(input_index) };
         max_value = max_value.max(*curr_px);
         min_value = min_value.min(*curr_px);
         let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
+        // info!("{}", input_index);
+        // info!("Getting input index {}", input_index);
         let val = *curr_px as i32 - *prev_raw as i32;
-
+        // info!("Pixel is {}", curr_px);
         let delta = val - prev_val;
+        // info!(
+        //     "delta {}, min {}, val {}, prev_val {}, curr_px {}, prev_px {}",
+        //     delta, min, val, prev_val, curr_px, prev_raw
+        // );
+        if input_index < 10 {
+            info!("Delta is org{} =  {}", curr_px, delta);
+        }
+
         assert!(
             delta >= min,
             "delta {}, min {}, val {}, prev_val {}, curr_px {}, prev_px {}",
@@ -255,13 +268,33 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
             curr_px,
             prev_raw
         );
+        // info!("Set prev as [{}] = {}", i, delta as u16);
+        // if input_index < 10 {
+        //     *unsafe { output.get_unchecked_mut(i) } = delta;
+        // }
+        prev_frame[input_index] = delta as u16;
+
+        // *unsafe { output.get_unchecked_mut(i) } = delta;
+        // i += 1;
+        // prev_val = val;
         //add 2 ^ 17 to ensure always positive
-        let le_bytes = (delta + 131072).to_le_bytes();
-        for b_i in 0..17 {
-            *unsafe { output.get_unchecked_mut(i + b_i) } = le_bytes[14 + b_i];
+        if delta > 127 {
+            bits_per_pixel = 16;
         }
+        // let le_bytes = (delta + 65535).to_le_bytes();
+        // // info!("Le bytes is {}", le_bytes.len());
+        // let mut byte_index = 0;
+        // for b_i in le_bytes {
+        //     *unsafe { output.get_unchecked_mut(i + byte_index) } = b_i;
+        //     byte_index += 1;
+        // }
+
+        // for b_i in 0..17 {
+        //     *unsafe { output.get_unchecked_mut(i + b_i) } = le_bytes[14 + b_i];
+        // }
         i += 1;
         prev_val = val;
+        // info!("PRev vcal is {}", prev_val);
     }
     // NOTE: If we go from 65535 to 0 in one step, that's a delta of -65535 which doesn't fit into 16 bits.
     //  Can this happen ever with real input?  How should we guard against it?
@@ -276,25 +309,46 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
     // } else {
     //     8
     // };
-    let bits_per_pixel = 8;
+    // for i in (0..10) {
+    //     info!(
+    //         "After is {} output {}",
+    //         prev_frame[i] as i16, output[i] as i16
+    //     );
+    // }
+    let bits_per_pixel = 16;
+    let px: u32 = prev_frame[0] as u32;
     {
-        let px = output[0];
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
         LittleEndian::write_u32(&mut prev_as_u8[0..4], px as u32);
     }
     if bits_per_pixel == 16 {
-        for i in 1..output.len() {
-            let px = unsafe { *output.get_unchecked(i) } as u16;
-            prev_frame[i + 1] = px;
-        }
+        //need to reverse every odd row
+        // for i in (1..FRAME_HEIGHT).step_by(2) {
+        //     let row_i: usize = FRAME_WIDTH * i;
+        //     for z in 0..FRAME_WIDTH {
+        //         let swap_px = prev_frame[row_i + z];
+        //         prev_frame[row_i + z] = prev_frame[row_i + FRAME_WIDTH - z - 1];
+        //         prev_frame[row_i + FRAME_WIDTH - z - 1] = swap_px;
+        //     }
+        // }
+        // for i in 1..prev_frame.len() - 1 {
+        //     let px = unsafe { *prev_frame.get_unchecked(i) } as u16;
+        //     prev_frame[i + 1] = px;
+        // }
     } else {
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
-        for i in 1..output.len() {
-            let px = unsafe { *output.get_unchecked(i) } as u8;
+        for i in 1..prev_as_u8.len() - 1 {
+            let px = prev_as_u8[i];
             prev_as_u8[i + 3] = px;
         }
     }
 
+    // for i in (0..10) {
+    //     info!(
+    //         "After is {} output {}",
+    //         prev_frame[i] as i16, output[i] as i16
+    //     );
+    // }
     (bits_per_pixel, min_value, max_value)
 }
 
@@ -506,6 +560,7 @@ impl<'a> CptvStream<'a> {
     ) {
         let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
+
         let frame_header = CptvFrameHeader {
             time_on: frame_telemetry.msec_on,
             last_ffc_time: frame_telemetry.time_at_last_ffc,
@@ -514,6 +569,7 @@ impl<'a> CptvStream<'a> {
             last_ffc_temp_c: frame_telemetry.fpa_temp_c_at_last_ffc,
             frame_temp_c: frame_telemetry.fpa_temp_c,
         };
+
         let frame_header_iter = frame_header_iter(&frame_header);
         let delta_encoded = unsafe { &u16_slice_to_u8(&prev_frame)[0..frame_size as usize] };
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
@@ -533,12 +589,15 @@ impl<'a> CptvStream<'a> {
                 ^ (self.crc_val >> 8);
             self.crc_val = self.crc_val ^ 0xffffffff;
             let entry = &self.huffman_table[byte as usize];
+
             self.cursor.write_bits(entry.code as u32, entry.bits as u32);
+
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 _ = flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
                 self.cursor.flush_residual_bits();
             }
         }
+
         self.num_frames += 1;
     }
 

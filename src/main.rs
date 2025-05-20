@@ -59,7 +59,7 @@ use embedded_hal::prelude::{
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
-use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, SioInput};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, PullUp, SioInput};
 use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
@@ -75,6 +75,10 @@ const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
+
+//how much lepton needed 24576
+// without fb0 and fb1 3840 (15Kib)
+// static CORE1_STACK: Stack<3840> = Stack::new();
 
 #[repr(C, align(32))]
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
@@ -215,11 +219,9 @@ fn main() -> ! {
     // // do all the get config crap here
 
     // if let Some(config) = &config {
-    //     info!("Existing config {:#?}", config.config());
+    // info!("Existing config {:#?}", config.config());
     // }
-    // loop {
-    //     nop();
-    // }
+
     //  used 14.64KIB
     let core = pac::CorePeripherals::take().unwrap();
     let mut delay = Delay::new(core.SYST, system_clock_freq);
@@ -229,8 +231,8 @@ fn main() -> ! {
     let scl_pin = pins.gpio7.into_function::<FunctionI2C>();
     let i2c1 = I2C::i2c1(
         peripherals.I2C1,
-        sda_pin,
-        scl_pin,
+        sda_pin.reconfigure(),
+        scl_pin.reconfigure(),
         400.kHz(),
         &mut peripherals.RESETS,
         &clocks.system_clock,
@@ -256,32 +258,34 @@ fn main() -> ! {
 
     info!("Enabled watchdog timer");
 
-    // if config.is_none() {
-    //     info!("Waking pi to get config");
-    //     // We need to wake up the rpi and get a config
-    //     wake_raspberry_pi(&mut shared_i2c, &mut delay);
-    // }
+    if config.is_none() {
+        info!("Waking pi to get config");
+        // We need to wake up the rpi and get a config
+        wake_raspberry_pi(&mut shared_i2c, &mut delay);
+    }
 
     let mut timer: rp2040_hal::Timer =
         bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
 
     let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
-    // let (device_config, device_config_was_updated) =
-    //     get_existing_device_config_or_config_from_pi_on_initial_handshake(
-    //         &mut flash_storage,
-    //         &mut pi_spi,
-    //         &mut peripherals.RESETS,
-    //         &mut peripherals.DMA,
-    //         system_clock_freq.Hz(),
-    //         2u32,
-    //         0,
-    //         false,
-    //         &mut timer,
-    //         config,
-    //     );
-    // let config = config.unwrap();
-
+    let (device_config, device_config_was_updated) =
+        get_existing_device_config_or_config_from_pi_on_initial_handshake(
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            system_clock_freq.Hz(),
+            2u32,
+            0,
+            false,
+            &mut timer,
+            config,
+        );
+    let config = device_config;
+    // loop {
+    //     nop();
+    // }
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
@@ -364,6 +368,19 @@ fn main() -> ! {
             nop();
         }
     } else {
+        let sda: rp2040_hal::gpio::Pin<
+            rp2040_hal::gpio::bank0::Gpio24,
+            rp2040_hal::gpio::FunctionI2c,
+            PullUp,
+        > = pins
+            .gpio24
+            .into_function::<FunctionI2C>()
+            .into_pull_type::<PullUp>();
+
+        let scl = pins
+            .gpio25
+            .into_function::<FunctionI2C>()
+            .into_pull_type::<PullUp>();
         let lepton_pins = LeptonPins {
             tx: pins.gpio23.into_function(),
             rx: pins.gpio20.into_function(),
@@ -372,9 +389,8 @@ fn main() -> ! {
 
             vsync: pins.gpio19.into_function(),
 
-            sda: pins.gpio24.into_function(),
-            scl: pins.gpio25.into_function(),
-
+            sda: sda,
+            scl: scl,
             power_down: pins.gpio28.into_push_pull_output(),
             power_enable: pins.gpio18.into_push_pull_output(),
             reset: pins.gpio29.into_push_pull_output(),
@@ -469,6 +485,152 @@ pub fn thermal_code(
 
     let cores = mc.cores();
     let core1 = &mut cores[1];
+
+    // info!(
+    //     "id address is {:#x}",
+    //     &config.config().device_id as *const _ as usize
+    // );
+    // info!(
+    //     "page inner {:#x}",
+    //     &onboard_flash.current_page.inner as *const _ as usize
+    // );
+    // let config = unsafe { extend_lifetime_generic(&config) };
+    // let ref_config = RefCell::new(config);
+
+    // should have removed need for a bunch of stuff in here
+    // about 7kib (7168bytes which is 1792 (32 bits))
+    // 44900 - 1792
+    let mut core1_stack: Stack<470> = Stack::new();
+
+    let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
+    let mut fb0 = FrameBuffer::new();
+    let mut fb1 = FrameBuffer::new();
+
+    let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb0)
+    })));
+    let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb1)
+    })));
+    let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
+        unsafe { extend_lifetime_generic(&frame_buffer) };
+    let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
+        unsafe { extend_lifetime_generic(&frame_buffer_2) };
+    let peripheral_clock_freq: fugit::Rate<u32, 1, 1> = clocks.peripheral_clock.freq();
+
+    // let r_config = RefCell::new(unsafe { extend_lifetime_generic(&config) });
+    // Shenanigans to convince the second thread that all these values exist for the lifetime of the
+    // program.
+
+    watchdog.feed();
+    watchdog.disable();
+
+    // {
+    //     leptoncore1_task(
+    //         lepton_pins,
+    //         watchdog,
+    //         system_clock_freq,
+    //         delay,
+    //         timer,
+    //         // pins,
+    //         peripheral_clock_freq,
+    //         rosc,
+    //         // frame_buffer_local,
+    //         // frame_buffer_local_2,
+    //     );
+    // }
+
+    let _ = core1.spawn(mem, move || {
+        leptoncore1_task(
+            lepton_pins,
+            watchdog,
+            system_clock_freq,
+            // delay,
+            timer,
+            // pins,
+            peripheral_clock_freq,
+            rosc,
+            frame_buffer_local,
+            frame_buffer_local_2,
+        );
+    });
+    // basic_core0(frame_buffer_local, frame_buffer_local_2);
+    // loop {
+    //     nop();
+    // }
+    // // let _ = core1.spawn(CORE1_STACK.take().unwrap(), move || {
+    core_1_task(
+        pi_spi,
+        onboard_flash,
+        frame_buffer_local,
+        frame_buffer_local_2,
+        system_clock_freq,
+        // pins,
+        i2c1,
+        unlocked_pin,
+        None,
+        None,
+        alarm_woke_us,
+        timer,
+        &config,
+    );
+}
+
+pub fn basic_core0(
+    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+) -> ! {
+    info!("COre 0");
+    let peripherals = unsafe { Peripherals::steal() };
+    let core = unsafe { pac::CorePeripherals::steal() };
+    let mut sio = Sio::new(peripherals.SIO);
+    info!("COre 0 ready");
+    sio.fifo.write_blocking(Core1Task::Ready.into());
+    let radiometry_enabled = sio.fifo.read_blocking();
+    sio.fifo.write_blocking(Core1Task::Ready.into());
+    let mut thread_local_frame_buffer: Option<&mut FrameBuffer> = None;
+
+    loop {
+        let input = sio.fifo.read_blocking();
+        let selected_frame_buffer = sio.fifo.read_blocking();
+        critical_section::with(|cs| {
+            // Now we just swap the buffers?
+            let buffer = if selected_frame_buffer == 0 {
+                frame_buffer_local
+            } else {
+                frame_buffer_local_2
+            };
+            thread_local_frame_buffer = buffer.borrow_ref_mut(cs).take();
+
+            critical_section::with(|cs| {
+                // Now we just swap the buffers?
+                let buffer = if selected_frame_buffer == 0 {
+                    frame_buffer_local
+                } else {
+                    frame_buffer_local_2
+                };
+                *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+            });
+            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+        });
+    }
+}
+pub fn leptoncore1_task(
+    lepton_pins: LeptonPins,
+    mut watchdog: Watchdog,
+    system_clock_freq: u32,
+    timer: bsp::hal::Timer,
+    peripheral_clock_freq: fugit::Rate<u32, 1, 1>,
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+) -> ! {
+    let mut peripherals = unsafe { Peripherals::steal() };
+    let mut sio = Sio::new(peripherals.SIO);
+    let core = unsafe { pac::CorePeripherals::steal() };
+
+    let mut delay = Delay::new(core.SYST, system_clock_freq);
+
     let mut lepton = init_lepton_module(
         peripherals.SPI0,
         peripherals.I2C0,
@@ -491,65 +653,6 @@ pub fn thermal_code(
     }
     info!("Camera serial #{}", lepton_serial);
     info!("Radiometry enabled? {}", radiometric_mode);
-
-    info!(
-        "id address is {:#x}",
-        &config.config().device_id as *const _ as usize
-    );
-    info!(
-        "page inner {:#x}",
-        &onboard_flash.current_page.inner as *const _ as usize
-    );
-    // let config = unsafe { extend_lifetime_generic(&config) };
-    // let ref_config = RefCell::new(config);
-    let mut fb0 = FrameBuffer::new();
-    let mut fb1 = FrameBuffer::new();
-
-    // should have removed need for a bunch of stuff in here
-    // about 7kib (7168bytes which is 1792 (32 bits))
-    // 44900 - 1792
-    let mut core1_stack: Stack<43200> = Stack::new();
-
-    let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
-
-    let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb0)
-    })));
-    let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb1)
-    })));
-
-    // let r_config = RefCell::new(unsafe { extend_lifetime_generic(&config) });
-    // Shenanigans to convince the second thread that all these values exist for the lifetime of the
-    // program.
-    let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
-        unsafe { extend_lifetime_generic(&frame_buffer) };
-    let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
-        unsafe { extend_lifetime_generic(&frame_buffer_2) };
-    watchdog.feed();
-    watchdog.disable();
-
-    {
-        let _ = core1.spawn(mem, move || {
-            core_1_task(
-                pi_spi,
-                onboard_flash,
-                frame_buffer_local,
-                frame_buffer_local_2,
-                system_clock_freq,
-                // pins,
-                i2c1,
-                unlocked_pin,
-                lepton_serial,
-                lepton_firmware_version,
-                alarm_woke_us,
-                timer,
-                &config,
-            )
-        });
-    }
-
-    let peripheral_clock_freq = clocks.peripheral_clock.freq();
 
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
