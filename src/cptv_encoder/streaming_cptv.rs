@@ -235,18 +235,8 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
         max_value = max_value.max(*curr_px);
         min_value = min_value.min(*curr_px);
         let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
-        // info!("{}", input_index);
-        // info!("Getting input index {}", input_index);
         let val = *curr_px as i32 - *prev_raw as i32;
-        // info!("Pixel is {}", curr_px);
         let delta = val - prev_val;
-        // info!(
-        //     "delta {}, min {}, val {}, prev_val {}, curr_px {}, prev_px {}",
-        //     delta, min, val, prev_val, curr_px, prev_raw
-        // );
-        if input_index < 10 {
-            info!("Delta is org{} =  {}", curr_px, delta);
-        }
 
         assert!(
             delta >= min,
@@ -268,30 +258,10 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
             curr_px,
             prev_raw
         );
-        // info!("Set prev as [{}] = {}", i, delta as u16);
-        // if input_index < 10 {
-        //     *unsafe { output.get_unchecked_mut(i) } = delta;
-        // }
-        prev_frame[input_index] = delta as u16;
-
-        // *unsafe { output.get_unchecked_mut(i) } = delta;
-        // i += 1;
-        // prev_val = val;
-        //add 2 ^ 17 to ensure always positive
-        if delta > 127 {
+        if i > 0 && (delta > 127 || delta < -127) {
             bits_per_pixel = 16;
         }
-        // let le_bytes = (delta + 65535).to_le_bytes();
-        // // info!("Le bytes is {}", le_bytes.len());
-        // let mut byte_index = 0;
-        // for b_i in le_bytes {
-        //     *unsafe { output.get_unchecked_mut(i + byte_index) } = b_i;
-        //     byte_index += 1;
-        // }
-
-        // for b_i in 0..17 {
-        //     *unsafe { output.get_unchecked_mut(i + b_i) } = le_bytes[14 + b_i];
-        // }
+        *unsafe { prev_frame.get_unchecked_mut(input_index) } = delta as u16;
         i += 1;
         prev_val = val;
         // info!("PRev vcal is {}", prev_val);
@@ -301,57 +271,41 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
     //  Are there more realistic scenarios which don't work?  Let's get a bunch of lepton 3.5 files
     //  and work out the ranges there.\
 
-    // NOTE: To play nice with lz77, we only want to pack to bytes
-
-    //TODO need to check this.... GP 2025 16/05
-    // let bits_per_pixel = if output[1..].iter().find(|&&x| x < -127 || x > 127).is_some() {
-    //     16
-    // } else {
-    //     8
-    // };
-    // for i in (0..10) {
-    //     info!(
-    //         "After is {} output {}",
-    //         prev_frame[i] as i16, output[i] as i16
-    //     );
-    // }
-    let bits_per_pixel = 16;
-    let px: u32 = prev_frame[0] as u32;
+    // NOTE: To play nice with lz77, we only want to pack to bytes=
+    let px_1 = unsafe { *prev_frame.get_unchecked(1) };
     {
+        let px = unsafe { *prev_frame.get_unchecked(0) } as i16;
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
         LittleEndian::write_u32(&mut prev_as_u8[0..4], px as u32);
     }
-    if bits_per_pixel == 16 {
-        //need to reverse every odd row
-        // for i in (1..FRAME_HEIGHT).step_by(2) {
-        //     let row_i: usize = FRAME_WIDTH * i;
-        //     for z in 0..FRAME_WIDTH {
-        //         let swap_px = prev_frame[row_i + z];
-        //         prev_frame[row_i + z] = prev_frame[row_i + FRAME_WIDTH - z - 1];
-        //         prev_frame[row_i + FRAME_WIDTH - z - 1] = swap_px;
-        //     }
-        // }
-        // for i in 1..prev_frame.len() - 1 {
-        //     let px = unsafe { *prev_frame.get_unchecked(i) } as u16;
-        //     prev_frame[i + 1] = px;
-        // }
-    } else {
+    //need to reverse every odd row
+    for i in (1..FRAME_HEIGHT).step_by(2) {
+        let row_i: usize = FRAME_WIDTH * i;
+        for z in 0..FRAME_WIDTH / 2 {
+            let swap_px = *unsafe { prev_frame.get_unchecked(row_i + z) };
+            let other_px = *unsafe { prev_frame.get_unchecked(row_i + FRAME_WIDTH - z - 1) };
+            *unsafe { prev_frame.get_unchecked_mut(row_i + z) } = other_px;
+            *unsafe { prev_frame.get_unchecked_mut(row_i + FRAME_WIDTH - z - 1) } = swap_px;
+        }
+    }
+    // shift pixels 1 faster way to do this??
+    for i in (2..prev_frame.len() - 1).rev() {
+        unsafe { *prev_frame.get_unchecked_mut(i + 1) = *prev_frame.get_unchecked(i) };
+    }
+    *unsafe { prev_frame.get_unchecked_mut(2) } = px_1;
+    if bits_per_pixel == 8 {
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
-        for i in 1..prev_as_u8.len() - 1 {
-            let px = prev_as_u8[i];
-            prev_as_u8[i + 3] = px;
+        let mut u16_i = 3 * 2;
+
+        for i in 5..(prev_as_u8.len() / 2) {
+            let px = unsafe { *prev_as_u8.get_unchecked(u16_i) } as u8;
+            *unsafe { prev_as_u8.get_unchecked_mut(i) } = px;
+            u16_i += 2;
         }
     }
 
-    // for i in (0..10) {
-    //     info!(
-    //         "After is {} output {}",
-    //         prev_frame[i] as i16, output[i] as i16
-    //     );
-    // }
     (bits_per_pixel, min_value, max_value)
 }
-
 struct FieldIterator {
     state: [u8; 30], // TODO: What is the actual high-water mark for field sizes?
     size: u8,

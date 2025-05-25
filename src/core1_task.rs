@@ -244,23 +244,16 @@ pub fn core_1_task(
     woken_by_alarm: bool,
     mut timer: Timer,
     device_config: &DeviceConfig,
+    event_logger: &mut EventLogger,
+    mut synced_date_time: &mut SyncedDateTime,
 ) -> ! {
-    let dev_mode = true;
+    let dev_mode = false;
     info!("=== Core 1 start ===");
     if dev_mode {
         warn!("DEV MODE");
     } else {
         warn!("FIELD MODE");
     }
-    info!(
-        "config in core1 address is {:#x}",
-        &device_config.config().device_id as *const _ as usize
-    );
-    info!(
-        "page in core1 is {:#x}",
-        &flash_storage.current_page.inner as *const _ as usize
-    );
-    let mut synced_date_time = SyncedDateTime::default();
 
     let mut peripherals = unsafe { Peripherals::steal() };
     let core = unsafe { pac::CorePeripherals::steal() };
@@ -277,30 +270,10 @@ pub fn core_1_task(
         }
     }
 
-    let mut event_logger = EventLogger::new(&mut flash_storage);
     if event_logger.has_events_to_offload() {
         info!("There are {} event(s) to offload", event_logger.count());
     }
 
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        match shared_i2c.get_datetime(&mut delay) {
-            Ok(now) => {
-                synced_date_time.set(get_naive_datetime(now), &timer);
-                break;
-            }
-            Err(e) => {
-                //cant get time so use 0 and add a time when tc2-agent uploads
-                event_logger.log_event(
-                    LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
-                    &mut flash_storage,
-                );
-
-                warn!("Failed getting date from RTC, retrying");
-                delay.delay_ms(10);
-            }
-        }
-    }
     event_logger.log_event(
         LoggerEvent::new(
             LoggerEventKind::ThermalMode,
@@ -414,90 +387,94 @@ pub fn core_1_task(
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
 
-    // match device_config.config().audio_mode {
-    //     AudioMode::AudioAndThermal => {
-    //         let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
-    //         record_audio = true;
-    //         let mut schedule_alarm = true;
+    match device_config.config().audio_mode {
+        AudioMode::AudioAndThermal => {
+            let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
+            record_audio = true;
+            let mut schedule_alarm = true;
 
-    //         if let Some(audio_alarm) = audio_alarm {
-    //             if let Ok(audio_mode) = audio_mode {
-    //                 if audio_mode == AlarmMode::AUDIO {
-    //                     schedule_alarm = false;
-    //                 }
-    //                 //otherwise alarm is for thermal so reschedule an audio alarm during recording window
-    //             }
-    //             if !schedule_alarm {
-    //                 let synced = synced_date_time.date_time_utc;
-    //                 let until_alarm = (audio_alarm - synced).num_minutes();
-    //                 if until_alarm <= MAX_GAP_MIN as i64 {
-    //                     info!(
-    //                         "Audio alarm already scheduled for {}-{}-{} {}:{}",
-    //                         audio_alarm.year(),
-    //                         audio_alarm.month(),
-    //                         audio_alarm.day(),
-    //                         audio_alarm.hour(),
-    //                         audio_alarm.minute()
-    //                     );
-    //                     if check_alarm_still_valid(&audio_alarm, &synced, &device_config) {
-    //                         next_audio_alarm = Some(audio_alarm);
-    //                         schedule_alarm = false;
-    //                     } else {
-    //                         schedule_alarm = true;
-    //                         //if window time changed and alarm is after rec window start
-    //                         info!("Rescehduling as alarm is after window start");
-    //                     }
-    //                 } else {
-    //                     info!("Alarm is missed");
-    //                 }
-    //             }
-    //         }
-    //         if schedule_alarm {
-    //             if let Ok(next_alarm) = schedule_audio_rec(
-    //                 &mut delay,
-    //                 &synced_date_time,
-    //                 &mut shared_i2c,
-    //                 &mut flash_storage,
-    //                 &mut timer,
-    //                 &mut event_logger,
-    //                 &device_config,
-    //             ) {
-    //                 next_audio_alarm = Some(next_alarm);
-    //                 info!("Setting a pending audio alarm");
-    //             } else {
-    //                 error!("Couldn't schedule alarm");
-    //             }
-    //         }
-    //     }
-    //     _ => {
-    //         clear_audio_alarm(&mut flash_storage);
-    //         record_audio = false
-    //     }
-    // }
+            if let Some(audio_alarm) = audio_alarm {
+                if let Ok(audio_mode) = audio_mode {
+                    if audio_mode == AlarmMode::AUDIO {
+                        schedule_alarm = false;
+                    }
+                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
+                }
+                if !schedule_alarm {
+                    let synced = synced_date_time.date_time_utc;
+                    let until_alarm = (audio_alarm - synced).num_minutes();
+                    if until_alarm <= MAX_GAP_MIN as i64 {
+                        info!(
+                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                            audio_alarm.year(),
+                            audio_alarm.month(),
+                            audio_alarm.day(),
+                            audio_alarm.hour(),
+                            audio_alarm.minute()
+                        );
+                        if check_alarm_still_valid_with_thermal_window(
+                            &audio_alarm,
+                            &synced,
+                            &device_config,
+                        ) {
+                            next_audio_alarm = Some(audio_alarm);
+                            schedule_alarm = false;
+                        } else {
+                            schedule_alarm = true;
+                            //if window time changed and alarm is after rec window start
+                            info!("Rescehduling as alarm is after window start");
+                        }
+                    } else {
+                        info!("Alarm is missed");
+                    }
+                }
+            }
+            if schedule_alarm {
+                if let Ok(next_alarm) = schedule_audio_rec(
+                    &mut delay,
+                    &synced_date_time,
+                    &mut shared_i2c,
+                    &mut flash_storage,
+                    &mut timer,
+                    event_logger,
+                    &device_config,
+                ) {
+                    next_audio_alarm = Some(next_alarm);
+                    info!("Setting a pending audio alarm");
+                } else {
+                    error!("Couldn't schedule alarm");
+                }
+            }
+        }
+        _ => {
+            clear_audio_alarm(&mut flash_storage);
+            record_audio = false
+        }
+    }
 
-    // if !device_config.use_low_power_mode() {
-    //     if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
-    //         event_logger.log_event(
-    //             LoggerEvent::new(
-    //                 LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
-    //                 synced_date_time.get_timestamp_micros(&timer),
-    //             ),
-    //             &mut flash_storage,
-    //         );
-    //     }
-    //     maybe_offload_events(
-    //         &mut pi_spi,
-    //         &mut peripherals.RESETS,
-    //         &mut peripherals.DMA,
-    //         &mut delay,
-    //         &mut timer,
-    //         &mut event_logger,
-    //         &mut flash_storage,
-    //         clock_freq,
-    //         &synced_date_time,
-    //         None,
-    //     );
-    // }
+    if !device_config.use_low_power_mode() {
+        if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
+        }
+        maybe_offload_events(
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            &mut delay,
+            &mut timer,
+            event_logger,
+            &mut flash_storage,
+            clock_freq,
+            &synced_date_time,
+            None,
+        );
+    }
     // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
     //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
     //  Otherwise, if the rp2040 happens to restart, we'll pretty much
@@ -564,7 +541,7 @@ pub fn core_1_task(
         is_cptv,
         flash_storage.has_files_to_offload()
     );
-    let should_offload = true;
+
     let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
@@ -575,8 +552,8 @@ pub fn core_1_task(
             &mut shared_i2c,
             &mut delay,
             &mut timer,
-            &mut event_logger,
-            &synced_date_time,
+            event_logger,
+            synced_date_time,
             None,
             false,
         )
@@ -1156,8 +1133,8 @@ pub fn core_1_task(
             }
             let sync_rtc_start_real = timer.get_counter();
 
-            synced_date_time = match shared_i2c.get_datetime(&mut delay) {
-                Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
+            match shared_i2c.get_datetime(&mut delay) {
+                Ok(now) => synced_date_time.set(get_naive_datetime(now), &timer),
                 Err(err_str) => {
                     event_logger.log_event(
                         LoggerEvent::new(
@@ -1167,7 +1144,6 @@ pub fn core_1_task(
                         &mut flash_storage,
                     );
                     error!("Unable to get DateTime from RTC: {}", err_str);
-                    synced_date_time
                 }
             };
 
