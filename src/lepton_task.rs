@@ -1,4 +1,4 @@
-use crate::core1_task::Core1Task;
+use crate::frame_processing::Core1Task;
 use crate::lepton::{read_telemetry, FFCStatus, LeptonModule};
 use crate::utils::u16_slice_to_u8;
 use crate::{bsp, FrameBuffer, FFC_INTERVAL_MS};

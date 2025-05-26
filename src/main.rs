@@ -3,31 +3,34 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 mod attiny_rtc_i2c;
+mod audio_task;
 mod bsp;
 mod byte_slice_cursor;
 mod clock_utils;
-mod core0_audio;
-mod core0_task;
-mod core1_sub_tasks;
-mod core1_task;
 mod cptv_encoder;
 mod device_config;
 mod event_logger;
 mod ext_spi_transfers;
+mod frame_processing;
 mod lepton;
+mod lepton_task;
 mod motion_detector;
 mod onboard_flash;
 mod pdm_microphone;
 mod pdmfilter;
 mod rp2040_flash;
+mod sub_tasks;
 mod sun_times;
 mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
-use crate::core0_audio::audio_task;
-pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, Core1Pins, Core1Task};
+use crate::audio_task::audio_task;
 use crate::cptv_encoder::FRAME_WIDTH;
+use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
+use crate::frame_processing::{
+    thermal_motion_task, wake_raspberry_pi, Core1Pins, Core1Task, SyncedDateTime,
+};
 use crate::lepton::{init_lepton_module, LeptonPins};
+pub use crate::lepton_task::frame_acquisition_loop;
 use crate::onboard_flash::extend_lifetime_generic;
 use attiny_rtc_i2c::tc2_agent_state;
 use bsp::{
@@ -40,7 +43,6 @@ use bsp::{
     },
     pac::Peripherals,
 };
-use chrono::NaiveDateTime;
 use cortex_m::asm::nop;
 use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use rp2040_hal::rosc::RingOscillator;
@@ -59,7 +61,7 @@ use embedded_hal::prelude::{
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
-use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, SioInput};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, PullDown, PullUp, SioInput};
 use rp2040_hal::I2C;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
@@ -75,6 +77,10 @@ const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; 61]; 4];
 const TRANSFER_HEADER_LENGTH: usize = 18;
+
+//how much lepton needed 24576
+// without fb0 and fb1 3840 (15Kib)
+// static CORE1_STACK: Stack<3840> = Stack::new();
 
 #[repr(C, align(32))]
 pub struct FrameBuffer([u8; TRANSFER_HEADER_LENGTH + (160 * 61 * 4) + 2]);
@@ -110,13 +116,18 @@ impl FrameBuffer {
     }
 }
 
+use crate::ext_spi_transfers::ExtSpiTransfers;
+use crate::onboard_flash::OnboardFlash;
+use crate::sub_tasks::get_existing_device_config_or_config_from_pi_on_initial_handshake;
+use rp2040_hal::dma::DMAExt;
+use rp2040_hal::pio::PIOExt;
+
 #[entry]
 fn main() -> ! {
     info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
-    let mut config = DeviceConfig::load_existing_inner_config_from_flash();
-    let mut is_audio: bool = config.is_some() && config.as_mut().unwrap().0.is_audio_device();
+
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -131,36 +142,83 @@ fn main() -> ! {
         "System clock speed {}MHz",
         clocks.system_clock.freq().to_MHz()
     );
-
-    // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
-
-    let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
-    watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
-
-    watchdog.pause_on_debug(true);
-    watchdog.start(8388607.micros());
-
-    info!("Enabled watchdog timer");
-    let timer = bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
-
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut delay = Delay::new(core.SYST, system_clock_freq);
     let sio = Sio::new(peripherals.SIO);
-
+    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let pins = rp2040_hal::gpio::Pins::new(
         peripherals.IO_BANK0,
         peripherals.PADS_BANK0,
         sio.gpio_bank0,
         &mut peripherals.RESETS,
     );
+    let core1 = Core1Pins {
+        pi_ping: pins.gpio5.into_pull_down_input(),
+
+        pi_miso: pins.gpio15.into_floating_disabled(),
+        pi_mosi: pins.gpio12.into_floating_disabled(),
+        pi_cs: pins.gpio13.into_floating_disabled(),
+        pi_clk: pins.gpio14.into_floating_disabled(),
+
+        fs_cs: pins.gpio9.into_push_pull_output(),
+        fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
+        fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
+        fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
+    };
+
+    // init flash
+    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
+    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
+    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
+    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
+
+    let mut flash_storage = OnboardFlash::new(
+        core1.fs_cs,
+        core1.fs_mosi,
+        core1.fs_clk,
+        core1.fs_miso,
+        flash_page_buf,
+        flash_page_buf_2,
+        dma_channels.ch1,
+        dma_channels.ch2,
+        true,
+        None,
+    );
+
+    let mut payload_buf = [0x42u8; 2066];
+    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
+    let mut crc_buf = [0x42u8; 32 + 104];
+    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
+    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
+
+    let mut pi_spi = ExtSpiTransfers::new(
+        core1.pi_mosi,
+        core1.pi_cs,
+        core1.pi_clk,
+        core1.pi_miso,
+        core1.pi_ping,
+        dma_channels.ch0,
+        payload_buf,
+        crc_buf,
+        pio0,
+        sm0,
+    );
+
+    flash_storage.take_spi(
+        peripherals.SPI1,
+        &mut peripherals.RESETS,
+        system_clock_freq.Hz(),
+    );
+    flash_storage.init();
+
+    let core = pac::CorePeripherals::take().unwrap();
+    let mut delay = Delay::new(core.SYST, system_clock_freq);
 
     // Attiny + RTC comms
     let sda_pin = pins.gpio6.into_function::<FunctionI2C>();
     let scl_pin = pins.gpio7.into_function::<FunctionI2C>();
     let i2c1 = I2C::i2c1(
         peripherals.I2C1,
-        sda_pin,
-        scl_pin,
+        sda_pin.reconfigure(),
+        scl_pin.reconfigure(),
         400.kHz(),
         &mut peripherals.RESETS,
         &clocks.system_clock,
@@ -175,36 +233,90 @@ fn main() -> ! {
 
     let mut shared_i2c = SharedI2C::new(i2c1, unlocked_pin, &mut delay);
     info!("Got shared i2c");
+
+    // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
+
+    let mut watchdog = bsp::hal::Watchdog::new(peripherals.WATCHDOG);
+    watchdog.enable_tick_generation((system_clock_freq / 1_000_000) as u8);
+
+    watchdog.pause_on_debug(true);
+    watchdog.start(8388607.micros());
+    info!("Enabled watchdog timer");
+
+    let mut timer: rp2040_hal::Timer =
+        bsp::hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
+
+    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+    let mut event_logger = EventLogger::new(&mut flash_storage);
+    let mut synced_date_time = SyncedDateTime::default();
+
+    loop {
+        // NOTE: Keep retrying until we get a datetime from RTC.
+        match shared_i2c.get_datetime(&mut delay) {
+            Ok(now) => {
+                info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
+                synced_date_time.set(get_naive_datetime(now), &timer);
+                break;
+            }
+            Err(e) => {
+                //cant get time so use 0 and add a time when tc2-agent uploads
+                event_logger.log_event(
+                    LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
+                    &mut flash_storage,
+                );
+
+                warn!("Failed getting date from RTC, retrying");
+                delay.delay_ms(10);
+            }
+        }
+    }
+
+    let config: Option<DeviceConfig> =
+        DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
+
+    if let Some(config) = &config {
+        info!("Existing config {:#?}", config.config());
+    }
+
+    if config.is_none() {
+        info!("Waking pi to get config");
+        // We need to wake up the rpi and get a config
+        wake_raspberry_pi(&mut shared_i2c, &mut delay);
+    }
+
+    let (device_config, device_config_was_updated) =
+        get_existing_device_config_or_config_from_pi_on_initial_handshake(
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut peripherals.RESETS,
+            &mut peripherals.DMA,
+            system_clock_freq.Hz(),
+            2u32,
+            0,
+            false,
+            &mut timer,
+            config,
+        );
+    if device_config.is_none() {
+        crate::panic!("Couldn't get config");
+    }
+    let config = device_config.unwrap();
+
     let alarm_woke_us = shared_i2c.alarm_triggered(&mut delay);
     info!("Woken by RTC alarm? {}", alarm_woke_us);
     if alarm_woke_us {
         shared_i2c.clear_alarm(&mut delay);
     }
+    let mut is_audio: bool = config.config().is_audio_device();
 
     if let Ok(audio_only) = shared_i2c.is_audio_device(&mut delay) {
         info!("EEPROM audio device: {}", audio_only);
         is_audio = is_audio || audio_only;
     }
 
-    if !is_audio {
-        let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
-        if disabled_alarm.is_err() {
-            error!("{}", disabled_alarm.unwrap());
-        }
-    }
-
-    let date_time: NaiveDateTime;
-    match shared_i2c.get_datetime(&mut delay) {
-        Ok(now) => {
-            info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
-            date_time = get_naive_datetime(now)
-        }
-        Err(_) => crate::panic!("Unable to get DateTime from RTC"),
-    }
-
     if is_audio {
-        let config = config.unwrap().0;
-        match config.audio_mode {
+        match config.config().audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                 if let Ok(state) = shared_i2c.tc2_agent_state(&mut delay) {
                     if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
@@ -213,10 +325,11 @@ fn main() -> ! {
                         //audio mode wants to go in thermal mode
                         is_audio = false;
                     } else {
-                        let (start_time, end_time) =
-                            config.next_or_current_recording_window(&date_time);
+                        let (start_time, end_time) = config
+                            .next_or_current_recording_window(&synced_date_time.date_time_utc);
 
-                        let in_window = config.time_is_in_recording_window(&date_time, &None);
+                        let in_window = config
+                            .time_is_in_recording_window(&synced_date_time.date_time_utc, &None);
                         if in_window {
                             is_audio = (state
                                 & (tc2_agent_state::LONG_AUDIO_RECORDING
@@ -232,37 +345,46 @@ fn main() -> ! {
             }
             _ => (),
         }
+    } else {
+        let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+        if disabled_alarm.is_err() {
+            error!("{}", disabled_alarm.unwrap());
+        }
     }
     let (i2c1, unlocked_pin) = shared_i2c.free();
     if is_audio {
         let gpio0 = pins.gpio0;
         let gpio1 = pins.gpio1;
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
 
         audio_branch(
             i2c1,
             system_clock_freq,
             timer,
-            pins,
             gpio0,
             gpio1,
             watchdog,
             alarm_woke_us,
             unlocked_pin,
+            config,
+            &mut flash_storage,
+            &mut pi_spi,
+            &mut event_logger,
+            &mut synced_date_time,
         );
     } else {
+        let sda: rp2040_hal::gpio::Pin<
+            rp2040_hal::gpio::bank0::Gpio24,
+            rp2040_hal::gpio::FunctionI2c,
+            PullUp,
+        > = pins
+            .gpio24
+            .into_function::<FunctionI2C>()
+            .into_pull_type::<PullUp>();
+
+        let scl = pins
+            .gpio25
+            .into_function::<FunctionI2C>()
+            .into_pull_type::<PullUp>();
         let lepton_pins = LeptonPins {
             tx: pins.gpio23.into_function(),
             rx: pins.gpio20.into_function(),
@@ -271,32 +393,20 @@ fn main() -> ! {
 
             vsync: pins.gpio19.into_function(),
 
-            sda: pins.gpio24.into_function(),
-            scl: pins.gpio25.into_function(),
-
+            sda: sda,
+            scl: scl,
             power_down: pins.gpio28.into_push_pull_output(),
             power_enable: pins.gpio18.into_push_pull_output(),
             reset: pins.gpio29.into_push_pull_output(),
             clk_disable: pins.gpio27.into_push_pull_output(),
             master_clk: pins.gpio26.into_floating_input(),
         };
-        let pins = Core1Pins {
-            pi_ping: pins.gpio5.into_pull_down_input(),
-
-            pi_miso: pins.gpio15.into_floating_disabled(),
-            pi_mosi: pins.gpio12.into_floating_disabled(),
-            pi_cs: pins.gpio13.into_floating_disabled(),
-            pi_clk: pins.gpio14.into_floating_disabled(),
-
-            fs_cs: pins.gpio9.into_push_pull_output(),
-            fs_miso: pins.gpio8.into_pull_down_disabled().into_pull_type(),
-            fs_mosi: pins.gpio11.into_pull_down_disabled().into_pull_type(),
-            fs_clk: pins.gpio10.into_pull_down_disabled().into_pull_type(),
-        };
 
         thermal_code(
+            pi_spi,
+            flash_storage,
             lepton_pins,
-            pins,
+            // core1,
             watchdog,
             system_clock_freq,
             delay,
@@ -306,6 +416,9 @@ fn main() -> ! {
             rosc,
             alarm_woke_us,
             unlocked_pin,
+            config,
+            &mut event_logger,
+            &mut synced_date_time,
         );
     }
 }
@@ -315,7 +428,7 @@ pub fn audio_branch(
     i2c_config: I2CConfig,
     clock_freq: u32,
     mut timer: bsp::hal::Timer,
-    pins: Core1Pins,
+    // pins: Core1Pins,
     gpio0: rp2040_hal::gpio::Pin<
         rp2040_hal::gpio::bank0::Gpio0,
         rp2040_hal::gpio::FunctionNull,
@@ -333,25 +446,36 @@ pub fn audio_branch(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    config: DeviceConfig,
+    flash_storage: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    event_logger: &mut EventLogger,
+    datetime: &mut SyncedDateTime,
 ) -> ! {
     audio_task(
         i2c_config,
         clock_freq,
         &mut timer,
-        pins,
         gpio0,
         gpio1,
         &mut watchdog,
         alarm_triggered,
         unlocked_pin,
+        config,
+        flash_storage,
+        pi_spi,
+        event_logger,
+        datetime,
     );
 }
 pub fn thermal_code(
+    pi_spi: ExtSpiTransfers,
+    onboard_flash: OnboardFlash,
     lepton_pins: LeptonPins,
-    pins: Core1Pins,
+    // pins: Core1Pins,
     mut watchdog: Watchdog,
     system_clock_freq: u32,
-    mut delay: Delay,
+    delay: Delay,
     timer: bsp::hal::Timer,
     i2c1: I2CConfig,
     clocks: &ClocksManager,
@@ -362,6 +486,10 @@ pub fn thermal_code(
         FunctionSio<SioInput>,
         PullDown,
     >,
+    config: DeviceConfig,
+    event_logger: &mut EventLogger,
+
+    synced_date_time: &mut SyncedDateTime,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -369,6 +497,78 @@ pub fn thermal_code(
 
     let cores = mc.cores();
     let core1 = &mut cores[1];
+
+    // should have removed need for a bunch of stuff in here
+    // about 7kib (7168bytes which is 1792 (32 bits))
+    // 44900 - 1792
+    let mut core1_stack: Stack<470> = Stack::new();
+
+    let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
+    let mut fb0 = FrameBuffer::new();
+    let mut fb1 = FrameBuffer::new();
+
+    let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb0)
+    })));
+    let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb1)
+    })));
+    let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
+        unsafe { extend_lifetime_generic(&frame_buffer) };
+    let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
+        unsafe { extend_lifetime_generic(&frame_buffer_2) };
+    let peripheral_clock_freq: fugit::Rate<u32, 1, 1> = clocks.peripheral_clock.freq();
+
+    watchdog.feed();
+    watchdog.disable();
+
+    let _ = core1.spawn(mem, move || {
+        leptoncore1_task(
+            lepton_pins,
+            watchdog,
+            system_clock_freq,
+            timer,
+            peripheral_clock_freq,
+            rosc,
+            frame_buffer_local,
+            frame_buffer_local_2,
+        );
+    });
+
+    thermal_motion_task(
+        pi_spi,
+        onboard_flash,
+        frame_buffer_local,
+        frame_buffer_local_2,
+        system_clock_freq,
+        i2c1,
+        unlocked_pin,
+        None,
+        None,
+        alarm_woke_us,
+        timer,
+        &config,
+        event_logger,
+        synced_date_time,
+    );
+}
+
+pub fn leptoncore1_task(
+    lepton_pins: LeptonPins,
+    mut watchdog: Watchdog,
+    system_clock_freq: u32,
+    timer: bsp::hal::Timer,
+    peripheral_clock_freq: fugit::Rate<u32, 1, 1>,
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+) -> ! {
+    let mut peripherals = unsafe { Peripherals::steal() };
+    let mut sio = Sio::new(peripherals.SIO);
+    let core = unsafe { pac::CorePeripherals::steal() };
+
+    let mut delay = Delay::new(core.SYST, system_clock_freq);
+
     let mut lepton = init_lepton_module(
         peripherals.SPI0,
         peripherals.I2C0,
@@ -392,44 +592,6 @@ pub fn thermal_code(
     info!("Camera serial #{}", lepton_serial);
     info!("Radiometry enabled? {}", radiometric_mode);
 
-    let mut fb0 = FrameBuffer::new();
-    let mut fb1 = FrameBuffer::new();
-    let mut core1_stack: Stack<44900> = Stack::new();
-    let frame_buffer = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb0)
-    })));
-    let frame_buffer_2 = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb1)
-    })));
-    // Shenanigans to convince the second thread that all these values exist for the lifetime of the
-    // program.
-    let frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
-        unsafe { extend_lifetime_generic(&frame_buffer) };
-    let frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>> =
-        unsafe { extend_lifetime_generic(&frame_buffer_2) };
-    watchdog.feed();
-    watchdog.disable();
-
-    let peripheral_clock_freq = clocks.peripheral_clock.freq();
-    {
-        let _ = core1.spawn(
-            unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) },
-            move || {
-                core_1_task(
-                    frame_buffer_local,
-                    frame_buffer_local_2,
-                    system_clock_freq,
-                    pins,
-                    i2c1,
-                    unlocked_pin,
-                    lepton_serial,
-                    lepton_firmware_version,
-                    alarm_woke_us,
-                    timer,
-                )
-            },
-        );
-    }
     let result = sio.fifo.read_blocking();
     crate::assert_eq!(result, Core1Task::Ready.into());
     sio.fifo

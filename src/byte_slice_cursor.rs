@@ -71,6 +71,28 @@ impl<'a> CursorMut<'a> {
         let len = self.pos.min(self.inner.as_mut().len());
         &mut self.inner.as_mut()[len..]
     }
+
+    pub fn data(&mut self) -> &mut [u8] {
+        &mut self.inner.as_mut()[..self.pos]
+    }
+
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> fmt::Result {
+        // Skip over already-copied data
+        let remainder = &mut self.inner[self.pos..];
+        // Check if there is space remaining (return error instead of panicking)
+        if remainder.len() < bytes.len() {
+            return Err(core::fmt::Error);
+        }
+        // Make the two slices the same length
+        let remainder = &mut remainder[..bytes.len()];
+        // Copy
+        remainder.copy_from_slice(bytes);
+
+        // Update offset to avoid overwriting
+        self.pos += bytes.len();
+
+        Ok(())
+    }
 }
 
 impl<'a> ErrorType for Cursor<'a> {

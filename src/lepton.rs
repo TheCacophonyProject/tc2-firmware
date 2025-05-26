@@ -11,7 +11,7 @@ use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
 use rp2040_hal::gpio::{
-    FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, SioInput, SioOutput,
+    FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, PullUp, SioInput, SioOutput,
 };
 
 use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
@@ -20,7 +20,7 @@ use crate::bsp::hal::spi::Enabled;
 use crate::bsp::hal::{Spi, I2C as I2CInterface};
 use crate::bsp::pac::{RESETS, SPI0};
 use crate::bsp::{hal::gpio::Pin, pac::I2C0};
-use crate::core0_task::LEPTON_SPI_CLOCK_FREQ;
+use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
 use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 
 pub enum LeptonCommandType {
@@ -211,8 +211,8 @@ type SpiCs = Pin<Gpio21, FunctionSpi, PullDown>;
 type SpiTx = Pin<Gpio23, FunctionSpi, PullDown>;
 type SpiRx = Pin<Gpio20, FunctionSpi, PullDown>;
 type SpiClk = Pin<Gpio22, FunctionSpi, PullDown>;
-type Sda = Pin<Gpio24, FunctionI2C, PullDown>;
-type Scl = Pin<Gpio25, FunctionI2C, PullDown>;
+type Sda = Pin<Gpio24, FunctionI2C, PullUp>;
+type Scl = Pin<Gpio25, FunctionI2C, PullUp>;
 type LeptonCciI2c = I2CInterface<I2C0, (Sda, Scl)>;
 type PowerEnable = Pin<Gpio18, FunctionSio<SioOutput>, PullDown>;
 type PowerDown = Pin<Gpio28, FunctionSio<SioOutput>, PullDown>;

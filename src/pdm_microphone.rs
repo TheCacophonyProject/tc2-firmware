@@ -1,6 +1,6 @@
 use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{PIO1, SPI1};
-use crate::core1_task::SyncedDateTime;
+use crate::frame_processing::SyncedDateTime;
 use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16};
 use crate::{bsp, onboard_flash};
 use defmt::{info, warn};
