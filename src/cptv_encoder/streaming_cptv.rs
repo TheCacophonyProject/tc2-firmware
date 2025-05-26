@@ -188,9 +188,6 @@ impl FrameData {
 }
 
 fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u16) {
-    // let mut output = [0u8; FRAME_WIDTH * FRAME_HEIGHT];
-    // let mut output = [0i32; FRAME_WIDTH];
-
     // We need to work out after the delta encoding what the range is, and how many bits we can pack
     // this into.
 
@@ -264,14 +261,13 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
         *unsafe { prev_frame.get_unchecked_mut(input_index) } = delta as u16;
         i += 1;
         prev_val = val;
-        // info!("PRev vcal is {}", prev_val);
     }
     // NOTE: If we go from 65535 to 0 in one step, that's a delta of -65535 which doesn't fit into 16 bits.
     //  Can this happen ever with real input?  How should we guard against it?
     //  Are there more realistic scenarios which don't work?  Let's get a bunch of lepton 3.5 files
     //  and work out the ranges there.\
 
-    // NOTE: To play nice with lz77, we only want to pack to bytes=
+    // NOTE: To play nice with lz77, we only want to pack to bytes
     let px_1 = unsafe { *prev_frame.get_unchecked(1) };
     {
         let px = unsafe { *prev_frame.get_unchecked(0) } as i16;
@@ -514,7 +510,6 @@ impl<'a> CptvStream<'a> {
     ) {
         let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
         let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
-
         let frame_header = CptvFrameHeader {
             time_on: frame_telemetry.msec_on,
             last_ffc_time: frame_telemetry.time_at_last_ffc,
@@ -523,13 +518,11 @@ impl<'a> CptvStream<'a> {
             last_ffc_temp_c: frame_telemetry.fpa_temp_c_at_last_ffc,
             frame_temp_c: frame_telemetry.fpa_temp_c,
         };
-
         let frame_header_iter = frame_header_iter(&frame_header);
         let delta_encoded = unsafe { &u16_slice_to_u8(&prev_frame)[0..frame_size as usize] };
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
-
         if self.cptv_header.total_frame_count % 10 == 0 {
             info!(
                 "Write frame #{}, {}",
@@ -543,9 +536,7 @@ impl<'a> CptvStream<'a> {
                 ^ (self.crc_val >> 8);
             self.crc_val = self.crc_val ^ 0xffffffff;
             let entry = &self.huffman_table[byte as usize];
-
             self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
                 _ = flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
                 self.cursor.flush_residual_bits();

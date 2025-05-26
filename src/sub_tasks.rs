@@ -1,12 +1,12 @@
 use crate::attiny_rtc_i2c::SharedI2C;
 use crate::bsp;
 use crate::bsp::pac::{DMA, RESETS};
-use crate::core1_task::{wake_raspberry_pi, SyncedDateTime};
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::OnboardFlash;
 // use crate::rp2040_flash::write_device_config_to_rp2040_flash;
+use crate::frame_processing::{wake_raspberry_pi, SyncedDateTime};
 use crate::FIRMWARE_VERSION;
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;

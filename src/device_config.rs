@@ -1,7 +1,6 @@
+use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
-use crate::{byte_slice_cursor::Cursor, onboard_flash};
-// use crate::rp2040_flash::read_device_config_from_rp2040_flash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
@@ -274,18 +273,6 @@ impl DeviceConfig {
         let slice = flash_storage.read_device_config();
         if let Ok(slice) = slice {
             let device_config = DeviceConfig::from_bytes(&slice);
-            device_config
-        } else {
-            None
-        }
-    }
-
-    pub fn load_existing_inner_config_from_flash(
-        flash_storage: &mut OnboardFlash,
-    ) -> Option<(DeviceConfigInner, usize)> {
-        let slice = flash_storage.read_device_config();
-        if let Ok(slice) = slice {
-            let device_config = DeviceConfig::inner_from_bytes(&slice);
             device_config
         } else {
             None

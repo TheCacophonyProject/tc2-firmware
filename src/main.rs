@@ -3,32 +3,34 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 mod attiny_rtc_i2c;
+mod audio_task;
 mod bsp;
 mod byte_slice_cursor;
 mod clock_utils;
-mod core0_audio;
-mod core0_task;
-mod core1_sub_tasks;
-mod core1_task;
 mod cptv_encoder;
 mod device_config;
 mod event_logger;
 mod ext_spi_transfers;
+mod frame_processing;
 mod lepton;
+mod lepton_task;
 mod motion_detector;
 mod onboard_flash;
 mod pdm_microphone;
 mod pdmfilter;
 mod rp2040_flash;
+mod sub_tasks;
 mod sun_times;
 mod utils;
 use crate::attiny_rtc_i2c::SharedI2C;
-use crate::core0_audio::audio_task;
-pub use crate::core0_task::frame_acquisition_loop;
-use crate::core1_task::{core_1_task, wake_raspberry_pi, Core1Pins, Core1Task, SyncedDateTime};
+use crate::audio_task::audio_task;
 use crate::cptv_encoder::FRAME_WIDTH;
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind, WakeReason};
+use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
+use crate::frame_processing::{
+    thermal_motion_task, wake_raspberry_pi, Core1Pins, Core1Task, SyncedDateTime,
+};
 use crate::lepton::{init_lepton_module, LeptonPins};
+pub use crate::lepton_task::frame_acquisition_loop;
 use crate::onboard_flash::extend_lifetime_generic;
 use attiny_rtc_i2c::tc2_agent_state;
 use bsp::{
@@ -41,7 +43,6 @@ use bsp::{
     },
     pac::Peripherals,
 };
-use chrono::NaiveDateTime;
 use cortex_m::asm::nop;
 use device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use rp2040_hal::rosc::RingOscillator;
@@ -115,9 +116,9 @@ impl FrameBuffer {
     }
 }
 
-use crate::core1_sub_tasks::get_existing_device_config_or_config_from_pi_on_initial_handshake;
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::onboard_flash::OnboardFlash;
+use crate::sub_tasks::get_existing_device_config_or_config_from_pi_on_initial_handshake;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::pio::PIOExt;
 
@@ -455,7 +456,6 @@ pub fn audio_branch(
         i2c_config,
         clock_freq,
         &mut timer,
-        // pins,
         gpio0,
         gpio1,
         &mut watchdog,
@@ -535,7 +535,7 @@ pub fn thermal_code(
         );
     });
 
-    core_1_task(
+    thermal_motion_task(
         pi_spi,
         onboard_flash,
         frame_buffer_local,
@@ -617,44 +617,4 @@ pub fn leptoncore1_task(
         frame_buffer_local_2,
         watchdog,
     );
-}
-
-pub fn basic_core0(
-    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-) -> ! {
-    info!("COre 0");
-    let peripherals = unsafe { Peripherals::steal() };
-    let core = unsafe { pac::CorePeripherals::steal() };
-    let mut sio = Sio::new(peripherals.SIO);
-    info!("COre 0 ready");
-    sio.fifo.write_blocking(Core1Task::Ready.into());
-    let radiometry_enabled = sio.fifo.read_blocking();
-    sio.fifo.write_blocking(Core1Task::Ready.into());
-    let mut thread_local_frame_buffer: Option<&mut FrameBuffer> = None;
-
-    loop {
-        let input = sio.fifo.read_blocking();
-        let selected_frame_buffer = sio.fifo.read_blocking();
-        critical_section::with(|cs| {
-            // Now we just swap the buffers?
-            let buffer = if selected_frame_buffer == 0 {
-                frame_buffer_local
-            } else {
-                frame_buffer_local_2
-            };
-            thread_local_frame_buffer = buffer.borrow_ref_mut(cs).take();
-
-            critical_section::with(|cs| {
-                // Now we just swap the buffers?
-                let buffer = if selected_frame_buffer == 0 {
-                    frame_buffer_local
-                } else {
-                    frame_buffer_local_2
-                };
-                *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
-            });
-            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
-        });
-    }
 }

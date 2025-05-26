@@ -2,23 +2,21 @@ use crate::attiny_rtc_i2c::{tc2_agent_state, I2CConfig, RecordingType, SharedI2C
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
-use crate::core1_sub_tasks::{
-    get_existing_device_config_or_config_from_pi_on_initial_handshake,
-    offload_flash_storage_and_events,
-};
-use crate::core1_task::Core1Pins;
-use crate::core1_task::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime};
-use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use crate::device_config::{AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, write_audio_alarm, EventLogger, LoggerEvent,
     LoggerEventKind, WakeReason,
 };
 use crate::ext_spi_transfers::ExtSpiTransfers;
+use crate::frame_processing::{
+    advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime,
+};
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
+use crate::sub_tasks::offload_flash_storage_and_events;
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
-use rp2040_hal::{Sio, Timer};
+use rp2040_hal::Timer;
 
 use chrono::{Datelike, NaiveDateTime, NaiveTime, Timelike};
 use embedded_hal::prelude::{
@@ -32,12 +30,6 @@ use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::{FunctionSio, PullDown, SioInput};
 use rp2040_hal::pio::PIOExt;
-
-use crate::onboard_flash::extend_lifetime_generic_mut;
-
-// use crate::rp2040_flash::{
-//     clear_flash_alarm, read_alarm_from_rp2040_flash, write_alarm_schedule_to_rp2040_flash,
-// };
 
 #[repr(u8)]
 #[derive(PartialEq, Eq)]
@@ -67,7 +59,6 @@ pub fn audio_task(
     i2c_config: I2CConfig,
     clock_freq: u32,
     timer: &mut Timer,
-    // pins: Core1Pins,
     gpio0: rp2040_hal::gpio::Pin<
         rp2040_hal::gpio::bank0::Gpio0,
         rp2040_hal::gpio::FunctionNull,

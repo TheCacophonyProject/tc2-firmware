@@ -22,7 +22,6 @@ use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
 };
-use embedded_io::Read;
 
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2};
@@ -152,7 +151,7 @@ impl OnboardFlashStatus {
 }
 
 pub struct Page {
-    pub inner: Option<&'static mut [u8; 4 + 2048 + 128]>,
+    inner: Option<&'static mut [u8; 4 + 2048 + 128]>,
 }
 
 impl Page {
@@ -316,8 +315,9 @@ pub struct OnboardFlash {
     record_to_flash: bool,
     pub payload_buffer: Option<&'static mut [u8; 2115]>,
     pub file_start_block_index: Option<u16>,
+    //could use same block for both but would have to write config every audio change and vice versa
     pub config_block: Option<isize>,
-    pub audio_block: Option<isize>, //start of currently writing file, or last written
+    pub audio_block: Option<isize>,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -378,6 +378,7 @@ impl OnboardFlash {
         self.set_config_block();
     }
 
+    // find last non bad block to use for config
     pub fn set_config_block(&mut self) {
         let mut block_i = (NUM_RECORDING_BLOCKS + CONFIG_BLOCKS) as i16;
         while self.bad_blocks.contains(&block_i) {
@@ -402,6 +403,7 @@ impl OnboardFlash {
             self.audio_block, self.config_block
         );
     }
+
     pub fn write_device_config(&mut self, device_bytes: &mut [u8]) {
         if self.config_block.is_none() {
             panic!("Config block has not been initialized, call flash_storage.init()");
@@ -420,17 +422,9 @@ impl OnboardFlash {
             }
             let mut payload = [0xffu8; 2116];
             is_last = end == device_bytes.len();
-            info!(
-                "Is last?? {} start {} end {} len {}",
-                is_last,
-                start,
-                end,
-                device_bytes.len()
-            );
+
             let device_chunk = &mut device_bytes[start..end];
-            info!("DEvice chunk is {}", device_chunk.len());
             payload[4..4 + device_chunk.len()].copy_from_slice(&device_chunk);
-            info!("Writing {}", payload);
             start += 2048;
             let _ = self.write_config_bytes(
                 &mut payload,
@@ -441,9 +435,9 @@ impl OnboardFlash {
             );
             page += 1;
             if page >= 64 {
-                panic!("Trying to write too many pages for config");
+                //shouldn't ever happen unless config becomes unreasonably large
+                panic!("Trying to write more pages of config than we have allocated");
             }
-            info!("Is last {}", is_last);
         }
     }
 
@@ -494,7 +488,7 @@ impl OnboardFlash {
             }
         }
         if is_last {
-            warn!("Ending file at {}:{}", b, p);
+            warn!("Ending Config at {}:{}", b, p);
         }
 
         if self.record_to_flash {
@@ -539,7 +533,7 @@ impl OnboardFlash {
             let length = self.current_page.page_bytes_used();
             let data = &self.current_page.user_data()[..length];
 
-            cursor.write_bytes(&self.current_page.user_data()[..length]);
+            let _ = cursor.write_bytes(&self.current_page.user_data()[..length]);
             is_last = self.current_page.is_last_page_for_file();
             page_i += 1;
         }

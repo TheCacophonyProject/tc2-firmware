@@ -20,7 +20,7 @@ use crate::bsp::hal::spi::Enabled;
 use crate::bsp::hal::{Spi, I2C as I2CInterface};
 use crate::bsp::pac::{RESETS, SPI0};
 use crate::bsp::{hal::gpio::Pin, pac::I2C0};
-use crate::core0_task::LEPTON_SPI_CLOCK_FREQ;
+use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
 use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
 
 pub enum LeptonCommandType {

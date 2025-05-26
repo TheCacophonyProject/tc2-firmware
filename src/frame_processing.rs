@@ -4,19 +4,19 @@
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
-use crate::core1_sub_tasks::{maybe_offload_events, offload_flash_storage_and_events};
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::device_config::{self, get_naive_datetime, AudioMode, DeviceConfig};
+use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
 };
+use crate::sub_tasks::{maybe_offload_events, offload_flash_storage_and_events};
 
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
-use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
+use crate::onboard_flash::OnboardFlash;
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
@@ -27,17 +27,14 @@ use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
-use fugit::RateExtU32;
-use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
     Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio3, Gpio5, Gpio8, Gpio9,
 };
 use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioInput, SioOutput};
-use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{
+use crate::audio_task::{
     check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
 };
 #[repr(u32)]
@@ -230,13 +227,12 @@ impl SyncedDateTime {
     }
 }
 
-pub fn core_1_task(
+pub fn thermal_motion_task(
     mut pi_spi: ExtSpiTransfers,
     mut flash_storage: OnboardFlash,
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     clock_freq: u32,
-    // pins: Core1Pins,
     i2c_config: I2CConfig,
     unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
     lepton_serial: Option<u32>,
@@ -245,10 +241,10 @@ pub fn core_1_task(
     mut timer: Timer,
     device_config: &DeviceConfig,
     event_logger: &mut EventLogger,
-    mut synced_date_time: &mut SyncedDateTime,
+    synced_date_time: &mut SyncedDateTime,
 ) -> ! {
     let dev_mode = false;
-    info!("=== Core 1 start ===");
+    info!("=== Core 0 Thermal Motion start ===");
     if dev_mode {
         warn!("DEV MODE");
     } else {
@@ -261,7 +257,6 @@ pub fn core_1_task(
     let mut sio = Sio::new(peripherals.SIO);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
-    // let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
 
     {
@@ -316,28 +311,6 @@ pub fn core_1_task(
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-    // let existing_config = DeviceConfig::load_existing_config_from_flash(&mut flash_storage);
-
-    // if let Some(existing_config) = &existing_config {
-    //     info!("Existing config {:#?}", existing_config.config());
-    // }
-    // if existing_config.is_none() {
-    //     // We need to wake up the rpi and get a config
-    //     wake_raspberry_pi(&mut shared_i2c, &mut delay);
-    // }
-    // let (device_config, device_config_was_updated) =
-    //     get_existing_device_config_or_config_from_pi_on_initial_handshake(
-    //         &mut flash_storage,
-    //         &mut pi_spi,
-    //         &mut peripherals.RESETS,
-    //         &mut peripherals.DMA,
-    //         clock_freq.Hz(),
-    //         radiometry_enabled,
-    //         lepton_serial.unwrap_or(0),
-    //         false,
-    //         &mut timer,
-    //         existing_config,
-    //     );
 
     if woken_by_alarm {
         event_logger.log_event(
@@ -349,83 +322,45 @@ pub fn core_1_task(
         );
     }
 
-    // if device_config_was_updated {
-    //     event_logger.log_event(
-    //         LoggerEvent::new(
-    //             LoggerEventKind::SavedNewConfig,
-    //             synced_date_time.get_timestamp_micros(&timer),
-    //         ),
-    //         &mut flash_storage,
-    //     );
-    //     //changing from no audio to audio mode and then clicking test rec quickly
-    //     match shared_i2c.tc2_agent_requested_audio_recording(&mut delay) {
-    //         Ok(test_rec) => {
-    //             if test_rec.is_some() {
-    //                 sio.fifo.write_blocking(Core1Task::RequestReset.into());
-    //                 loop {
-    //                     // Wait to be reset
-    //                     nop();
-    //                 }
-    //             }
-    //         }
-    //         Err(e) => error!("Error getting tc2 agent state: {}", e),
-    //     }
-    // }
-
-    // let device_config = device_config.unwrap_or(DeviceConfig::default());
-    // if let AudioMode::AudioOnly = device_config.config().audio_mode {
-    //     let _ = shared_i2c.disable_alarm(&mut delay);
-    //     info!("Is audio device restarting");
-    //     sio.fifo.write_blocking(Core1Task::RequestReset.into());
-    //     loop {
-    //         // Wait to be reset
-    //         nop();
-    //     }
-    // }
-
     let record_audio: bool;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<NaiveDateTime> = None;
 
     match device_config.config().audio_mode {
-        AudioMode::AudioAndThermal => {
+        AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
             let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
             record_audio = true;
             let mut schedule_alarm = true;
-
+            // if audio alarm is set check it's within 60 minutes and before or on thermal window start
             if let Some(audio_alarm) = audio_alarm {
                 if let Ok(audio_mode) = audio_mode {
                     if audio_mode == AlarmMode::AUDIO {
-                        schedule_alarm = false;
-                    }
-                    //otherwise alarm is for thermal so reschedule an audio alarm during recording window
-                }
-                if !schedule_alarm {
-                    let synced = synced_date_time.date_time_utc;
-                    let until_alarm = (audio_alarm - synced).num_minutes();
-                    if until_alarm <= MAX_GAP_MIN as i64 {
-                        info!(
-                            "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                            audio_alarm.year(),
-                            audio_alarm.month(),
-                            audio_alarm.day(),
-                            audio_alarm.hour(),
-                            audio_alarm.minute()
-                        );
-                        if check_alarm_still_valid_with_thermal_window(
-                            &audio_alarm,
-                            &synced,
-                            &device_config,
-                        ) {
-                            next_audio_alarm = Some(audio_alarm);
-                            schedule_alarm = false;
+                        let synced = synced_date_time.date_time_utc;
+                        let until_alarm = (audio_alarm - synced).num_minutes();
+                        if until_alarm <= MAX_GAP_MIN as i64 {
+                            info!(
+                                "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                                audio_alarm.year(),
+                                audio_alarm.month(),
+                                audio_alarm.day(),
+                                audio_alarm.hour(),
+                                audio_alarm.minute()
+                            );
+                            if check_alarm_still_valid_with_thermal_window(
+                                &audio_alarm,
+                                &synced,
+                                &device_config,
+                            ) {
+                                next_audio_alarm = Some(audio_alarm);
+                                schedule_alarm = false;
+                            } else {
+                                schedule_alarm = true;
+                                //if window time changed and alarm is after rec window start
+                                info!("Rescehduling as alarm is after window start");
+                            }
                         } else {
-                            schedule_alarm = true;
-                            //if window time changed and alarm is after rec window start
-                            info!("Rescehduling as alarm is after window start");
+                            info!("Alarm is missed");
                         }
-                    } else {
-                        info!("Alarm is missed");
                     }
                 }
             }
@@ -447,6 +382,7 @@ pub fn core_1_task(
             }
         }
         _ => {
+            info!("Clearing audio alarm");
             clear_audio_alarm(&mut flash_storage);
             record_audio = false
         }
@@ -605,7 +541,6 @@ pub fn core_1_task(
     //  assume we've already made the startup status recording during this recording window.
 
     let mut making_status_recording = false;
-    made_startup_status_recording = false;
     let mut status_recording_pending = if !made_startup_status_recording {
         Some(StatusRecording::StartupStatus)
     } else {
@@ -1020,7 +955,6 @@ pub fn core_1_task(
                     making_status_recording,
                 );
                 cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-                let new_v = true;
                 cptv_streamer.push_frame(
                     &prev_frame,
                     &mut prev_frame_2, // This should be zeroed out before starting a new clip.

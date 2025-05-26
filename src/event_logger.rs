@@ -7,7 +7,7 @@ use chrono::NaiveDateTime;
 use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
-use crate::core0_audio::AlarmMode;
+use crate::audio_task::AlarmMode;
 
 #[repr(u8)]
 #[derive(Format, Copy, Clone)]
