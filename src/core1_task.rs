@@ -560,7 +560,7 @@ pub fn core_1_task(
     } else {
         false
     };
-    let record_audio = false;
+
     if record_audio {
         if let Some(audio_alarm) = next_audio_alarm {
             info!(
