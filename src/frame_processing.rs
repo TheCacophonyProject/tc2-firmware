@@ -1131,8 +1131,6 @@ pub fn thermal_motion_task(
             let is_outside_recording_window = if !dev_mode {
                 !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
             } else {
-                // !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
-
                 let is_inside_recording_window =
                     synced_date_time.date_time_utc < startup_date_time_utc + Duration::minutes(5);
                 !is_inside_recording_window

@@ -101,7 +101,7 @@ impl DeviceConfigInner {
         window: &Option<(NaiveDateTime, NaiveDateTime)>,
     ) -> bool {
         if self.is_continuous_recorder() {
-            info!("Continuous recording mode enabled");
+            // info!("Continuous recording mode enabled");
             return true;
         }
         let (start_time, end_time) =
@@ -116,23 +116,24 @@ impl DeviceConfigInner {
         let window_hours = window.num_hours();
         let window_mins = window.num_minutes() - (window_hours * 60);
         if start_time > *date_time_utc && end_time > *date_time_utc {
-            info!(
-                "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
-                starts_in_hours,
-                starts_in_mins,
-                ends_in_hours,
-                ends_in_mins,
-                window_hours,
-                window_mins
-            );
+            // info!(
+            //     "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
+            //     starts_in_hours,
+            //     starts_in_mins,
+            //     ends_in_hours,
+            //     ends_in_mins,
+            //     window_hours,
+            //     window_mins
+            // );
         } else if end_time > *date_time_utc {
-            info!(
-                "Recording will end in {}h{}m, window duration {}h{}m",
-                ends_in_hours, ends_in_mins, window_hours, window_mins
-            );
+            // info!(
+            //     "Recording will end in {}h{}m, window duration {}h{}m",
+            //     ends_in_hours, ends_in_mins, window_hours, window_mins
+            // );
         }
         *date_time_utc >= start_time && *date_time_utc <= end_time
     }
+
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &NaiveDateTime,

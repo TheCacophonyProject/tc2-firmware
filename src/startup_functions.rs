@@ -7,7 +7,7 @@ use crate::frame_processing::{wake_raspberry_pi, SyncedDateTime};
 use crate::onboard_flash::OnboardFlash;
 use crate::sub_tasks::get_existing_device_config_or_config_from_pi_on_initial_handshake;
 use cortex_m::delay::Delay;
-use defmt::{info, warn};
+use defmt::{info, panic, warn};
 use fugit::HertzU32;
 use rp2040_hal::Timer;
 
@@ -33,9 +33,6 @@ pub fn should_record_audio(
                         // audio mode wants to go in thermal mode
                         is_audio = false;
                     } else {
-                        let (start_time, end_time) = config
-                            .next_or_current_recording_window(&synced_date_time.date_time_utc);
-
                         let in_window = config
                             .time_is_in_recording_window(&synced_date_time.date_time_utc, &None);
                         if in_window {
@@ -78,6 +75,8 @@ pub fn get_device_config(
         }
     }
 
+    // FIXME: This should become "config startup handshake", and we have another
+    //  camera config handshake later on when the lepton has actually initialised or whatever.
     let (device_config, device_config_was_updated) =
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             flash_storage,
@@ -85,16 +84,16 @@ pub fn get_device_config(
             &mut peripherals.RESETS,
             &mut peripherals.DMA,
             system_clock_freq_hz,
-            2u32,
-            0,
-            false,
+            2u32,  // radiometry enabled
+            0,     // camera serial
+            false, // audio mode
             timer,
             config,
         );
     match device_config {
         Some(device_config) => device_config,
         None => {
-            defmt::panic!("Couldn't get config");
+            panic!("Couldn't get config");
         }
     }
 }
