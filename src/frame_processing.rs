@@ -264,8 +264,6 @@ pub fn thermal_motion_task(
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
     clock_freq: u32,
-    //lepton_serial: Option<u32>,
-    //lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
     mut timer: Timer,
     device_config: &DeviceConfig,
@@ -284,7 +282,6 @@ pub fn thermal_motion_task(
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
-    //let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     {
         if flash_storage.has_files_to_offload() {
@@ -456,7 +453,7 @@ pub fn thermal_motion_task(
             &mut flash_storage,
             clock_freq,
             &synced_date_time,
-            None,
+            &mut None,
         );
     }
     // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording

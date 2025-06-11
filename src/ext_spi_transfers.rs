@@ -416,6 +416,7 @@ impl ExtSpiTransfers {
         dma_peripheral: &mut DMA,
         timer: &mut Timer,
         resets: &mut RESETS,
+        progress_block: Option<u16>,
     ) -> bool {
         // The transfer header contains the transfer type (2x)
         // the number of bytes to read for the payload (should this be twice?)
@@ -440,6 +441,12 @@ impl ExtSpiTransfers {
         LittleEndian::write_u16(&mut transfer_header[12..14], crc);
         LittleEndian::write_u16(&mut transfer_header[14..16], crc.not());
         LittleEndian::write_u16(&mut transfer_header[16..=17], crc.not());
+        if let Some(block) = progress_block {
+            // If it's a file transfer command forgo the excessive duplication of the CRC info
+            // which is probably overkill, in favour of sending progress information.
+            LittleEndian::write_u16(&mut transfer_header[12..14], block);
+        }
+
         let buffer_len = self.payload_buffer.as_ref().unwrap().len();
         self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
             .copy_from_slice(&transfer_header);

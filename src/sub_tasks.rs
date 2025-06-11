@@ -4,21 +4,20 @@ use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-use crate::onboard_flash::OnboardFlash;
-// use crate::rp2040_flash::write_device_config_to_rp2040_flash;
 use crate::frame_processing::{wake_raspberry_pi, SyncedDateTime};
+use crate::onboard_flash::OnboardFlash;
 use crate::FIRMWARE_VERSION;
+use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::{info, warn};
-use fugit::{ExtU32, HertzU32, RateExtU32};
-use rp2040_hal::Timer;
-
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
     _embedded_hal_watchdog_WatchdogEnable,
 };
+use fugit::{ExtU32, HertzU32, RateExtU32};
+use rp2040_hal::Timer;
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -30,7 +29,7 @@ pub fn maybe_offload_events(
     flash_storage: &mut OnboardFlash,
     clock_freq: u32,
     time: &SyncedDateTime,
-    mut watchdog: Option<&mut bsp::hal::Watchdog>,
+    watchdog: &mut Option<&mut Watchdog>,
 ) -> bool {
     let mut success = true;
     if event_logger.has_events_to_offload() {
@@ -38,9 +37,7 @@ pub fn maybe_offload_events(
         let total_events = event_indices.end;
         warn!("Transferring {} events", total_events);
         'transfer_all_events: for event_index in event_indices {
-            if watchdog.is_some() {
-                watchdog.as_mut().unwrap().feed();
-            }
+            watchdog.as_mut().map(|w| w.feed());
             let event_bytes = event_logger.event_at_index(event_index, flash_storage);
             if let Some(event_bytes) = event_bytes {
                 if let Some(spi) = flash_storage.free_spi() {
@@ -57,6 +54,7 @@ pub fn maybe_offload_events(
                             dma,
                             timer,
                             resets,
+                            None, // FIXME: Do we want progress here?
                         );
                         if !did_transfer {
                             attempts += 1;
@@ -120,13 +118,11 @@ pub fn offload_flash_storage_and_events(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
     time: &SyncedDateTime,
-    mut watchdog: Option<&mut bsp::hal::Watchdog>,
+    mut watchdog: Option<&mut Watchdog>,
     only_last_file: bool,
 ) -> bool {
     warn!("There are files to offload!");
-    if watchdog.is_some() {
-        watchdog.as_mut().unwrap().disable();
-    }
+    watchdog.as_mut().map(|w| w.disable());
 
     if wake_raspberry_pi(shared_i2c, delay) {
         event_logger.log_event(
@@ -137,9 +133,7 @@ pub fn offload_flash_storage_and_events(
             flash_storage,
         );
     }
-    if watchdog.is_some() {
-        watchdog.as_mut().unwrap().start(8388607.micros());
-    }
+    watchdog.as_mut().map(|w| w.start(8388607.micros()));
 
     if !only_last_file {
         maybe_offload_events(
@@ -152,11 +146,7 @@ pub fn offload_flash_storage_and_events(
             flash_storage,
             clock_freq,
             time,
-            if watchdog.is_some() {
-                Some(watchdog.as_mut().unwrap())
-            } else {
-                None
-            },
+            &mut watchdog,
         );
     }
     let mut has_file = flash_storage.begin_offload_reverse();
@@ -171,12 +161,11 @@ pub fn offload_flash_storage_and_events(
         let mut file_start = true;
         let mut part_count = 0;
         let mut file_ended = false;
+        let last_used_block_index = flash_storage.last_used_block_index.unwrap_or(0) as u16;
         while let Some(((part, crc, block_index, page_index), is_last, spi)) =
             flash_storage.get_file_part()
         {
-            if watchdog.is_some() {
-                watchdog.as_mut().unwrap().feed();
-            }
+            watchdog.as_mut().map(|w| w.feed());
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last {
                 ExtTransferMessage::BeginFileTransfer
@@ -189,6 +178,14 @@ pub fn offload_flash_storage_and_events(
             } else {
                 crate::unreachable!("Invalid file transfer state");
             };
+
+            let mut progress = None;
+            if transfer_type == ExtTransferMessage::BeginFileTransfer {
+                // Each file start will give the max used block
+                progress = Some(last_used_block_index)
+            } else if transfer_type == ExtTransferMessage::EndFileTransfer {
+                progress = Some(block_index as u16)
+            }
 
             if file_start {
                 info!("Offload start is {}:{}", block_index, page_index)
@@ -207,9 +204,7 @@ pub fn offload_flash_storage_and_events(
 
             let mut attempts = 0;
             'transfer_part: loop {
-                if watchdog.is_some() {
-                    watchdog.as_mut().unwrap().feed();
-                }
+                watchdog.as_mut().map(|w| w.feed());
                 let did_transfer = pi_spi.send_message_over_spi(
                     transfer_type,
                     &part,
@@ -217,6 +212,7 @@ pub fn offload_flash_storage_and_events(
                     dma,
                     timer,
                     resets,
+                    progress,
                 );
                 if !did_transfer {
                     attempts += 1;
@@ -253,9 +249,7 @@ pub fn offload_flash_storage_and_events(
             if is_last {
                 file_count += 1;
                 info!("Offloaded {} file(s)", file_count);
-                if watchdog.is_some() {
-                    watchdog.as_mut().unwrap().feed();
-                }
+                watchdog.as_mut().map(|w| w.feed());
                 let _ = flash_storage.erase_last_file();
                 file_ended = true;
                 break;
@@ -271,9 +265,7 @@ pub fn offload_flash_storage_and_events(
                 "Incomplete file at block {} erasing",
                 flash_storage.file_start_block_index
             );
-            if watchdog.is_some() {
-                watchdog.as_mut().unwrap().feed();
-            }
+            watchdog.as_mut().map(|w| w.feed());
             if let Err(e) = flash_storage.erase_last_file() {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -344,6 +336,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             dma,
             timer,
             resets,
+            None,
         ) {
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
                 // Skip 4 bytes of CRC checking
@@ -370,6 +363,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 dma,
                                 timer,
                                 resets,
+                                None,
                             ) {
                                 if let Some(piece_bytes) = pi_spi.return_payload() {
                                     let crc_from_remote =
