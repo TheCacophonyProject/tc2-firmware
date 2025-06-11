@@ -188,7 +188,6 @@ impl FrameData {
 }
 
 fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u16) {
-    let mut output = [0i32; FRAME_WIDTH * FRAME_HEIGHT];
     // We need to work out after the delta encoding what the range is, and how many bits we can pack
     // this into.
 
@@ -226,6 +225,7 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
     // TODO: Try having a separate buffer for prev_frame?
     let max = i16::MAX as i32;
     let min = i16::MIN as i32;
+    let mut bits_per_pixel = 8;
     let mut i = 0;
     for input_index in snake_iter {
         let curr_px = unsafe { curr.get_unchecked(input_index) };
@@ -234,6 +234,7 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
         let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
         let val = *curr_px as i32 - *prev_raw as i32;
         let delta = val - prev_val;
+
         assert!(
             delta >= min,
             "delta {}, min {}, val {}, prev_val {}, curr_px {}, prev_px {}",
@@ -254,7 +255,10 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
             curr_px,
             prev_raw
         );
-        *unsafe { output.get_unchecked_mut(i) } = delta;
+        if i > 0 && (delta > 127 || delta < -127) {
+            bits_per_pixel = 16;
+        }
+        *unsafe { prev_frame.get_unchecked_mut(input_index) } = delta as u16;
         i += 1;
         prev_val = val;
     }
@@ -264,32 +268,40 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u1
     //  and work out the ranges there.\
 
     // NOTE: To play nice with lz77, we only want to pack to bytes
-    let bits_per_pixel = if output[1..].iter().find(|&&x| x < -127 || x > 127).is_some() {
-        16
-    } else {
-        8
-    };
+    let px_1 = unsafe { *prev_frame.get_unchecked(1) };
     {
-        let px = output[0];
+        let px = unsafe { *prev_frame.get_unchecked(0) } as i16;
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
         LittleEndian::write_u32(&mut prev_as_u8[0..4], px as u32);
     }
-    if bits_per_pixel == 16 {
-        for i in 1..output.len() {
-            let px = unsafe { *output.get_unchecked(i) } as u16;
-            prev_frame[i + 1] = px;
+    //need to reverse every odd row
+    for i in (1..FRAME_HEIGHT).step_by(2) {
+        let row_i: usize = FRAME_WIDTH * i;
+        for z in 0..FRAME_WIDTH / 2 {
+            let swap_px = *unsafe { prev_frame.get_unchecked(row_i + z) };
+            let other_px = *unsafe { prev_frame.get_unchecked(row_i + FRAME_WIDTH - z - 1) };
+            *unsafe { prev_frame.get_unchecked_mut(row_i + z) } = other_px;
+            *unsafe { prev_frame.get_unchecked_mut(row_i + FRAME_WIDTH - z - 1) } = swap_px;
         }
-    } else {
+    }
+    // shift pixels 1 faster way to do this??
+    for i in (2..prev_frame.len() - 1).rev() {
+        unsafe { *prev_frame.get_unchecked_mut(i + 1) = *prev_frame.get_unchecked(i) };
+    }
+    *unsafe { prev_frame.get_unchecked_mut(2) } = px_1;
+    if bits_per_pixel == 8 {
         let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
-        for i in 1..output.len() {
-            let px = unsafe { *output.get_unchecked(i) } as u8;
-            prev_as_u8[i + 3] = px;
+        let mut u16_i = 3 * 2;
+
+        for i in 5..(prev_as_u8.len() / 2) {
+            let px = unsafe { *prev_as_u8.get_unchecked(u16_i) } as u8;
+            *unsafe { prev_as_u8.get_unchecked_mut(i) } = px;
+            u16_i += 2;
         }
     }
 
     (bits_per_pixel, min_value, max_value)
 }
-
 struct FieldIterator {
     state: [u8; 30], // TODO: What is the actual high-water mark for field sizes?
     size: u8,
@@ -511,7 +523,6 @@ impl<'a> CptvStream<'a> {
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
-
         if self.cptv_header.total_frame_count % 10 == 0 {
             info!(
                 "Write frame #{}, {}",
@@ -531,6 +542,7 @@ impl<'a> CptvStream<'a> {
                 self.cursor.flush_residual_bits();
             }
         }
+
         self.num_frames += 1;
     }
 

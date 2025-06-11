@@ -29,7 +29,7 @@ pub const FLASH_EVENT_LOG_SIZE: u32 = 256 * 4096; // Amount dedicated to user ev
 // 2460 bytes
 //Config is stored in first sector of the flash drive 0-4096 bytes, if it ever becomes more will need to re arrange
 //the rp2040 flash alarm location too
-pub fn write_device_config_to_rp2040_flash(data: &[u8]) {
+pub fn write_device_config_to_rp2040_flash_old(data: &[u8]) {
     let addr = FLASH_END - FLASH_USER_SIZE;
     unsafe {
         cortex_m::interrupt::free(|_cs| {
@@ -42,13 +42,13 @@ pub fn write_device_config_to_rp2040_flash(data: &[u8]) {
         });
     }
 }
-pub fn read_device_config_from_rp2040_flash() -> &'static [u8] {
+pub fn read_device_config_from_rp2040_flash_old() -> &'static [u8] {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     unsafe { slice::from_raw_parts(addr, FLASH_USER_SIZE as usize) }
 }
 
 // this is assuming the device config stucture has not change and is audio mode is at byte 4
-pub fn read_is_audio_from_rp2040_flash() -> bool {
+pub fn read_is_audio_from_rp2040_flash_old() -> bool {
     let addr = (FLASH_XIP_BASE + FLASH_END - FLASH_USER_SIZE) as *const u8;
     let config = unsafe { slice::from_raw_parts(addr, 5usize) };
     if config[0] == u8::MAX && config[1] == u8::MAX && config[2] == u8::MAX && config[3] == u8::MAX

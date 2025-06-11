@@ -68,7 +68,7 @@ rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
 # cargo build/run
 [profile.dev]
 codegen-units = 1
-debug = 2
+debug = 1
 debug-assertions = true
 incremental = false
 opt-level = 3

@@ -4,10 +4,6 @@
 use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
-use crate::core1_sub_tasks::{
-    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    offload_flash_storage_and_events,
-};
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -15,11 +11,12 @@ use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
 };
+use crate::sub_tasks::{maybe_offload_events, offload_flash_storage_and_events};
 
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
-use crate::onboard_flash::{extend_lifetime_generic_mut, OnboardFlash};
+use crate::onboard_flash::OnboardFlash;
 use crate::utils::u8_slice_to_u16;
 use crate::FrameBuffer;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
@@ -30,17 +27,14 @@ use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
-use fugit::RateExtU32;
-use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::bank0::{
     Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio3, Gpio5, Gpio8, Gpio9,
 };
 use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioInput, SioOutput};
-use rp2040_hal::pio::PIOExt;
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
-use crate::core0_audio::{
+use crate::audio_task::{
     check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
 };
 #[repr(u32)]
@@ -233,109 +227,48 @@ impl SyncedDateTime {
     }
 }
 
-pub fn core_1_task(
+pub fn thermal_motion_task(
+    mut pi_spi: ExtSpiTransfers,
+    mut flash_storage: OnboardFlash,
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     clock_freq: u32,
-    pins: Core1Pins,
     i2c_config: I2CConfig,
     unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
     lepton_serial: Option<u32>,
     lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
     mut timer: Timer,
-) {
+    device_config: &DeviceConfig,
+    event_logger: &mut EventLogger,
+    synced_date_time: &mut SyncedDateTime,
+) -> ! {
     let dev_mode = false;
-    info!("=== Core 1 start ===");
+    info!("=== Core 0 Thermal Motion start ===");
     if dev_mode {
         warn!("DEV MODE");
     } else {
         warn!("FIELD MODE");
     }
 
-    let mut synced_date_time = SyncedDateTime::default();
-
-    let mut crc_buf = [0x42u8; 32 + 104];
-    let mut payload_buf = [0x42u8; 2066];
-    let mut flash_page_buf = [0xffu8; 4 + 2048 + 128];
-    let mut flash_page_buf_2 = [0xffu8; 4 + 2048 + 128];
-    let crc_buf = unsafe { extend_lifetime_generic_mut(&mut crc_buf) };
-    let payload_buf = unsafe { extend_lifetime_generic_mut(&mut payload_buf) };
-    let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
-    let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let mut peripherals = unsafe { Peripherals::steal() };
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
     let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
-    let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let should_record_to_flash = true;
 
-    let mut pi_spi = ExtSpiTransfers::new(
-        pins.pi_mosi,
-        pins.pi_cs,
-        pins.pi_clk,
-        pins.pi_miso,
-        pins.pi_ping,
-        dma_channels.ch0,
-        payload_buf,
-        crc_buf,
-        pio0,
-        sm0,
-    );
-
-    let mut spi_peripheral = Some(peripherals.SPI1);
-    let mut flash_storage = OnboardFlash::new(
-        pins.fs_cs,
-        pins.fs_mosi,
-        pins.fs_clk,
-        pins.fs_miso,
-        flash_page_buf,
-        flash_page_buf_2,
-        dma_channels.ch1,
-        dma_channels.ch2,
-        should_record_to_flash,
-        None,
-    );
     {
-        flash_storage.take_spi(
-            spi_peripheral.take().unwrap(),
-            &mut peripherals.RESETS,
-            clock_freq.Hz(),
-        );
-        flash_storage.init();
         if flash_storage.has_files_to_offload() {
             info!("Finished scan, has files to offload");
         }
     }
 
-    let mut event_logger = EventLogger::new(&mut flash_storage);
     if event_logger.has_events_to_offload() {
         info!("There are {} event(s) to offload", event_logger.count());
     }
 
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        match shared_i2c.get_datetime(&mut delay) {
-            Ok(now) => {
-                synced_date_time.set(get_naive_datetime(now), &timer);
-                break;
-            }
-            Err(e) => {
-                //cant get time so use 0 and add a time when tc2-agent uploads
-                event_logger.log_event(
-                    LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
-                    &mut flash_storage,
-                );
-
-                warn!("Failed getting date from RTC, retrying");
-                delay.delay_ms(10);
-            }
-        }
-    }
     event_logger.log_event(
         LoggerEvent::new(
             LoggerEventKind::ThermalMode,
@@ -378,28 +311,6 @@ pub fn core_1_task(
     let radiometry_enabled = sio.fifo.read_blocking();
     info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-    let existing_config = DeviceConfig::load_existing_config_from_flash();
-
-    if let Some(existing_config) = &existing_config {
-        info!("Existing config {:#?}", existing_config.config());
-    }
-    if existing_config.is_none() {
-        // We need to wake up the rpi and get a config
-        wake_raspberry_pi(&mut shared_i2c, &mut delay);
-    }
-    let (device_config, device_config_was_updated) =
-        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-            &mut flash_storage,
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            clock_freq.Hz(),
-            radiometry_enabled,
-            lepton_serial.unwrap_or(0),
-            false,
-            &mut timer,
-            existing_config,
-        );
 
     if woken_by_alarm {
         event_logger.log_event(
@@ -409,39 +320,6 @@ pub fn core_1_task(
             ),
             &mut flash_storage,
         );
-    }
-    if device_config_was_updated {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::SavedNewConfig,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-        //changing from no audio to audio mode and then clicking test rec quickly
-        match shared_i2c.tc2_agent_requested_audio_recording(&mut delay) {
-            Ok(test_rec) => {
-                if test_rec.is_some() {
-                    sio.fifo.write_blocking(Core1Task::RequestReset.into());
-                    loop {
-                        // Wait to be reset
-                        nop();
-                    }
-                }
-            }
-            Err(e) => error!("Error getting tc2 agent state: {}", e),
-        }
-    }
-
-    let device_config = device_config.unwrap_or(DeviceConfig::default());
-    if let AudioMode::AudioOnly = device_config.config().audio_mode {
-        let _ = shared_i2c.disable_alarm(&mut delay);
-        info!("Is audio device restarting");
-        sio.fifo.write_blocking(Core1Task::RequestReset.into());
-        loop {
-            // Wait to be reset
-            nop();
-        }
     }
 
     let record_audio: bool;
@@ -493,7 +371,7 @@ pub fn core_1_task(
                     &mut shared_i2c,
                     &mut flash_storage,
                     &mut timer,
-                    &mut event_logger,
+                    event_logger,
                     &device_config,
                 ) {
                     next_audio_alarm = Some(next_alarm);
@@ -526,7 +404,7 @@ pub fn core_1_task(
             &mut peripherals.DMA,
             &mut delay,
             &mut timer,
-            &mut event_logger,
+            event_logger,
             &mut flash_storage,
             clock_freq,
             &synced_date_time,
@@ -599,6 +477,7 @@ pub fn core_1_task(
         is_cptv,
         flash_storage.has_files_to_offload()
     );
+
     let did_offload_files = if should_offload {
         offload_flash_storage_and_events(
             &mut flash_storage,
@@ -609,8 +488,8 @@ pub fn core_1_task(
             &mut shared_i2c,
             &mut delay,
             &mut timer,
-            &mut event_logger,
-            &synced_date_time,
+            event_logger,
+            synced_date_time,
             None,
             false,
         )
@@ -1097,8 +976,7 @@ pub fn core_1_task(
                 prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
                     &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
                 }); // Telemetry skipped
-
-                // release the buffer before writing the frame so core0 can continue working
+                    // release the buffer before writing the frame so core0 can continue working
                 critical_section::with(|cs| {
                     // Now we just swap the buffers?
                     let buffer = if selected_frame_buffer == 0 {
@@ -1189,8 +1067,8 @@ pub fn core_1_task(
             }
             let sync_rtc_start_real = timer.get_counter();
 
-            synced_date_time = match shared_i2c.get_datetime(&mut delay) {
-                Ok(now) => SyncedDateTime::new(get_naive_datetime(now), &timer),
+            match shared_i2c.get_datetime(&mut delay) {
+                Ok(now) => synced_date_time.set(get_naive_datetime(now), &timer),
                 Err(err_str) => {
                     event_logger.log_event(
                         LoggerEvent::new(
@@ -1200,7 +1078,6 @@ pub fn core_1_task(
                         &mut flash_storage,
                     );
                     error!("Unable to get DateTime from RTC: {}", err_str);
-                    synced_date_time
                 }
             };
 
