@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::attiny_rtc_i2c::{I2CConfig, SharedI2C};
+use crate::attiny_rtc_i2c::SharedI2C;
 use crate::bsp::pac;
 use crate::bsp::pac::Peripherals;
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
@@ -12,35 +12,79 @@ use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
 };
 use crate::sub_tasks::{maybe_offload_events, offload_flash_storage_and_events};
+use core::cell::RefCell;
 
-use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
+use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER_HEADER_LENGTH};
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::OnboardFlash;
 use crate::utils::u8_slice_to_u16;
-use crate::FrameBuffer;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
 
-use core::cell::RefCell;
 use core::ops::Add;
 use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
-use rp2040_hal::gpio::bank0::{
-    Gpio10, Gpio11, Gpio12, Gpio13, Gpio14, Gpio15, Gpio3, Gpio5, Gpio8, Gpio9,
-};
-use rp2040_hal::gpio::{FunctionNull, FunctionSio, Pin, PullDown, PullNone, SioInput, SioOutput};
 use rp2040_hal::timer::Instant;
 use rp2040_hal::{Sio, Timer};
 
 use crate::audio_task::{
     check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
 };
+
+pub const NUM_LEPTON_SEGMENTS: usize = 4;
+pub const NUM_LINES_PER_LEPTON_SEGMENT: usize = 61;
+const FRAME_BUFFER_ALIGNMENT_PADDING: usize = 2;
+const LEPTON_RAW_FRAME_PAYLOAD_LENGTH: usize =
+    FRAME_WIDTH * NUM_LINES_PER_LEPTON_SEGMENT * NUM_LEPTON_SEGMENTS;
+const FRAME_BUFFER_LENGTH: usize =
+    RPI_TRANSFER_HEADER_LENGTH + LEPTON_RAW_FRAME_PAYLOAD_LENGTH + FRAME_BUFFER_ALIGNMENT_PADDING;
+
+#[repr(C, align(32))]
+pub struct FrameBuffer([u8; FRAME_BUFFER_LENGTH]);
+pub type StaticFrameBuffer = &'static Mutex<RefCell<Option<&'static mut FrameBuffer>>>;
+
+impl FrameBuffer {
+    pub const fn new() -> FrameBuffer {
+        // NOTE: Put an 18 byte padding at the start, and a 2 byte padding at the end, to make it 32bit aligned
+        FrameBuffer([0u8; FRAME_BUFFER_LENGTH])
+    }
+
+    pub fn as_u8_slice(&self) -> &[u8] {
+        &self.0[RPI_TRANSFER_HEADER_LENGTH
+            ..RPI_TRANSFER_HEADER_LENGTH + LEPTON_RAW_FRAME_PAYLOAD_LENGTH]
+    }
+
+    pub fn as_u8_slice_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+
+    pub fn ffc_imminent(&mut self, is_imminent: bool) {
+        let val = if is_imminent { 1 } else { 0 };
+        self.0[RPI_TRANSFER_HEADER_LENGTH + 636] = val;
+        self.0[RPI_TRANSFER_HEADER_LENGTH + 637] = val;
+    }
+
+    pub fn frame_data_as_u8_slice_mut(&mut self) -> &mut [u8] {
+        &mut self.0[RPI_TRANSFER_HEADER_LENGTH
+            ..RPI_TRANSFER_HEADER_LENGTH + LEPTON_RAW_FRAME_PAYLOAD_LENGTH]
+    }
+
+    pub fn packet(&mut self, segment: usize, packet_id: usize) -> &mut [u8] {
+        let segment_offset = FRAME_WIDTH * NUM_LINES_PER_LEPTON_SEGMENT * segment;
+        let packet_offset = FRAME_WIDTH * packet_id;
+        &mut self.0[RPI_TRANSFER_HEADER_LENGTH..]
+            [segment_offset + packet_offset..segment_offset + packet_offset + FRAME_WIDTH]
+    }
+}
+
 #[repr(u32)]
 #[derive(Format)]
-pub enum Core1Task {
+pub enum Core0Task {
     Ready = 0xdb,
+    ReadyToReceiveLeptonConfig = 0xec,
+    SendIntercoreArray = 0x0c,
     FrameProcessingComplete = 0xee,
     ReceiveFrame = 0xae,
     GotFrame = 0xab,
@@ -60,32 +104,18 @@ enum StatusRecording {
     ShutdownStatus = 1,
 }
 
-impl Into<u32> for Core1Task {
+impl Into<u32> for Core0Task {
     fn into(self) -> u32 {
         self as u32
     }
 }
 
-impl From<u32> for Core1Task {
+impl From<u32> for Core0Task {
     fn from(value: u32) -> Self {
         value.into()
     }
 }
 
-pub struct Core1Pins {
-    pub(crate) pi_ping: Pin<Gpio5, FunctionSio<SioInput>, PullDown>,
-
-    pub(crate) pi_miso: Pin<Gpio15, FunctionNull, PullNone>,
-    pub(crate) pi_mosi: Pin<Gpio12, FunctionNull, PullNone>,
-    pub(crate) pi_clk: Pin<Gpio14, FunctionNull, PullNone>,
-    pub(crate) pi_cs: Pin<Gpio13, FunctionNull, PullNone>,
-
-    pub(crate) fs_cs: Pin<Gpio9, FunctionSio<SioOutput>, PullDown>,
-    pub(crate) fs_mosi: Pin<Gpio11, FunctionNull, PullNone>,
-    pub(crate) fs_clk: Pin<Gpio10, FunctionNull, PullNone>,
-    pub(crate) fs_miso: Pin<Gpio8, FunctionNull, PullNone>,
-}
-const FRAME_LENGTH: usize = FRAME_WIDTH * 122 * 2;
 const WAIT_N_FRAMES_FOR_STABLE: usize = 45;
 
 /// Returns `true` if it did wake the rPI
@@ -198,7 +228,7 @@ impl Default for SyncedDateTime {
 }
 
 impl SyncedDateTime {
-    pub fn get_timestamp_micros(&self, timer: &rp2040_hal::Timer) -> u64 {
+    pub fn get_timestamp_micros(&self, timer: &Timer) -> u64 {
         (self.date_time_utc
             + chrono::Duration::microseconds(
                 (timer.get_counter() - self.timer_offset).to_micros() as i64
@@ -207,19 +237,19 @@ impl SyncedDateTime {
         .timestamp_micros() as u64
     }
 
-    pub fn get_adjusted_dt(&self, timer: &rp2040_hal::Timer) -> NaiveDateTime {
+    pub fn get_adjusted_dt(&self, timer: &Timer) -> NaiveDateTime {
         self.date_time_utc
             + chrono::Duration::microseconds(
                 (timer.get_counter() - self.timer_offset).to_micros() as i64
             )
     }
 
-    pub fn set(&mut self, date_time: NaiveDateTime, timer: &rp2040_hal::Timer) {
+    pub fn set(&mut self, date_time: NaiveDateTime, timer: &Timer) {
         self.date_time_utc = date_time;
         self.timer_offset = timer.get_counter();
     }
 
-    pub fn new(date_time: NaiveDateTime, timer: &rp2040_hal::Timer) -> SyncedDateTime {
+    pub fn new(date_time: NaiveDateTime, timer: &Timer) -> SyncedDateTime {
         SyncedDateTime {
             date_time_utc: date_time,
             timer_offset: timer.get_counter(),
@@ -228,15 +258,14 @@ impl SyncedDateTime {
 }
 
 pub fn thermal_motion_task(
+    mut shared_i2c: SharedI2C,
     mut pi_spi: ExtSpiTransfers,
     mut flash_storage: OnboardFlash,
-    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    static_frame_buffer_a: StaticFrameBuffer,
+    static_frame_buffer_b: StaticFrameBuffer,
     clock_freq: u32,
-    i2c_config: I2CConfig,
-    unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
-    lepton_serial: Option<u32>,
-    lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
+    //lepton_serial: Option<u32>,
+    //lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
     woken_by_alarm: bool,
     mut timer: Timer,
     device_config: &DeviceConfig,
@@ -255,9 +284,7 @@ pub fn thermal_motion_task(
     let core = unsafe { pac::CorePeripherals::steal() };
     let mut delay = Delay::new(core.SYST, clock_freq);
     let mut sio = Sio::new(peripherals.SIO);
-    let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
-
-    let should_record_to_flash = true;
+    //let mut shared_i2c = SharedI2C::new(i2c_config, unlocked_pin, &mut delay);
 
     {
         if flash_storage.has_files_to_offload() {
@@ -293,9 +320,11 @@ pub fn thermal_motion_task(
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
     let startup_date_time_utc: NaiveDateTime = synced_date_time.date_time_utc.clone();
 
-    // This is the raw frame buffer which can be sent to the rPi as is: it has 18 bytes
+    // This is the 'raw' frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
-    //let mut thread_local_frame_buffer: [u8; FRAME_LENGTH + 20] = [0u8; FRAME_LENGTH + 20];
+    // It includes the lepton-provided header block as well as the raw pixel frame data.
+    // At any given time during frame processing, it will hold one of the two frame-buffer structs,
+    // and the core1 lepton frame acquisition task will write pixels to the other.
     let mut thread_local_frame_buffer: Option<&mut FrameBuffer> = None;
 
     // Create the GZIP crc table once on startup, then reuse, since it's expensive to
@@ -306,12 +335,31 @@ pub fn thermal_motion_task(
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
-    sio.fifo.write_blocking(Core1Task::Ready.into());
-
+    sio.fifo
+        .write_blocking(Core0Task::ReadyToReceiveLeptonConfig.into());
+    let cmd = sio.fifo.read_blocking();
+    assert_eq!(cmd, Core0Task::SendIntercoreArray.into());
+    let length = sio.fifo.read_blocking();
+    assert_eq!(length, 4);
     let radiometry_enabled = sio.fifo.read_blocking();
-    info!("Core 1 got radiometry enabled: {}", radiometry_enabled == 2);
+    let lepton_serial = sio.fifo.read_blocking();
+    let lepton_firmware_main_version = sio.fifo.read_blocking();
+    let lepton_firmware_dsp_version = sio.fifo.read_blocking();
+    let firmware_main_parts = lepton_firmware_main_version.to_le_bytes();
+    let firmware_dsp_parts = lepton_firmware_dsp_version.to_le_bytes();
     let lepton_version = if radiometry_enabled == 2 { 35 } else { 3 };
-
+    let lepton_firmware_version = (
+        (
+            firmware_main_parts[0],
+            firmware_main_parts[1],
+            firmware_main_parts[2],
+        ),
+        (
+            firmware_dsp_parts[0],
+            firmware_dsp_parts[1],
+            firmware_dsp_parts[2],
+        ),
+    );
     if woken_by_alarm {
         event_logger.log_event(
             LoggerEvent::new(
@@ -508,17 +556,15 @@ pub fn thermal_motion_task(
         }
     }
 
-    warn!("Core 1 is ready to receive frames");
-    sio.fifo.write_blocking(Core1Task::Ready.into());
+    warn!("Core 0 is ready to receive frames");
+    sio.fifo.write_blocking(Core0Task::Ready.into());
     if !device_config.config().use_low_power_mode {
-        sio.fifo.write_blocking(Core1Task::HighPowerMode.into());
+        sio.fifo.write_blocking(Core0Task::HighPowerMode.into());
     }
     let mut cptv_stream: Option<CptvStream> = None;
-    let mut prev_frame: [u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1] =
-        [0u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1];
 
-    let mut prev_frame_2: [u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1] =
-        [0u16; (FRAME_WIDTH * FRAME_HEIGHT) + 1];
+    let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
+    let mut prev_frame_2: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
 
     let mut frames_written = 0;
     let mut frames_seen = 0usize;
@@ -559,12 +605,12 @@ pub fn thermal_motion_task(
     loop {
         let input = sio.fifo.read_blocking();
         let needs_ffc: bool;
-        if input == Core1Task::ReceiveFrameWithPendingFFC.into() {
+        if input == Core0Task::ReceiveFrameWithPendingFFC.into() {
             needs_ffc = true;
         } else {
             crate::assert_eq!(
                 input,
-                Core1Task::ReceiveFrame.into(),
+                Core0Task::ReceiveFrame.into(),
                 "Got unknown fifo input to core1 task loop {}",
                 input
             );
@@ -575,11 +621,11 @@ pub fn thermal_motion_task(
         // Get the currently selected buffer to transfer/write to disk.
         let selected_frame_buffer = sio.fifo.read_blocking();
         critical_section::with(|cs| {
-            // Now we just swap the buffers?
+            // Now we just swap the buffers
             let buffer = if selected_frame_buffer == 0 {
-                frame_buffer_local
+                static_frame_buffer_a
             } else {
-                frame_buffer_local_2
+                static_frame_buffer_b
             };
             thread_local_frame_buffer = buffer.borrow_ref_mut(cs).take();
         });
@@ -595,14 +641,14 @@ pub fn thermal_motion_task(
             let mut skipped_frames = 0;
             if let Some(prev_telemetry) = &prev_frame_telemetry {
                 let frame_diff = frame_telemetry.frame_num - prev_telemetry.frame_num - 1;
-                //over a 100 is probably corrupt telemtry
+                // over a 100 is probably corrupt telemetry
                 if frame_diff > 0 && frame_diff < 100 {
                     skipped_frames = frame_diff;
                 }
             }
 
             if cptv_stream.is_some() {
-                //if recording accumulate
+                // if recording accumulate
                 lost_frames += skipped_frames;
             } else {
                 lost_frames = skipped_frames;
@@ -613,9 +659,9 @@ pub fn thermal_motion_task(
             (frame_telemetry, frame_header_is_valid)
         };
 
-        //if in high power mode need to check thermal-recorder hasn't made a recording
+        // if in high power mode need to check thermal-recorder hasn't made a recording
         if needs_ffc && !device_config.use_low_power_mode() {
-            //only check status every 20 seconds
+            // only check status every 20 seconds
             if frame_telemetry.frame_num - last_rec_check > 9 * 20 {
                 if let Ok(is_recording) = shared_i2c.tc2_agent_is_recording(&mut delay) {
                     high_power_recording = is_recording;
@@ -625,10 +671,10 @@ pub fn thermal_motion_task(
                         is_recording, high_power_recording
                     );
                     if high_power_recording {
-                        sio.fifo.write(Core1Task::StartRecording.into());
+                        sio.fifo.write(Core0Task::StartRecording.into());
                         high_power_recording = true;
                     } else {
-                        sio.fifo.write(Core1Task::EndRecording.into());
+                        sio.fifo.write(Core0Task::EndRecording.into());
                         high_power_recording = false;
                         thread_local_frame_buffer
                             .as_mut()
@@ -637,7 +683,7 @@ pub fn thermal_motion_task(
                     }
                 }
             } else if !high_power_recording {
-                //depending on timing might get 2 frames with needs_ffc event after said ok
+                // depending on timing might get 2 frames with needs_ffc event after said ok
                 thread_local_frame_buffer
                     .as_mut()
                     .unwrap()
@@ -691,6 +737,10 @@ pub fn thermal_motion_task(
             .unwrap()
             .frame_data_as_u8_slice_mut();
 
+        // Telemetry skipped
+        let current_raw_frame =
+            unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] };
+
         let frame_num = frame_telemetry.frame_num;
         let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 20000
             || frame_telemetry.ffc_status == FFCStatus::Imminent
@@ -703,18 +753,15 @@ pub fn thermal_motion_task(
             motion_detection = None;
         }
         // NOTE: In low power mode, don't try to start recordings/motion detection until frames have stabilised.
-        if frames_seen >= WAIT_N_FRAMES_FOR_STABLE
+        let should_record_to_flash = frames_seen >= WAIT_N_FRAMES_FOR_STABLE
             && device_config.use_low_power_mode()
-            && frame_header_is_valid
-        {
-            let current_raw_frame =
-                unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] }; // Telemetry skipped
-
-            //just want 1 previous frame for first status
+            && frame_header_is_valid;
+        if should_record_to_flash {
+            // just want 1 previous frame for first status
             if !too_close_to_ffc_event && frames_seen > WAIT_N_FRAMES_FOR_STABLE {
                 let this_frame_motion_detection = track_motion(
                     &current_raw_frame,
-                    &prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT],
+                    &prev_frame,
                     &motion_detection,
                     is_daytime,
                     &device_config.motion_detection_mask,
@@ -783,9 +830,9 @@ pub fn thermal_motion_task(
                     } else {
                         // Recording window is 5 minutes from startup time in dev mode.
                         synced_date_time.date_time_utc
-                            < startup_date_time_utc + chrono::Duration::minutes(5)
+                            < startup_date_time_utc + Duration::minutes(5)
                     };
-                    //start recording bellow so frame buffer is out of scope
+                    // start recording below so frame buffer is out of scope
                     should_start_new_recording =
                         should_start_new_recording && is_inside_recording_window;
                     if is_inside_recording_window {
@@ -802,7 +849,7 @@ pub fn thermal_motion_task(
                         info!("Would start recording, but outside recording window");
                     } else if made_startup_status_recording && !made_shutdown_status_recording {
                         should_start_new_recording = true;
-                        //force shutdown status recording even outside of window
+                        // force shutdown status recording even outside of window
                     } else {
                         making_status_recording = false;
                     }
@@ -831,7 +878,7 @@ pub fn thermal_motion_task(
                         frames_written += 1;
                     }
                 } else {
-                    // Finalise on a different frame period to writing out the prev/last frame,
+                    // Finalize on a different frame period to writing out the prev/last frame,
                     // to give more breathing room.
                     if let Some(cptv_stream) = &mut cptv_stream {
                         let cptv_start_block_index = cptv_stream.starting_block_index as isize;
@@ -876,6 +923,8 @@ pub fn thermal_motion_task(
                                 );
                             }
                         }
+
+                        // Clear out prev frame before starting a new recording stream.
                         prev_frame_2.fill(0);
 
                         ended_recording = true;
@@ -906,9 +955,9 @@ pub fn thermal_motion_task(
                 should_start_new_recording = false;
             }
 
-            //if starting a new recording will handle this differently below
+            // if starting a new recording will handle this differently below
             if !should_start_new_recording {
-                prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(current_raw_frame);
+                prev_frame.copy_from_slice(current_raw_frame);
             }
         }
 
@@ -928,118 +977,110 @@ pub fn thermal_motion_task(
         }
         let frame_transfer_end = timer.get_counter();
         if should_start_new_recording {
-            {
-                //Since we write 2 frames every new recording, this can take too long and we drop a frame
-                //so cache the current frame and tell core0 to keep getting lepton frames, this will spread the initial
-                //load over the first 2 frames.
+            // Since we write 2 frames every new recording, this can take too long and
+            // we drop a frame so cache the current frame and tell core1 to keep getting
+            // lepton frames, this will spread the initial load over the first 2 frames.
 
-                warn!("Setting recording flag on attiny");
-                // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
-                //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
-                //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
-                let _ = shared_i2c
-                    .set_recording_flag(&mut delay, true)
-                    .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+            warn!("Setting recording flag on attiny");
+            // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
+            //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
+            //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
+            let _ = shared_i2c
+                .set_recording_flag(&mut delay, true)
+                .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
-                error!("Starting new recording, {:?}", &frame_telemetry);
-                // TODO: Pass in various cptv header info bits.
-                let mut cptv_streamer = CptvStream::new(
-                    synced_date_time.get_timestamp_micros(&timer), // Microseconds
-                    lepton_version,
-                    lepton_serial.clone(),
-                    lepton_firmware_version.clone(),
-                    &device_config,
-                    &mut flash_storage,
-                    &huffman_table,
-                    &crc_table,
-                    making_status_recording,
-                );
-                cptv_streamer.init_gzip_stream(&mut flash_storage, false);
-                cptv_streamer.push_frame(
-                    &prev_frame,
-                    &mut prev_frame_2, // This should be zeroed out before starting a new clip.
-                    &prev_frame_telemetry.as_ref().unwrap(),
-                    &mut flash_storage,
-                );
-                frames_written += 1;
+            error!("Starting new recording, {:?}", &frame_telemetry);
+            let mut cptv_streamer = CptvStream::new(
+                synced_date_time.get_timestamp_micros(&timer), // Microseconds
+                lepton_version,
+                lepton_serial,
+                lepton_firmware_version,
+                &device_config,
+                &mut flash_storage,
+                &huffman_table,
+                &crc_table,
+                making_status_recording,
+            );
+            cptv_streamer.init_gzip_stream(&mut flash_storage, false);
 
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::StartedRecording,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
-                    &mut flash_storage,
-                );
+            // Write out the initial frame from *before* the time when the motion detection triggered.
+            cptv_streamer.push_frame(
+                &prev_frame,
+                &mut prev_frame_2, // This should be zeroed out before starting a new clip.
+                &prev_frame_telemetry.as_ref().unwrap(),
+                &mut flash_storage,
+            );
+            frames_written += 1;
 
-                cptv_stream = Some(cptv_streamer);
-                prev_frame_2[FRAME_WIDTH * FRAME_HEIGHT] = 0;
-                prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT].copy_from_slice(unsafe {
-                    &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT]
-                }); // Telemetry skipped
-                    // release the buffer before writing the frame so core0 can continue working
-                critical_section::with(|cs| {
-                    // Now we just swap the buffers?
-                    let buffer = if selected_frame_buffer == 0 {
-                        frame_buffer_local
-                    } else {
-                        frame_buffer_local_2
-                    };
-                    *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
-                });
-                sio.fifo.write(Core1Task::StartRecording.into());
-                info!("Sent start recording message to core0");
-                sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+            event_logger.log_event(
+                LoggerEvent::new(
+                    LoggerEventKind::StartedRecording,
+                    synced_date_time.get_timestamp_micros(&timer),
+                ),
+                &mut flash_storage,
+            );
 
-                if let Some(prev_telemetry) = &prev_frame_telemetry {
-                    if frame_telemetry.frame_num == prev_telemetry.frame_num {
-                        warn!("Duplicate frame {}", frame_telemetry.frame_num);
-                    }
-                    if frame_telemetry.msec_on == prev_telemetry.msec_on {
-                        warn!(
-                            "Duplicate frame {} (same time {})",
-                            frame_telemetry.frame_num, frame_telemetry.msec_on
-                        );
-                    }
+            prev_frame_2.copy_from_slice(current_raw_frame);
+            // release the buffer before writing the frame so core1 can continue working
+            critical_section::with(|cs| {
+                // Now we just swap the buffers?
+                let buffer = if selected_frame_buffer == 0 {
+                    static_frame_buffer_a
+                } else {
+                    static_frame_buffer_b
+                };
+                *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
+            });
+            sio.fifo.write(Core0Task::StartRecording.into());
+            info!("Sent start recording message to core1");
+            sio.fifo.write(Core0Task::FrameProcessingComplete.into());
+
+            if let Some(prev_telemetry) = &prev_frame_telemetry {
+                if frame_telemetry.frame_num == prev_telemetry.frame_num {
+                    warn!("Duplicate frame {}", frame_telemetry.frame_num);
                 }
-                //now write the frame
-                cptv_stream.as_mut().unwrap().push_frame(
-                    &mut prev_frame_2,
-                    &mut prev_frame,
-                    &frame_telemetry,
-                    &mut flash_storage,
-                );
-                frames_written += 1;
-                prev_frame[0..FRAME_WIDTH * FRAME_HEIGHT]
-                    .copy_from_slice(&prev_frame_2[0..FRAME_WIDTH * FRAME_HEIGHT]);
+                if frame_telemetry.msec_on == prev_telemetry.msec_on {
+                    warn!(
+                        "Duplicate frame {} (same time {})",
+                        frame_telemetry.frame_num, frame_telemetry.msec_on
+                    );
+                }
             }
+            // now write the frame
+            cptv_streamer.push_frame(
+                &prev_frame_2,
+                &mut prev_frame,
+                &frame_telemetry,
+                &mut flash_storage,
+            );
+            frames_written += 1;
+            prev_frame.copy_from_slice(&prev_frame_2);
+            cptv_stream = Some(cptv_streamer);
         } else {
             critical_section::with(|cs| {
                 // Now we just swap the buffers?
                 let buffer = if selected_frame_buffer == 0 {
-                    frame_buffer_local
+                    static_frame_buffer_a
                 } else {
-                    frame_buffer_local_2
+                    static_frame_buffer_b
                 };
                 *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
             });
-            sio.fifo.write(Core1Task::FrameProcessingComplete.into());
+            sio.fifo.write(Core0Task::FrameProcessingComplete.into());
         }
 
-        let swap_buffer = timer.get_counter();
         if ended_recording && cptv_stream.is_none() {
             info!("Send end recording message to core0");
-            sio.fifo.write(Core1Task::EndRecording.into());
+            sio.fifo.write(Core0Task::EndRecording.into());
         }
 
         if frames_seen % (10 * 9) == 0 && frame_header_is_valid {
             info!("Got frame #{}", frame_num);
         }
 
-        // let one_min_check_start = timer.get_counter();
-        // let expected_rtc_sync_time_us = 3500;
-        let expected_rtc_sync_time_us = 4200; //using slower clock speed
+        let expected_rtc_sync_time_us = 4200; // using slower clock speed
 
-        //INFO  RTC Sync time took 1350µs
+        // INFO RTC Sync time took 1350µs
         if (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none() {
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
@@ -1123,7 +1164,7 @@ pub fn thermal_motion_task(
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
 
-                    sio.fifo.write(Core1Task::RequestReset.into());
+                    sio.fifo.write(Core0Task::RequestReset.into());
                     loop {
                         // Wait to be reset
                         nop();
@@ -1166,7 +1207,7 @@ pub fn thermal_motion_task(
                             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
                                 //just reboot and it will go into audio branch
                                 info!("Reset as thermal finished and time for audio");
-                                sio.fifo.write(Core1Task::RequestReset.into());
+                                sio.fifo.write(Core0Task::RequestReset.into());
 
                                 loop {
                                     nop();
@@ -1181,7 +1222,7 @@ pub fn thermal_motion_task(
                                 .next_recording_window_start(&synced_date_time.date_time_utc)
                         } else {
                             // In dev mode, we always set the restart alarm for 2 minutes time.
-                            synced_date_time.date_time_utc + chrono::Duration::minutes(2)
+                            synced_date_time.date_time_utc + Duration::minutes(2)
                         };
                         let enabled_alarm = shared_i2c.enable_alarm(&mut delay);
                         if enabled_alarm.is_err() {
@@ -1216,7 +1257,7 @@ pub fn thermal_motion_task(
                                 info!("Tell core0 to get ready to sleep");
                                 // Tell core0 we're exiting the recording loop, and it should
                                 // down the lepton module, and wait for reply.
-                                sio.fifo.write(Core1Task::ReadyToSleep.into());
+                                sio.fifo.write(Core0Task::ReadyToSleep.into());
                                 loop {
                                     if let Some(result) = sio.fifo.read() {
                                         if result == 255 {
@@ -1341,7 +1382,7 @@ pub fn thermal_motion_task(
         if record_audio {
             if let Some(next_audio_alarm) = next_audio_alarm {
                 if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm {
-                    //Should we be checking alarm triggered? or just us ethis and clear alarm
+                    //Should we be checking alarm triggered? or just use this and clear alarm
                     audio_pending = true;
                     let cur_time = &synced_date_time.date_time_utc;
 
@@ -1371,13 +1412,13 @@ pub fn thermal_motion_task(
                     || made_shutdown_status_recording
                     || &(synced_date_time.date_time_utc + Duration::minutes(2)) < window_end
                 {
-                    //hanldes case where thermal recorder is doing recording
+                    // handles case where thermal recorder on the rPi is doing recording
                     if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
                         if !is_recording {
                             info!("Taking audio recording");
-                            //make audio rec now
+                            // make audio rec now
                             let _ = shared_i2c.tc2_agent_take_audio_rec(&mut delay);
-                            sio.fifo.write(Core1Task::RequestReset.into());
+                            sio.fifo.write(Core0Task::RequestReset.into());
                             loop {
                                 // Wait to be reset
                                 nop();

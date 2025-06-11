@@ -36,7 +36,7 @@ impl RecordingStatus {
     }
 }
 
-use crate::pdmfilter::PDMFilter;
+use crate::pdm_filter::PDMFilter;
 pub struct PdmMicrophone {
     data_disabled: Option<Pin<Gpio0, FunctionNull, PullNone>>,
     clk_disabled: Option<Pin<Gpio1, FunctionNull, PullNone>>,
@@ -102,8 +102,8 @@ impl PdmMicrophone {
         let installed_program: rp2040_hal::pio::InstalledProgram<PIO1> =
             self.pio.install(&program_with_defines.program).unwrap();
 
-        // needs to run 4 instructions per evrery clock cycle
-        // convert back to origianl sr SR * DECIMATION
+        // needs to run 4 instructions per every clock cycle
+        // convert back to original sr SR * DECIMATION
         // let clock_divider = self.system_clock_hz.to_MHz() as f32 / (4.0 * target_speed);
         //
         let clock_divider =
@@ -160,10 +160,10 @@ impl PdmMicrophone {
             clock_divider_fractional
         );
         self.state_machine_1_running = Some((sm, tx));
-        return self.system_clock_hz.to_Hz() as f32
+        self.system_clock_hz.to_Hz() as f32
             / (PDM_DECIMATION as f32
                 * 2.0
-                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)));
+                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)))
     }
 
     pub fn alter_mic_clock(&mut self, clock_rate: f32) -> f32 {
@@ -186,10 +186,10 @@ impl PdmMicrophone {
             clock_divider_fractional
         );
         self.state_machine_1_running = Some((sm, tx));
-        return self.system_clock_hz.to_Hz() as f32
+        self.system_clock_hz.to_Hz() as f32
             / (PDM_DECIMATION as f32
                 * 2.0
-                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)));
+                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)))
     }
 
     pub fn disable(&mut self) {
@@ -240,9 +240,6 @@ impl PdmMicrophone {
             total_samples: adjusted_sr as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
-        // f
-        // flash_storage.take_spi(spi, resets, self.system_clock_hz);
-        // flash_storage.init();
         let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
         let mut recorded_successfully = false;
         // Swap our buffers?
@@ -420,11 +417,11 @@ impl AudioBuffer {
             &mut self.data[self.index..self.index + raw_data_length / 8]
         };
         self.index += slice.len();
-        return slice;
+        slice
     }
 
-    pub fn is_full(&mut self) -> bool {
-        return USER_BUFFER_LENGTH == self.index;
+    pub fn is_full(&self) -> bool {
+        USER_BUFFER_LENGTH == self.index
     }
 
     pub fn reset(&mut self) {
@@ -432,6 +429,6 @@ impl AudioBuffer {
     }
 
     pub fn as_u8_slice(&mut self) -> &mut [u8] {
-        return unsafe { u16_slice_to_u8_mut(&mut self.data[..]) };
+        unsafe { u16_slice_to_u8_mut(&mut self.data[..]) }
     }
 }

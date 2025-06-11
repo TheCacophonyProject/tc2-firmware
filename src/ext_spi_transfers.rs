@@ -65,6 +65,12 @@ fn TIMER_IRQ_0() {
     });
 }
 
+const MESSAGE_TYPE_U8: usize = 1;
+const PAYLOAD_LENGTH_LE_U32: usize = 4;
+const IS_RECORDING_LE_U16: usize = 2;
+// The number of bytes in the header sent for any transfers via `ExtSpiTransfers`
+pub const RPI_TRANSFER_HEADER_LENGTH: usize =
+    (MESSAGE_TYPE_U8 * 2) + (PAYLOAD_LENGTH_LE_U32 * 2) + (IS_RECORDING_LE_U16 * 4);
 pub struct ExtSpiTransfers {
     pub spi: Option<
         Spi<
@@ -256,7 +262,7 @@ impl ExtSpiTransfers {
             let length = payload.len() as u32;
             let is_recording = if is_recording { 1 } else { 0 };
 
-            let mut transfer_header = [0u8; 1 + 1 + 4 + 4 + 2 + 2 + 2 + 2];
+            let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
             LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
@@ -311,7 +317,6 @@ impl ExtSpiTransfers {
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
         maybe_abort_dma_transfer(
             dma_peripheral,
-            DMA_CHANNEL_NUM,
             transfer_end_address,
             transfer_start_address,
             0,
@@ -425,7 +430,7 @@ impl ExtSpiTransfers {
         //     "Send message {:?} of length {}/{}",
         //     message_type, payload_length, actual_length
         // );
-        let mut transfer_header = [0u8; 18];
+        let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
         let header_len = transfer_header.len() as u32;
         transfer_header[0] = message_type as u8;
         transfer_header[1] = message_type as u8;
@@ -459,7 +464,6 @@ impl ExtSpiTransfers {
                 let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
                 maybe_abort_dma_transfer(
                     dma_peripheral,
-                    DMA_CHANNEL_NUM,
                     transfer_read_address + actual_length,
                     transfer_read_address,
                     1,
@@ -486,7 +490,6 @@ impl ExtSpiTransfers {
 
                     let aborted = maybe_abort_dma_transfer(
                         dma_peripheral,
-                        DMA_CHANNEL_NUM,
                         transfer_read_address + return_length,
                         transfer_read_address,
                         1,
@@ -572,7 +575,6 @@ impl ExtSpiTransfers {
 
 fn maybe_abort_dma_transfer(
     dma: &mut DMA,
-    channel: usize,
     transfer_end_address: u32,
     transfer_start_address: u32,
     location: u8,
@@ -585,8 +587,13 @@ fn maybe_abort_dma_transfer(
     let mut some_progress = false;
     // Check that the FIFOs are empty too.
     loop {
-        if dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {
-            let current_transfer_read_address = dma.ch[channel].ch_read_addr.read().bits();
+        if dma.ch[DMA_CHANNEL_NUM]
+            .ch_ctrl_trig
+            .read()
+            .busy()
+            .bit_is_set()
+        {
+            let current_transfer_read_address = dma.ch[DMA_CHANNEL_NUM].ch_read_addr.read().bits();
             if some_progress && prev_read_address == current_transfer_read_address {
                 same_address += 1;
             }
@@ -606,7 +613,13 @@ fn maybe_abort_dma_transfer(
         }
     }
 
-    if needs_abort && dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {
+    if needs_abort
+        && dma.ch[DMA_CHANNEL_NUM]
+            .ch_ctrl_trig
+            .read()
+            .busy()
+            .bit_is_set()
+    {
         info!(
             "Aborting dma transfer at {}/{}, #{}",
             prev_read_address - transfer_start_address,
@@ -617,13 +630,19 @@ fn maybe_abort_dma_transfer(
         // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
         let inte0 = dma.inte0.read().bits();
         let inte1 = dma.inte1.read().bits();
-        let mask = (1u32 << channel).reverse_bits();
+        let mask = (1u32 << DMA_CHANNEL_NUM).reverse_bits();
         dma.inte0.write(|w| unsafe { w.bits(inte0 & mask) });
         dma.inte1.write(|w| unsafe { w.bits(inte1 & mask) });
         // Abort all dma transfers
-        dma.chan_abort.write(|w| unsafe { w.bits(1 << channel) });
+        dma.chan_abort
+            .write(|w| unsafe { w.bits(1 << DMA_CHANNEL_NUM) });
 
-        while dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {}
+        while dma.ch[DMA_CHANNEL_NUM]
+            .ch_ctrl_trig
+            .read()
+            .busy()
+            .bit_is_set()
+        {}
 
         dma.inte0.write(|w| unsafe { w.bits(inte0) });
         dma.inte1.write(|w| unsafe { w.bits(inte1) });

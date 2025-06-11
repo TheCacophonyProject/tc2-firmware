@@ -370,7 +370,7 @@ impl SharedI2C {
             Ok(state) => Ok((state & tc2_agent_state::RECORDING) == tc2_agent_state::RECORDING),
             Err(e) => Err(e),
         };
-        return res;
+        res
     }
 
     pub fn set_recording_flag(

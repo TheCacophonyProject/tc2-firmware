@@ -4,6 +4,13 @@ name = "tc2-firmware"
 version = "0.1.0"
 resolver = "2"
 
+[[bin]]
+name = "tc2-firmware"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
 [dependencies]
 
 # bsp dependencies: from rp-hal-boards/rp-pico

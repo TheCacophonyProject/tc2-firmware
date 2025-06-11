@@ -383,7 +383,7 @@ pub fn get_audio_alarm(
             return (Err(()), None);
         }
         let dt = NaiveDateTime::from_timestamp_millis(LittleEndian::read_i64(&event[1..9]));
-        return (AlarmMode::try_from(event[0]), dt);
+        (AlarmMode::try_from(event[0]), dt)
     } else {
         (Err(()), None)
     }

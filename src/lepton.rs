@@ -530,7 +530,7 @@ impl LeptonModule {
     }
 
     pub fn transfer<'w>(&mut self, words: &'w mut [u16]) -> Result<&'w [u16], Infallible> {
-        return self.spi.as_mut().unwrap().transfer(words);
+        self.spi.as_mut().unwrap().transfer(words)
     }
 
     pub fn wait_for_ffc_status_ready(&mut self, delay: &mut Delay) -> bool {
@@ -1071,7 +1071,7 @@ impl LeptonModule {
         if success != LeptonError::Ok {
             return Err(success);
         }
-        return Ok(true);
+        Ok(true)
     }
 
     fn get_attribute(
@@ -1141,7 +1141,7 @@ impl LeptonModule {
             chunk[0] = chunk[1];
             chunk[1] = tmp;
         }
-        return Ok((buf, length));
+        Ok((buf, length))
     }
 
     fn set_attribute_i32(

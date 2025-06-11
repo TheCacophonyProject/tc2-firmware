@@ -332,7 +332,6 @@ impl OnboardFlash {
         miso: Pin<Gpio8, FunctionNull, PullNone>,
         flash_page_buf: &'static mut [u8; 4 + 2048 + 128],
         flash_page_buf_2: &'static mut [u8; 4 + 2048 + 128],
-
         dma_channel_1: Channel<CH1>,
         dma_channel_2: Channel<CH2>,
         should_record: bool,
@@ -354,7 +353,7 @@ impl OnboardFlash {
             dma_channel_1: Some(dma_channel_1),
             dma_channel_2: Some(dma_channel_2),
             record_to_flash: should_record,
-            payload_buffer: payload_buffer,
+            payload_buffer,
             file_start_block_index: None,
             previous_file_start_block_index: None,
             config_block: None,
@@ -467,7 +466,6 @@ impl OnboardFlash {
             bytes[4..][0x820..=0x83f][1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
             {
                 let space = &mut bytes[4..][0x820..=0x83f][2..=3];
-                //info!("Writing {} bytes", user_bytes_length);
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             // TODO Write user detected bad blocks into user-metadata section?
@@ -507,7 +505,7 @@ impl OnboardFlash {
             // Re-write this page
             // Erase and mark the earlier block as bad.
         }
-        return Ok(());
+        Ok(())
     }
 
     pub fn read_device_config(&mut self) -> Result<[u8; 2505], &str> {
@@ -1265,7 +1263,6 @@ impl OnboardFlash {
             bytes[4..][0x820..=0x83f][1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
             {
                 let space = &mut bytes[4..][0x820..=0x83f][2..=3];
-                //info!("Writing {} bytes", user_bytes_length);
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             // TODO Write user detected bad blocks into user-metadata section?

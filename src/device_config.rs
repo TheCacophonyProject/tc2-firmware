@@ -2,10 +2,44 @@ use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
-use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use defmt::{info, Format, Formatter};
 use embedded_io::Read;
 use pcf8563::DateTime;
+
+#[derive(PartialEq)]
+pub struct SmallString([u8; 64]);
+
+impl Format for SmallString {
+    fn format(&self, fmt: Formatter) {
+        defmt::write!(fmt, "{}", self.as_str())
+    }
+}
+
+impl SmallString {
+    pub fn new(data: [u8; 64]) -> SmallString {
+        SmallString(data)
+    }
+
+    pub fn new_from_bytes(data: &[u8]) -> SmallString {
+        let mut inner = [0u8; 64];
+        assert!(data.len() <= 64, "Invalid small string length");
+        inner[0] = data.len().min(inner.len()) as u8;
+        inner[1..1 + data.len()].copy_from_slice(data);
+        SmallString(inner)
+    }
+
+    pub fn as_str(&self) -> &str {
+        let len = self.0[0] as usize;
+        let slice_len = self.0.len();
+        core::str::from_utf8(&self.0[1..(1 + len).min(slice_len)]).unwrap_or("Invalid str")
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        let len = self.0[0] as usize;
+        &self.0[1..1 + len]
+    }
+}
 
 #[derive(Format, PartialEq)]
 
@@ -34,7 +68,7 @@ impl TryFrom<u8> for AudioMode {
 #[derive(Format, PartialEq)]
 pub struct DeviceConfigInner {
     pub device_id: u32,
-    device_name: [u8; 64], // length, ...payload
+    device_name: SmallString,
     pub location: (f32, f32),
     pub location_altitude: Option<f32>,
     pub location_timestamp: Option<u64>,
@@ -43,6 +77,8 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
+
+    // FIXME: I don't think we should rewrite DeviceConfig each time the audio mode changes, can we do better?
     pub audio_mode: AudioMode,
     pub audio_seed: u32,
 }
@@ -56,7 +92,7 @@ impl DeviceConfigInner {
     }
 
     pub fn is_audio_device(&self) -> bool {
-        return self.audio_mode != AudioMode::Disabled;
+        self.audio_mode != AudioMode::Disabled
     }
 
     pub fn time_is_in_recording_window(
@@ -242,13 +278,10 @@ impl Format for DeviceConfig {
 
 impl Default for DeviceConfig {
     fn default() -> Self {
-        let test_name = "default".as_bytes();
-        let mut device_name = [0u8; 64];
-        device_name[0..test_name.len()].copy_from_slice(test_name);
         DeviceConfig {
             config_inner: DeviceConfigInner {
                 device_id: 0,
-                device_name,
+                device_name: SmallString::new_from_bytes("default".as_bytes()),
                 location: (0.0, 0.0),
                 location_altitude: None,
                 location_timestamp: None,
@@ -314,6 +347,7 @@ impl DeviceConfig {
                 .unwrap();
             device_name
         };
+        let device_name = SmallString::new(device_name);
         let audio_seed = cursor.read_u32();
 
         Some((
@@ -366,16 +400,13 @@ impl DeviceConfig {
     pub fn config(&self) -> &DeviceConfigInner {
         &self.config_inner
     }
+
     pub fn device_name(&self) -> &str {
-        let len = self.config_inner.device_name[0] as usize;
-        let slice_len = self.config_inner.device_name.len();
-        core::str::from_utf8(&self.config_inner.device_name[1..(1 + len).min(slice_len)])
-            .unwrap_or("Invalid device name")
+        self.config_inner.device_name.as_str()
     }
 
     pub fn device_name_bytes(&self) -> &[u8] {
-        let len = self.config_inner.device_name[0] as usize;
-        &self.config_inner.device_name[1..1 + len]
+        self.config_inner.device_name.as_bytes()
     }
 
     pub fn next_recording_window_start(&self, now_utc: &NaiveDateTime) -> NaiveDateTime {
@@ -417,7 +448,7 @@ impl DeviceConfig {
 }
 
 pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
-    let naive_date = chrono::NaiveDate::from_ymd_opt(
+    let naive_date = NaiveDate::from_ymd_opt(
         2000 + datetime.year as i32,
         datetime.month as u32,
         datetime.day as u32,
@@ -430,7 +461,7 @@ pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
             datetime.day as u32
         );
     }
-    let naive_time = chrono::NaiveTime::from_hms_opt(
+    let naive_time = NaiveTime::from_hms_opt(
         datetime.hours as u32,
         datetime.minutes as u32,
         datetime.seconds as u32,

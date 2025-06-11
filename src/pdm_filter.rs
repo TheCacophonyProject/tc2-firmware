@@ -139,7 +139,7 @@ fn round_div(a: i64, b: i64) -> i64 {
     if a > 0 {
         return (a + b / 2) / b;
     }
-    return (a - b / 2) / b;
+    (a - b / 2) / b
 }
 // clip???
 fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
@@ -148,21 +148,21 @@ fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
     } else if n > h {
         return h;
     }
-    return n;
+    n
 }
 
 // apply weights on each bit of input data
 fn filter_table_mono_64(lut: &[u32], data: &[u8], s: u8) -> u32 {
     let s_offset: usize = s as usize * 256 * 8;
     // because of endiness the first byte of a 32 bit is at index 3, 2, 1 .. 0
-    return lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8)]
+    lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8)]
         + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 1)]
         + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 2)]
         + lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8 + 3)]
         + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 4)]
         + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 5)]
         + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 6)]
-        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7)];
+        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7)]
 }
 fn convolve(
     signal: &[u16],
@@ -192,5 +192,5 @@ fn convolve(
         out[n] = acc;
         sum += acc as u32;
     }
-    return sum;
+    sum
 }

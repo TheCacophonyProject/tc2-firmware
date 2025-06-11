@@ -1,7 +1,10 @@
-use crate::frame_processing::Core1Task;
+use crate::cptv_encoder::FRAME_WIDTH;
+use crate::frame_processing::{
+    Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT,
+};
 use crate::lepton::{read_telemetry, FFCStatus, LeptonModule};
 use crate::utils::u16_slice_to_u8;
-use crate::{bsp, FrameBuffer, FFC_INTERVAL_MS};
+use crate::{bsp, FFC_INTERVAL_MS};
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
 use bsp::hal::rosc::RingOscillator;
@@ -17,6 +20,9 @@ use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogEnable,
 };
 use fugit::{ExtU32, HertzU32, RateExtU32};
+
+pub type FramePacketData = [u8; FRAME_WIDTH];
+pub type FrameSegments = [[FramePacketData; NUM_LINES_PER_LEPTON_SEGMENT]; NUM_LEPTON_SEGMENTS];
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
 fn go_dormant_until_next_vsync(
@@ -136,9 +142,9 @@ pub fn frame_acquisition_loop(
         if !transferring_prev_frame && prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
             if needs_ffc {
-                sio_fifo.write(Core1Task::ReceiveFrameWithPendingFFC.into());
+                sio_fifo.write(Core0Task::ReceiveFrameWithPendingFFC.into());
             } else {
-                sio_fifo.write(Core1Task::ReceiveFrame.into());
+                sio_fifo.write(Core0Task::ReceiveFrame.into());
             }
             sio_fifo.write(selected_frame_buffer);
             if selected_frame_buffer == 0 {
@@ -198,6 +204,7 @@ pub fn frame_acquisition_loop(
                                     needs_ffc = true;
                                     ffc_requested = false;
                                     if high_power_mode {
+                                        // FIXME: Why, if we're in high-power mode, can't we do an FFC here?  Document this.
                                         can_do_ffc = false;
                                     }
                                 }
@@ -470,35 +477,35 @@ pub fn frame_acquisition_loop(
                     let mut next_message = None;
 
                     if let Some(message) = sio_fifo.read() {
-                        if message == Core1Task::StartRecording.into() {
+                        if message == Core0Task::StartRecording.into() {
                             is_recording = true;
                             next_message = sio_fifo.read();
-                        } else if message == Core1Task::EndRecording.into() {
+                        } else if message == Core0Task::EndRecording.into() {
                             recording_ended = true;
                             can_do_ffc = true;
                             next_message = sio_fifo.read();
-                        } else if message == Core1Task::ReadyToSleep.into() {
+                        } else if message == Core0Task::ReadyToSleep.into() {
                             info!("Powering down lepton module");
                             lepton.power_down_sequence(delay);
                             next_message = sio_fifo.read();
                             sio_fifo.write(255);
-                        } else if message == Core1Task::FrameProcessingComplete.into() {
+                        } else if message == Core0Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
-                        } else if message == Core1Task::RequestReset.into() {
+                        } else if message == Core0Task::RequestReset.into() {
                             watchdog.start(100.micros());
                             loop {
                                 // Wait until the watchdog timer kills us.
                                 nop();
                             }
-                        } else if message == Core1Task::HighPowerMode.into() {
+                        } else if message == Core0Task::HighPowerMode.into() {
                             high_power_mode = true;
                         }
                         if let Some(message) = next_message {
-                            if message == Core1Task::FrameProcessingComplete.into() {
+                            if message == Core0Task::FrameProcessingComplete.into() {
                                 transferring_prev_frame = false;
                                 prev_frame_needs_transfer = false;
-                            } else if message == Core1Task::RequestReset.into() {
+                            } else if message == Core0Task::RequestReset.into() {
                                 watchdog.start(100.micros());
                                 loop {
                                     // Wait until the watchdog timer kills us.

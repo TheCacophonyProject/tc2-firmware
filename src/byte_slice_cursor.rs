@@ -81,7 +81,7 @@ impl<'a> CursorMut<'a> {
         let remainder = &mut self.inner[self.pos..];
         // Check if there is space remaining (return error instead of panicking)
         if remainder.len() < bytes.len() {
-            return Err(core::fmt::Error);
+            return Err(fmt::Error);
         }
         // Make the two slices the same length
         let remainder = &mut remainder[..bytes.len()];

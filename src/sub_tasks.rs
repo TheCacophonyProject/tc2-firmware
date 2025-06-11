@@ -106,7 +106,7 @@ pub fn maybe_offload_events(
             );
         }
     }
-    return success;
+    success
 }
 
 pub fn offload_flash_storage_and_events(
