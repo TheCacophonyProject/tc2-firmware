@@ -188,7 +188,7 @@ fn is_frame_telemetry_is_valid(
         }
         if telemetry_revision_stable.1 > 2 {
             info!(
-                "Got stable telemetry revision (core 1) {:?}",
+                "Got stable telemetry revision (core 0) {:?}",
                 frame_telemetry.revision
             );
         }

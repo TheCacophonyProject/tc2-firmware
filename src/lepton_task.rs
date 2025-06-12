@@ -224,7 +224,7 @@ pub fn frame_acquisition_loop(
                                     }
                                     if times_telemetry_revision_stable > 2 {
                                         info!(
-                                            "Got stable telemetry revision {:?}",
+                                            "Got stable telemetry revision (core 1) {:?}",
                                             telemetry.revision
                                         );
                                     }

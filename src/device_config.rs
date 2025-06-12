@@ -3,7 +3,7 @@ use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
-use defmt::{info, Format, Formatter};
+use defmt::{Format, Formatter};
 use embedded_io::Read;
 use pcf8563::DateTime;
 

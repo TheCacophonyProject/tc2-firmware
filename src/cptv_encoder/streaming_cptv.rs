@@ -9,7 +9,7 @@ use crate::FIRMWARE_VERSION;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
 use core::ops::{Index, IndexMut};
-use defmt::{info, Format};
+use defmt::{info, warn, Format};
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Copy, Clone, Format)]
@@ -220,7 +220,7 @@ impl FrameData {
     }
 }
 
-fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u16, u16) {
+fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u16, u16, i32) {
     // Here we are doing *intra-frame* delta encoding between this frame `curr` and the previous
     // frame if present.  If there was no previous frame, `prev_frame` will be all zeros.
 
@@ -229,18 +229,28 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u16, u16) {
 
     // IDEA: Images from lepton often seem to have vertical noise bands that are similar
     // - so rotating the image by 90 degrees before compressing could be a win.
-    let mut prev_val = 0;
+
     let mut max_value = u16::MIN;
     let mut min_value = u16::MAX;
+
+    let snake_iter = (0..FRAME_WIDTH)
+        .chain((0..FRAME_WIDTH).rev())
+        .cycle()
+        .take(FRAME_WIDTH * FRAME_HEIGHT)
+        .enumerate()
+        .map(|(index, i)| (index / FRAME_WIDTH) * FRAME_WIDTH + i);
+
     // NOTE: We can ignore the first pixel when working out our range, since that is always a literal u32
-    // FIXME: Double check that this is actually a delta encoded pixel, not a raw one.
     let max = i16::MAX as i32;
     let min = i16::MIN as i32;
-    for (&curr_px, prev_px) in curr.iter().zip(prev_frame.iter_mut()) {
+    let initial_value = curr[0] as i32 - prev_frame[0] as i32;
+    let mut prev_val = 0;
+    for offset in snake_iter {
+        let curr_px = unsafe { *curr.get_unchecked(offset) };
+        let prev_px = unsafe { prev_frame.get_unchecked_mut(offset) };
         max_value = max_value.max(curr_px);
         min_value = min_value.min(curr_px);
         let val = curr_px as i32 - *prev_px as i32;
-
         // The actual delta is a delta of deltas.  So first intra-frame, then iter-pixel.
         let delta = val - prev_val;
         debug_assert!(
@@ -266,7 +276,7 @@ fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u16, u16) {
         *prev_px = delta as u16;
         prev_val = val;
     }
-    (min_value, max_value)
+    (min_value, max_value, initial_value)
 }
 struct FieldIterator {
     state: [u8; 30], // TODO: What is the actual high-water mark for field sizes?
@@ -495,7 +505,7 @@ impl<'a> CptvStream<'a> {
         frame_telemetry: &Telemetry,
         flash_storage: &mut OnboardFlash,
     ) {
-        let (min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
+        let (min_value, max_value, initial_px) = delta_encode_frame_data(prev_frame, current_frame);
         let delta_encoded_frame = prev_frame;
 
         // We need to work out what the max delta range is and how many bits we can pack this into.
@@ -514,10 +524,12 @@ impl<'a> CptvStream<'a> {
         //  ┌---------┘
         //  └----------
         // ... etc
+        let i8_min = i8::MIN as i16;
+        let i8_max = i8::MAX as i16;
         let bits_per_pixel = if delta_encoded_frame[1..]
             .iter()
             .map(|&x| x as i16)
-            .find(|&x| x < -127 || x > 127)
+            .find(|&x| x < i8_min || x > i8_max)
             .is_some()
         {
             16
@@ -553,21 +565,20 @@ impl<'a> CptvStream<'a> {
             .map(|(index, i)| (index / FRAME_WIDTH) * FRAME_WIDTH + i)
             .skip(1); // Skip the start pixel
 
-        // NOTE: Here we can insert the u32 start pixel at the beginning of each frame.
-        for byte in (delta_encoded_frame[0] as u32).to_le_bytes() {
+        // NOTE: Here we can insert the i32 start pixel at the beginning of each frame.
+        for byte in frame_header_iter.chain(initial_px.to_le_bytes()) {
             self.push_byte(byte, flash_storage);
         }
         if bits_per_pixel == 16 {
-            for offset in snake_iter {
-                let px = unsafe { *delta_encoded_frame.get_unchecked(offset) };
-                // Let's fix the error we made in the order of this
+            for px_offset in snake_iter {
+                let px = unsafe { *delta_encoded_frame.get_unchecked(px_offset) };
                 for byte in px.to_be_bytes() {
                     self.push_byte(byte, flash_storage);
                 }
             }
         } else {
-            for offset in snake_iter {
-                let px = unsafe { *delta_encoded_frame.get_unchecked(offset) };
+            for px_offset in snake_iter {
+                let px = unsafe { *delta_encoded_frame.get_unchecked(px_offset) };
                 self.push_byte(px as u8, flash_storage);
             }
         };
@@ -665,17 +676,7 @@ impl<'a> CptvStream<'a> {
         // now that we know the total frame count for the recording, and the min/max pixel values.
         self.init_gzip_stream(flash_storage, true);
         for byte in push_header_iterator(&self.cptv_header) {
-            self.total_uncompressed += 1;
-            self.crc_val = self.crc_val ^ 0xffffffff;
-            self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
-                ^ (self.crc_val >> 8);
-            self.crc_val = self.crc_val ^ 0xffffffff;
-            let entry = &self.huffman_table[byte as usize];
-            self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                _ = flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                self.cursor.flush_residual_bits();
-            }
+            self.push_byte(byte, flash_storage);
         }
         self.write_gzip_trailer(flash_storage, true);
     }
