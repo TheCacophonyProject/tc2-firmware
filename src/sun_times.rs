@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Timelike, Utc};
 #[allow(unused_imports)]
 use num_traits::real::Real; // Allows sin/cosine for suntimes
 const UNIX_EPOCH: JulianDate = JulianDate(2440587.5);
@@ -81,7 +81,7 @@ fn rem_euclid(lhs: f64, rhs: f64) -> f64 {
 /// println!("Sunrise: {}, Sunset: {}",times.0,times.1);
 /// ```
 pub fn sun_times(
-    date: NaiveDate,
+    date: DateTime<Utc>,
     latitude: f64,
     longitude: f64,
     elevation: f64,
@@ -89,12 +89,7 @@ pub fn sun_times(
     //see https://en.wikipedia.org/wiki/Sunrise_equation
 
     const ARGUMENT_OF_PERIHELION: f64 = 102.9372;
-
-    let julian_date = JulianDate::from(
-        date.and_hms_opt(0, 0, 0)?
-            .and_local_timezone(Utc)
-            .single()?,
-    );
+    let julian_date = JulianDate::from(date.with_hour(0)?.with_minute(0)?.with_second(0)?);
 
     //elevations below sea level will have minimal atmospheric refraction + the
     //calculation is broken below sea level, so treat negative elevations as being at sea level

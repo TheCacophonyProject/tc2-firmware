@@ -2,7 +2,7 @@ use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use defmt::{Format, Formatter};
 use embedded_io::Read;
 use pcf8563::DateTime;
@@ -97,8 +97,8 @@ impl DeviceConfigInner {
 
     pub fn time_is_in_recording_window(
         &self,
-        date_time_utc: &NaiveDateTime,
-        window: &Option<(NaiveDateTime, NaiveDateTime)>,
+        date_time_utc: &chrono::DateTime<Utc>,
+        window: &Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
     ) -> bool {
         if self.is_continuous_recorder() {
             // info!("Continuous recording mode enabled");
@@ -136,8 +136,8 @@ impl DeviceConfigInner {
 
     pub fn next_or_current_recording_window(
         &self,
-        now_utc: &NaiveDateTime,
-    ) -> (NaiveDateTime, NaiveDateTime) {
+        now_utc: &chrono::DateTime<Utc>,
+    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
 
@@ -152,47 +152,43 @@ impl DeviceConfigInner {
             let altitude = self.location_altitude;
             let yesterday_utc = *now_utc - Duration::days(1);
             let (_, yesterday_sunset) = sun_times(
-                yesterday_utc.date(),
+                yesterday_utc,
                 lat as f64,
                 lng as f64,
                 altitude.unwrap_or(0.0) as f64,
             )
             .unwrap();
-            let yesterday_sunset =
-                yesterday_sunset.naive_utc() + Duration::seconds(start_offset as i64);
+            let yesterday_sunset = yesterday_sunset + Duration::seconds(start_offset as i64);
             let (today_sunrise, today_sunset) = sun_times(
-                now_utc.date(),
+                *now_utc,
                 lat as f64,
                 lng as f64,
                 altitude.unwrap_or(0.0) as f64,
             )
             .unwrap();
-            let today_sunrise = today_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-            let today_sunset = today_sunset.naive_utc() + Duration::seconds(start_offset as i64);
+            let today_sunrise = today_sunrise + Duration::seconds(end_offset as i64);
+            let today_sunset = today_sunset + Duration::seconds(start_offset as i64);
             let tomorrow_utc = *now_utc + Duration::days(1);
             let (tomorrow_sunrise, tomorrow_sunset) = sun_times(
-                tomorrow_utc.date(),
+                tomorrow_utc,
                 lat as f64,
                 lng as f64,
                 altitude.unwrap_or(0.0) as f64,
             )
             .unwrap();
-            let tomorrow_sunrise =
-                tomorrow_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-            let tomorrow_sunset =
-                tomorrow_sunset.naive_utc() + Duration::seconds(start_offset as i64);
+            let tomorrow_sunrise = tomorrow_sunrise + Duration::seconds(end_offset as i64);
+            let tomorrow_sunset = tomorrow_sunset + Duration::seconds(start_offset as i64);
 
             if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
                 let two_days_from_now_utc = *now_utc + Duration::days(2);
                 let (two_days_sunrise, _) = sun_times(
-                    two_days_from_now_utc.date(),
+                    two_days_from_now_utc,
                     lat as f64,
                     lng as f64,
                     altitude.unwrap_or(0.0) as f64,
                 )
                 .unwrap();
-                let two_days_sunrise =
-                    two_days_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
+                let two_days_sunrise = two_days_sunrise + Duration::seconds(end_offset as i64);
                 (Some(tomorrow_sunset), Some(two_days_sunrise))
             } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
@@ -210,18 +206,20 @@ impl DeviceConfigInner {
         let mut start_time = if !is_absolute_start {
             window_start.unwrap()
         } else {
-            NaiveDateTime::new(
-                now_utc.date(),
-                NaiveTime::from_num_seconds_from_midnight_opt(start_offset as u32, 0).unwrap(),
-            )
+            now_utc
+                .with_time(
+                    NaiveTime::from_num_seconds_from_midnight_opt(start_offset as u32, 0).unwrap(),
+                )
+                .unwrap()
         };
         let mut end_time = if !is_absolute_end {
             window_end.unwrap()
         } else {
-            NaiveDateTime::new(
-                now_utc.date(),
-                NaiveTime::from_num_seconds_from_midnight_opt(end_offset as u32, 0).unwrap(),
-            )
+            now_utc
+                .with_time(
+                    NaiveTime::from_num_seconds_from_midnight_opt(end_offset as u32, 0).unwrap(),
+                )
+                .unwrap()
         };
 
         if is_absolute_start || is_absolute_end {
@@ -410,7 +408,10 @@ impl DeviceConfig {
         self.config_inner.device_name.as_bytes()
     }
 
-    pub fn next_recording_window_start(&self, now_utc: &NaiveDateTime) -> NaiveDateTime {
+    pub fn next_recording_window_start(
+        &self,
+        now_utc: &chrono::DateTime<Utc>,
+    ) -> chrono::DateTime<Utc> {
         self.next_or_current_recording_window(now_utc).0
     }
 
@@ -420,16 +421,16 @@ impl DeviceConfig {
 
     pub fn next_or_current_recording_window(
         &self,
-        now_utc: &NaiveDateTime,
-    ) -> (NaiveDateTime, NaiveDateTime) {
+        now_utc: &chrono::DateTime<Utc>,
+    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
         self.config_inner.next_or_current_recording_window(now_utc)
     }
 
-    pub fn time_is_in_daylight(&self, date_time_utc: &NaiveDateTime) -> bool {
+    pub fn time_is_in_daylight(&self, date_time_utc: &chrono::DateTime<Utc>) -> bool {
         let (lat, lng) = self.config_inner.location;
         let altitude = self.config_inner.location_altitude;
         let (sunrise, sunset) = sun_times(
-            date_time_utc.date(),
+            *date_time_utc,
             lat as f64,
             lng as f64,
             altitude.unwrap_or(0.0) as f64,
@@ -440,15 +441,15 @@ impl DeviceConfig {
 
     pub fn time_is_in_recording_window(
         &self,
-        date_time_utc: &NaiveDateTime,
-        window: &Option<(NaiveDateTime, NaiveDateTime)>,
+        date_time_utc: &chrono::DateTime<Utc>,
+        window: &Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
     ) -> bool {
         self.config_inner
             .time_is_in_recording_window(date_time_utc, window)
     }
 }
 
-pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
+pub fn get_datetime_utc(datetime: DateTime) -> chrono::DateTime<Utc> {
     let naive_date = NaiveDate::from_ymd_opt(
         2000 + datetime.year as i32,
         datetime.month as u32,
@@ -474,5 +475,5 @@ pub fn get_naive_datetime(datetime: DateTime) -> NaiveDateTime {
         );
     }
     let naive_datetime = NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());
-    naive_datetime
+    naive_datetime.and_utc()
 }

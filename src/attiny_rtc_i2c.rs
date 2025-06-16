@@ -1,10 +1,10 @@
 use crate::bsp::pac::I2C1;
 use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
 use byteorder::{BigEndian, ByteOrder};
-use chrono::{NaiveDateTime, Timelike};
+use chrono::{Timelike, Utc};
 use cortex_m::delay::Delay;
 use crc::{Algorithm, Crc};
-use defmt::{error, info, warn, Format};
+use defmt::{error, info, panic, warn, Format};
 use embedded_hal::digital::v2::InputPin;
 use embedded_hal::prelude::{
     _embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_i2c_WriteRead,
@@ -720,7 +720,7 @@ impl SharedI2C {
     }
     pub fn set_wakeup_alarm(
         &mut self,
-        datetime_utc: &NaiveDateTime,
+        datetime_utc: &chrono::DateTime<Utc>,
         delay: &mut Delay,
     ) -> Result<(), &str> {
         let wake_hour = datetime_utc.time().hour();

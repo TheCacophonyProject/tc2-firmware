@@ -18,7 +18,7 @@ use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
 use rp2040_hal::{gpio, Timer};
 
-use chrono::{Datelike, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
 use embedded_hal::prelude::{
     _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
     _embedded_hal_watchdog_WatchdogEnable,
@@ -125,7 +125,7 @@ pub fn audio_task(
     }
 
     let mut reschedule = false;
-    let mut alarm_date_time: Option<NaiveDateTime> = None;
+    let mut alarm_date_time: Option<DateTime<Utc>> = None;
 
     if !user_recording_requested {
         //this isn't reliable so use alarm stored in flash
@@ -204,13 +204,7 @@ pub fn audio_task(
             _ => {}
         }
         if !should_wake {
-            should_wake = should_offload_audio_recordings(
-                &mut flash_storage,
-                &mut event_logger,
-                &mut delay,
-                &mut shared_i2c,
-                synced_date_time.date_time_utc,
-            );
+            should_wake = should_offload_audio_recordings(&mut flash_storage, &mut event_logger);
             if should_wake {
                 event_logger.log_event(
                     LoggerEvent::new(
@@ -265,7 +259,7 @@ pub fn audio_task(
                     event_logger.log_event(
                         LoggerEvent::new(
                             LoggerEventKind::Rp2040MissedAudioAlarm(
-                                alarm.and_utc().timestamp_micros() as u64,
+                                alarm.timestamp_micros() as u64,
                             ),
                             synced_date_time.get_timestamp_micros(&timer),
                         ),
@@ -593,27 +587,26 @@ pub fn schedule_audio_rec(
     timer: &mut Timer,
     event_logger: &mut EventLogger,
     device_config: &DeviceConfig,
-) -> Result<NaiveDateTime, ()> {
+) -> Result<DateTime<Utc>, ()> {
     if let Err(err) = i2c.disable_alarm(delay) {
         error!("Failed to disable alarm");
         return Err(());
     }
-    let mut wakeup: NaiveDateTime;
+    let mut wakeup: DateTime<Utc>;
     let seed: u64;
     let current_time = synced_date_time.get_adjusted_dt(timer);
 
     if device_config.config().audio_seed > 0 {
-        wakeup = NaiveDateTime::new(
-            current_time.date(),
-            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-        );
+        wakeup = current_time
+            .with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+            .unwrap();
 
         seed = u64::wrapping_add(
-            wakeup.and_utc().timestamp_millis() as u64,
+            wakeup.timestamp_millis() as u64,
             device_config.config().audio_seed as u64,
         );
     } else {
-        seed = synced_date_time.date_time_utc.and_utc().timestamp() as u64;
+        seed = synced_date_time.date_time_utc.timestamp() as u64;
         wakeup = current_time;
     };
     let mut rng = RNG::<WyRand, u16>::new(seed);
@@ -684,7 +677,7 @@ pub fn schedule_audio_rec(
             if alarm_enabled {
                 event_logger.log_event(
                     LoggerEvent::new(
-                        LoggerEventKind::SetAlarm(wakeup.and_utc().timestamp_micros() as u64),
+                        LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
                         synced_date_time.get_timestamp_micros(&timer),
                     ),
                     flash_storage,
@@ -703,9 +696,6 @@ pub fn schedule_audio_rec(
 fn should_offload_audio_recordings(
     flash_storage: &mut OnboardFlash,
     event_logger: &mut EventLogger,
-    delay: &mut Delay,
-    i2c: &mut SharedI2C,
-    now: NaiveDateTime,
 ) -> bool {
     let has_files = flash_storage.has_files_to_offload() || event_logger.is_nearly_full();
     if !has_files {
@@ -732,8 +722,8 @@ fn should_offload_audio_recordings(
 }
 
 pub fn check_alarm_still_valid_with_thermal_window(
-    alarm: &NaiveDateTime,
-    now: &NaiveDateTime,
+    alarm: &DateTime<Utc>,
+    now: &DateTime<Utc>,
     device_config: &DeviceConfig,
 ) -> bool {
     // config has changed so check if not in audio only that alarm is still going to trigger on rec window start

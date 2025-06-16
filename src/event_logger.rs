@@ -3,7 +3,7 @@
 //  be in 32bit seconds past a given epoch (let's say Jan 1 2023).  Is a 1 second granularity enough?
 use crate::onboard_flash::OnboardFlash;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
@@ -147,8 +147,8 @@ impl LoggerEvent {
         LoggerEvent { event, timestamp }
     }
 
-    pub fn timestamp(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_micros(self.timestamp as i64)
+    pub fn timestamp(&self) -> Option<DateTime<Utc>> {
+        DateTime::from_timestamp_micros(self.timestamp as i64)
     }
 }
 pub const MAX_EVENTS_IN_LOGGER: usize = 1024;
@@ -361,20 +361,20 @@ pub fn clear_audio_alarm(flash_storage: &mut OnboardFlash) {
 //bytes 1-9 is millisecond timestamp of the alarm
 pub fn write_audio_alarm(
     flash_storage: &mut OnboardFlash,
-    alarm_dt: NaiveDateTime,
+    alarm_dt: DateTime<Utc>,
     mode: AlarmMode,
 ) {
     let _ = flash_storage.erase_block(AUDIO_BLOCK);
     let page_offset = 0;
     let mut event_data = [0u8; 18];
     event_data[0] = mode as u8;
-    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.and_utc().timestamp_millis());
+    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.timestamp_millis());
     flash_storage.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset as u16);
 }
 
 pub fn get_audio_alarm(
     flash_storage: &mut OnboardFlash,
-) -> (Result<AlarmMode, ()>, Option<NaiveDateTime>) {
+) -> (Result<AlarmMode, ()>, Option<DateTime<Utc>>) {
     let page_offset = 0;
     if flash_storage.read_page(AUDIO_BLOCK, AUDIO_PAGE).is_ok() {
         let event = flash_storage
@@ -382,7 +382,7 @@ pub fn get_audio_alarm(
         if event[0..9].iter().all(|x: &u8| *x == u8::MAX) {
             return (Err(()), None);
         }
-        let dt = NaiveDateTime::from_timestamp_millis(LittleEndian::read_i64(&event[1..9]));
+        let dt = DateTime::from_timestamp_millis(LittleEndian::read_i64(&event[1..9]));
         (AlarmMode::try_from(event[0]), dt)
     } else {
         (Err(()), None)

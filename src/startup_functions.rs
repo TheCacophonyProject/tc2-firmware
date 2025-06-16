@@ -1,6 +1,6 @@
 use crate::attiny_rtc_i2c::{tc2_agent_state, SharedI2C};
 use crate::bsp::pac::Peripherals;
-use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use crate::device_config::{get_datetime_utc, AudioMode, DeviceConfig};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::frame_processing::{wake_raspberry_pi, SyncedDateTime};
@@ -111,7 +111,7 @@ pub fn get_synced_time(
         match shared_i2c.get_datetime(delay) {
             Ok(now) => {
                 info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
-                synced_date_time.set(get_naive_datetime(now), &timer);
+                synced_date_time.set(get_datetime_utc(now), &timer);
                 break;
             }
             Err(e) => {

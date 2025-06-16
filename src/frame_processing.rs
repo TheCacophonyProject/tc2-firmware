@@ -7,7 +7,7 @@ use crate::bsp::pac::Peripherals;
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::device_config::{get_naive_datetime, AudioMode, DeviceConfig};
+use crate::device_config::{get_datetime_utc, AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, EventLogger, LoggerEvent, LoggerEventKind, WakeReason,
 };
@@ -18,7 +18,7 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::OnboardFlash;
-use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Timelike, Utc};
 
 use core::ops::Add;
 use cortex_m::asm::nop;
@@ -213,14 +213,14 @@ fn is_frame_telemetry_is_valid(
 
 // NOTE: Important: If we start using dormant states again, the timer will be incorrect
 pub struct SyncedDateTime {
-    pub date_time_utc: NaiveDateTime,
+    pub date_time_utc: DateTime<Utc>,
     pub timer_offset: Instant,
 }
 
 impl Default for SyncedDateTime {
     fn default() -> Self {
         SyncedDateTime {
-            date_time_utc: NaiveDateTime::default(),
+            date_time_utc: DateTime::default(),
             timer_offset: Instant::from_ticks(0),
         }
     }
@@ -229,26 +229,21 @@ impl Default for SyncedDateTime {
 impl SyncedDateTime {
     pub fn get_timestamp_micros(&self, timer: &Timer) -> u64 {
         (self.date_time_utc
-            + chrono::Duration::microseconds(
-                (timer.get_counter() - self.timer_offset).to_micros() as i64
-            ))
-        .and_utc()
+            + Duration::microseconds((timer.get_counter() - self.timer_offset).to_micros() as i64))
         .timestamp_micros() as u64
     }
 
-    pub fn get_adjusted_dt(&self, timer: &Timer) -> NaiveDateTime {
+    pub fn get_adjusted_dt(&self, timer: &Timer) -> DateTime<Utc> {
         self.date_time_utc
-            + chrono::Duration::microseconds(
-                (timer.get_counter() - self.timer_offset).to_micros() as i64
-            )
+            + Duration::microseconds((timer.get_counter() - self.timer_offset).to_micros() as i64)
     }
 
-    pub fn set(&mut self, date_time: NaiveDateTime, timer: &Timer) {
+    pub fn set(&mut self, date_time: DateTime<Utc>, timer: &Timer) {
         self.date_time_utc = date_time;
         self.timer_offset = timer.get_counter();
     }
 
-    pub fn new(date_time: NaiveDateTime, timer: &Timer) -> SyncedDateTime {
+    pub fn new(date_time: DateTime<Utc>, timer: &Timer) -> SyncedDateTime {
         SyncedDateTime {
             date_time_utc: date_time,
             timer_offset: timer.get_counter(),
@@ -314,7 +309,7 @@ pub fn thermal_motion_task(
     let _ = shared_i2c
         .set_recording_flag(&mut delay, false)
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-    let startup_date_time_utc: NaiveDateTime = synced_date_time.date_time_utc.clone();
+    let startup_date_time_utc: DateTime<Utc> = synced_date_time.date_time_utc.clone();
 
     // This is the 'raw' frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
@@ -368,7 +363,7 @@ pub fn thermal_motion_task(
 
     let record_audio: bool;
     let mut audio_pending: bool = false;
-    let mut next_audio_alarm: Option<NaiveDateTime> = None;
+    let mut next_audio_alarm: Option<DateTime<Utc>> = None;
 
     match device_config.config().audio_mode {
         AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
@@ -1105,7 +1100,7 @@ pub fn thermal_motion_task(
             let sync_rtc_start_real = timer.get_counter();
 
             match shared_i2c.get_datetime(&mut delay) {
-                Ok(now) => synced_date_time.set(get_naive_datetime(now), &timer),
+                Ok(now) => synced_date_time.set(get_datetime_utc(now), &timer),
                 Err(err_str) => {
                     event_logger.log_event(
                         LoggerEvent::new(
@@ -1240,8 +1235,7 @@ pub fn thermal_motion_task(
                                 event_logger.log_event(
                                     LoggerEvent::new(
                                         LoggerEventKind::SetAlarm(
-                                            next_recording_window_start.and_utc().timestamp_micros()
-                                                as u64,
+                                            next_recording_window_start.timestamp_micros() as u64,
                                         ),
                                         synced_date_time.get_timestamp_micros(&timer),
                                     ),
