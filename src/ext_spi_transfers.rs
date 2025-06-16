@@ -3,8 +3,6 @@ use crate::bsp::pac;
 use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
 use crate::onboard_flash::extend_lifetime;
 
-use crate::utils::u8_slice_to_u32;
-
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
@@ -287,7 +285,7 @@ impl ExtSpiTransfers {
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
-                    unsafe { u8_slice_to_u32(extend_lifetime(&payload[..])) },
+                    bytemuck::cast_slice(unsafe { extend_lifetime(&payload[..]) }),
                     self.pio_tx.take().unwrap(),
                 );
                 config.bswap(true); // DMA peripheral does our swizzling for us.

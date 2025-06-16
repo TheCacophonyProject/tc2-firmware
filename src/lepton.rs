@@ -21,7 +21,7 @@ use crate::bsp::hal::{Spi, I2C as I2CInterface};
 use crate::bsp::pac::{RESETS, SPI0};
 use crate::bsp::{hal::gpio::Pin, pac::I2C0};
 use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
-use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
+use crate::utils::any_as_u8_slice;
 
 pub enum LeptonCommandType {
     Get = 0b0000_0000_0000_00_00,
@@ -648,7 +648,7 @@ impl LeptonModule {
 
     pub fn disable_automatic_ffc(&mut self) -> Result<bool, LeptonError> {
         let ffc_struct = FFCState::default();
-        let ffc_struct_bytes = unsafe { u8_slice_to_u16(&any_as_u8_slice(&ffc_struct)) };
+        let ffc_struct_bytes = bytemuck::cast_slice(unsafe { any_as_u8_slice(&ffc_struct) });
         // Enable telemetry
         self.set_attribute(
             lepton_command(

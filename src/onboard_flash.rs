@@ -925,10 +925,11 @@ impl OnboardFlash {
             // that the file spans as temporarily corrupt, so this file doesn't get read and
             // send to the raspberry pi
             //Err(&"unrecoverable data corruption error")
-            warn!(
-                "unrecoverable data corruption error at {}:{} - should relocate? {}",
-                block, page, should_relocate
-            );
+
+            // warn!(
+            //     "unrecoverable data corruption error at {}:{} - should relocate? {}",
+            //     block, page, should_relocate
+            // );
             Ok(())
         }
     }

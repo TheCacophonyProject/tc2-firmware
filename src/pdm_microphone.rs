@@ -1,7 +1,6 @@
 use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{PIO1, SPI1};
 use crate::frame_processing::SyncedDateTime;
-use crate::utils::{u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16};
 use crate::{bsp, onboard_flash};
 use defmt::{info, warn};
 use embedded_hal::blocking::delay::DelayMs;
@@ -289,7 +288,7 @@ impl PdmMicrophone {
                 cycle += 1;
                 if cycle < WARMUP_CYCLES {
                     // get the values initialized so the start of the recording is nice
-                    let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                    let payload = bytemuck::cast_slice(rx_buf);
                     filter.filter(payload, VOLUME, None);
 
                     if cycle % 200 == 0 {
@@ -301,7 +300,7 @@ impl PdmMicrophone {
                         start = timer.get_counter();
                     }
                     current_recording.samples_taken += rx_buf.len() * 32;
-                    let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
+                    let payload = bytemuck::cast_slice(rx_buf);
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
                     filter.filter(&payload, VOLUME, Some(out));
@@ -397,11 +396,11 @@ impl AudioBuffer {
         }
     }
     pub fn init(&mut self, timestamp: u64, samplerate: u16) {
-        let time_data = unsafe { u64_to_u16(&timestamp) };
+        let time_data = bytemuck::cast_ref::<u64, [u16; 4]>(&timestamp);
         let mut header: [u16; 4 + 1 + 1] = [0u16; 4 + 1 + 1];
 
         header[0] = AUDIO_SHEBANG;
-        header[1..1 + time_data.len()].copy_from_slice(&time_data);
+        header[1..1 + time_data.len()].copy_from_slice(time_data);
 
         header[time_data.len() + 1] = samplerate;
         self.data[PAGE_COMMAND_ADDRESS..header.len() + PAGE_COMMAND_ADDRESS]
@@ -428,6 +427,6 @@ impl AudioBuffer {
     }
 
     pub fn as_u8_slice(&mut self) -> &mut [u8] {
-        unsafe { u16_slice_to_u8_mut(&mut self.data) }
+        bytemuck::cast_slice_mut(&mut self.data)
     }
 }

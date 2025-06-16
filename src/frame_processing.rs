@@ -18,7 +18,6 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER
 use crate::lepton::{read_telemetry, FFCStatus, Telemetry};
 use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::OnboardFlash;
-use crate::utils::u8_slice_to_u16;
 use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
 
 use core::ops::Add;
@@ -736,7 +735,7 @@ pub fn thermal_motion_task(
 
         // Telemetry skipped
         let current_raw_frame =
-            unsafe { &u8_slice_to_u16(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT] };
+            &bytemuck::cast_slice(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT];
 
         let frame_num = frame_telemetry.frame_num;
         let too_close_to_ffc_event = frame_telemetry.msec_since_last_ffc < 20000

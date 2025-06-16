@@ -3,7 +3,6 @@ use crate::frame_processing::{
     Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT,
 };
 use crate::lepton::{read_telemetry, FFCStatus, LeptonModule};
-use crate::utils::u16_slice_to_u8;
 use crate::{bsp, FFC_INTERVAL_MS};
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
@@ -178,8 +177,7 @@ pub fn frame_acquisition_loop(
                     if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
                         valid_frame_current_segment_num = 1;
                     }
-                    let telemetry =
-                        read_telemetry(unsafe { u16_slice_to_u8(&scanline_buffer[2..]) });
+                    let telemetry = read_telemetry(bytemuck::cast_slice(&scanline_buffer[2..]));
                     unverified_frame_counter = telemetry.frame_num;
 
                     if got_sync && valid_frame_current_segment_num == 1 {
