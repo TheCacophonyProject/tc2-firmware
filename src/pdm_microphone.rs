@@ -1,7 +1,7 @@
 use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{PIO1, SPI1};
 use crate::frame_processing::SyncedDateTime;
-use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16};
+use crate::utils::{u16_slice_to_u8_mut, u32_slice_to_u8, u64_to_u16};
 use crate::{bsp, onboard_flash};
 use defmt::{info, warn};
 use embedded_hal::blocking::delay::DelayMs;
@@ -25,7 +25,7 @@ struct RecordingStatus {
     total_samples: usize,
     samples_taken: usize,
 }
-use crate::onboard_flash::OnboardFlash;
+use crate::onboard_flash::{OnboardFlash, FLASH_SPI_USER_PAYLOAD_SIZE};
 use onboard_flash::extend_lifetime_generic_mut;
 
 use crc::{Crc, CRC_16_XMODEM};
@@ -244,7 +244,7 @@ impl PdmMicrophone {
         let mut recorded_successfully = false;
         // Swap our buffers?
         let use_async: bool = false;
-        let mut flash_payload_buf = [0x42u8; 2115];
+        let mut flash_payload_buf = [0x42u8; FLASH_SPI_USER_PAYLOAD_SIZE];
         if use_async {
             flash_storage.payload_buffer =
                 Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
@@ -290,7 +290,7 @@ impl PdmMicrophone {
                 if cycle < WARMUP_CYCLES {
                     // get the values initialized so the start of the recording is nice
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
-                    filter.filter(payload, VOLUME, &mut [0u16; 0], false);
+                    filter.filter(payload, VOLUME, None);
 
                     if cycle % 200 == 0 {
                         // shouldn't be needed but just incase we increase warmup cycles
@@ -304,7 +304,7 @@ impl PdmMicrophone {
                     let payload = unsafe { &u32_slice_to_u8(rx_buf.as_mut()) };
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
-                    filter.filter(&payload, VOLUME, out, true);
+                    filter.filter(&payload, VOLUME, Some(out));
                     if audio_buffer.is_full()
                         && (!current_recording.is_complete() || leftover.len() > 0)
                     {
@@ -336,7 +336,7 @@ impl PdmMicrophone {
                         if leftover.len() > 0 {
                             let out = audio_buffer.slice_for(leftover.len());
 
-                            filter.filter(leftover, VOLUME, out, true);
+                            filter.filter(leftover, VOLUME, Some(out));
                         }
                         // break;
                     }
@@ -399,7 +399,6 @@ impl AudioBuffer {
     pub fn init(&mut self, timestamp: u64, samplerate: u16) {
         let time_data = unsafe { u64_to_u16(&timestamp) };
         let mut header: [u16; 4 + 1 + 1] = [0u16; 4 + 1 + 1];
-        let u8_time = unsafe { u16_slice_to_u8(time_data) };
 
         header[0] = AUDIO_SHEBANG;
         header[1..1 + time_data.len()].copy_from_slice(&time_data);
@@ -429,6 +428,6 @@ impl AudioBuffer {
     }
 
     pub fn as_u8_slice(&mut self) -> &mut [u8] {
-        unsafe { u16_slice_to_u8_mut(&mut self.data[..]) }
+        unsafe { u16_slice_to_u8_mut(&mut self.data) }
     }
 }

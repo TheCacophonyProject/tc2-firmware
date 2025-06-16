@@ -9,7 +9,7 @@ use crate::FIRMWARE_VERSION;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
 use core::ops::{Index, IndexMut};
-use defmt::{info, warn, Format};
+use defmt::{info, Format};
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Copy, Clone, Format)]
@@ -557,28 +557,29 @@ impl<'a> CptvStream<'a> {
             );
         }
 
-        let snake_iter = (0..FRAME_WIDTH)
-            .chain((0..FRAME_WIDTH).rev())
-            .cycle()
-            .take(FRAME_WIDTH * FRAME_HEIGHT)
-            .enumerate()
-            .map(|(index, i)| (index / FRAME_WIDTH) * FRAME_WIDTH + i)
-            .skip(1); // Skip the start pixel
-
+        let snake_iter = delta_encoded_frame
+            .chunks_exact(FRAME_WIDTH)
+            .step_by(2)
+            .zip(
+                delta_encoded_frame
+                    .chunks_exact(FRAME_WIDTH)
+                    .skip(1)
+                    .step_by(2),
+            )
+            .flat_map(|(even_row, odd_row)| even_row.iter().chain(odd_row.iter().rev()))
+            .skip(1);
         // NOTE: Here we can insert the i32 start pixel at the beginning of each frame.
         for byte in frame_header_iter.chain(initial_px.to_le_bytes()) {
             self.push_byte(byte, flash_storage);
         }
         if bits_per_pixel == 16 {
-            for px_offset in snake_iter {
-                let px = unsafe { *delta_encoded_frame.get_unchecked(px_offset) };
+            for px in snake_iter {
                 for byte in px.to_be_bytes() {
                     self.push_byte(byte, flash_storage);
                 }
             }
         } else {
-            for px_offset in snake_iter {
-                let px = unsafe { *delta_encoded_frame.get_unchecked(px_offset) };
+            for &px in snake_iter {
                 self.push_byte(px as u8, flash_storage);
             }
         };

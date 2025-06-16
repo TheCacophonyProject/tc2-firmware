@@ -627,17 +627,13 @@ pub fn schedule_audio_rec(
     // if a seed is set always start alarm from 0am to keep consistent accross devices.So  will need to generate numbers until alarm is valid
     while wakeup <= current_time {
         let r = rng.generate();
-        let mut wake_in;
-
-        if r <= short_chance {
-            wake_in = (short_pause + (r as u64 * short_window) / short_chance as u64) as u64;
+        let wake_in = if DEV_MODE {
+            120
+        } else if r <= short_chance {
+            short_pause + (r as u64 * short_window) / short_chance as u64
         } else {
-            wake_in = (long_pause + (r as u64 * long_window) / r_max as u64) as u64;
-        }
-
-        if DEV_MODE {
-            wake_in = 120;
-        }
+            long_pause + (r as u64 * long_window) / r_max as u64
+        };
         wakeup = wakeup + chrono::Duration::seconds(wake_in as i64);
     }
     info!(

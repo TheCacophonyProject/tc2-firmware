@@ -23,7 +23,7 @@ impl PDMFilter {
     pub fn new(sample_rate: u32) -> PDMFilter {
         PDMFilter {
             lut: [0u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
-            fs: sample_rate as u32,
+            fs: sample_rate,
             coef: [0, 0],
             sub_const: 0,
             old_out: 0,
@@ -96,7 +96,7 @@ impl PDMFilter {
         }
     }
 
-    pub fn filter(&mut self, data: &[u8], volume: u8, dataout: &mut [u16], saveout: bool) {
+    pub fn filter(&mut self, data: &[u8], volume: u8, mut dataout: Option<&mut [u16]>) {
         let mut old_out: i64 = self.old_out;
         let mut old_in: i64 = self.old_in;
         let mut oldz: i64 = self.oldz;
@@ -110,7 +110,7 @@ impl PDMFilter {
             let z2 = filter_table_mono_64(&self.lut, &data[index..index + 8], 2);
             let mut z: i64 = self.coef[1] as i64 + z2 as i64 - self.sub_const as i64;
 
-            self.coef[1] = self.coef[0] + z1 as u32;
+            self.coef[1] = self.coef[0] + z1;
 
             self.coef[0] = z0;
 
@@ -123,7 +123,7 @@ impl PDMFilter {
             z = round_div(z, self.div_const as i64);
             z = satural_lh(z, -32700_i64, 32700_i64);
 
-            if saveout {
+            if let Some(ref mut dataout) = dataout {
                 dataout[out_index] = z as u16;
                 out_index += 1;
             }

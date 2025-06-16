@@ -34,7 +34,9 @@ use crate::lepton::{init_lepton_module, LeptonPins};
 pub use crate::lepton_task::frame_acquisition_loop;
 use crate::onboard_flash::extend_lifetime_generic;
 use crate::onboard_flash::OnboardFlash;
-use crate::onboard_flash::{extend_lifetime_generic_mut, extend_lifetime_generic_mut_2};
+use crate::onboard_flash::{
+    extend_lifetime_generic_mut, extend_lifetime_generic_mut_with_const_size,
+};
 use crate::startup_functions::{get_device_config, get_synced_time, should_record_audio};
 use bsp::hal::watchdog::Watchdog;
 use bsp::hal::Timer;
@@ -93,7 +95,6 @@ fn main() -> ! {
         peripherals.ROSC,
         ROSC_TARGET_CLOCK_FREQ_HZ.Hz(),
     );
-    let clocks: &'static ClocksManager = unsafe { extend_lifetime_generic(&clocks) };
     let system_clock_freq = clocks.system_clock.freq().to_Hz();
 
     info!(
@@ -200,7 +201,7 @@ fn main() -> ! {
     watchdog.start(8388607.micros());
     info!("Enabled watchdog timer");
 
-    let mut timer: Timer = Timer::new(peripherals.TIMER, &mut peripherals.RESETS, clocks);
+    let mut timer: Timer = Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
     let mut event_logger = EventLogger::new(&mut flash_storage);
     let mut synced_date_time = get_synced_time(
         &mut shared_i2c,
@@ -272,7 +273,7 @@ fn main() -> ! {
             system_clock_freq,
             delay,
             timer,
-            clocks,
+            &clocks,
             rosc,
             alarm_woke_us,
             config,
@@ -308,7 +309,7 @@ pub fn thermal_code(
     // NOTE: We're allocating the stack memory for core1 on our core0 stack rather than using
     //  a `static` var so that the memory isn't used when we're in the audio mode code-path.
     let mut core1_stack: Stack<470> = Stack::new();
-    let mem = unsafe { extend_lifetime_generic_mut_2(&mut core1_stack.mem) };
+    let mem = unsafe { extend_lifetime_generic_mut_with_const_size(&mut core1_stack.mem) };
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();

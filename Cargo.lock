@@ -75,10 +75,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed570934406eb16438a4e976b1b4500774099c13b8cb96eec99f620f05090ddf"
 
 [[package]]
-name = "byte-slice-cast"
-version = "1.2.2"
+name = "bytemuck"
+version = "1.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3ac9f8b63eca6fd385229b3675f6cc0dc5c8a5c8a54a59d4f52ffd670d87b0c"
+checksum = "5c76a5792e44e4abe34d3abf15636779261d45a7450612059293d1d2cfc63422"
 
 [[package]]
 name = "byteorder"
@@ -573,12 +573,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "numtoa"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
-
-[[package]]
 name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -969,7 +963,7 @@ dependencies = [
 name = "tc2-firmware"
 version = "0.1.0"
 dependencies = [
- "byte-slice-cast",
+ "bytemuck",
  "byteorder",
  "chrono",
  "cortex-m",
@@ -982,7 +976,6 @@ dependencies = [
  "embedded-io",
  "fugit",
  "num-traits",
- "numtoa",
  "panic-probe",
  "pcf8563",
  "picorand",

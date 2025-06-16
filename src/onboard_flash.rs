@@ -32,6 +32,7 @@ use rp2040_hal::gpio::{
 use rp2040_hal::pac::RESETS;
 use rp2040_hal::spi::Enabled;
 use rp2040_hal::Spi;
+
 const WRITE_ENABLE: u8 = 0x06;
 
 const BLOCK_ERASE: u8 = 0xd8;
@@ -50,33 +51,12 @@ const FEATURE_STATUS: u8 = 0xc0;
 const FEATURE_CONFIG: u8 = 0xb0;
 const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const FEATURE_DIE_SELECT: u8 = 0xd0;
+const NUM_EVENT_BYTES: usize = 18;
 
+const TOTAL_FLASH_BLOCKS: isize = 2048;
 const CONFIG_BLOCKS: isize = 2;
-const NUM_RECORDING_BLOCKS: isize = 2048 - 5 - CONFIG_BLOCKS; // Leave 1 block between recordings and event logs
-
-struct FileAllocation {
-    offset: u32,
-    length: u32,
-    fat_index: u16,
-    // Do we want extra redundancy here?
-}
-
-// struct FlashSpi {
-//     pub spi: Spi<Enabled, SPI1, 8>,
-//     pub cs: Pin<Gpio9, FunctionSio<SioOutput>, PullDown>, // We manually control the CS pin
-//                                                 // _sck: Pin<SCK, FunctionSpi>,
-//                                                 // _miso: Pin<MISO, FunctionSpi>,
-//                                                 // _mosi: Pin<MOSI, FunctionSpi>,
-// }
-
-struct FileAllocationTable {
-    next_free_byte_offset: usize,
-    next_fat_index: usize,
-    //fat: [FileAllocation; 3000],
-}
-
-const FAT_VERSION: u32 = 1;
-const FILE_ADDRESS_START_OFFSET: usize = 1 << 16;
+// FIXME: What is 5 here?
+const NUM_RECORDING_BLOCKS: isize = TOTAL_FLASH_BLOCKS - 5 - CONFIG_BLOCKS; // Leave 1 block between recordings and event logs
 
 pub struct OnboardFlashStatus {
     inner: u8,
@@ -150,12 +130,28 @@ impl OnboardFlashStatus {
     }
 }
 
+pub const FLASH_SPI_HEADER: usize = 4;
+pub const FLASH_SPI_HEADER_SMALL: usize = 3;
+pub const FLASH_USER_PAGE_SIZE: usize = 2048;
+pub const FLASH_USER_METADATA_SIZE: usize = 64;
+pub const FLASH_METADATA_SIZE: usize = 128;
+
+// NOTE: To save some bytes, when reading back the flash page from cache via SPI we don't read the
+//  full page, just the user parts we care about
+pub const FLASH_SPI_TOTAL_PAYLOAD_SIZE: usize =
+    FLASH_SPI_HEADER + FLASH_USER_PAGE_SIZE + FLASH_METADATA_SIZE;
+pub const FLASH_SPI_USER_PAYLOAD_SIZE: usize =
+    FLASH_SPI_HEADER + FLASH_USER_PAGE_SIZE + FLASH_USER_METADATA_SIZE;
+
+pub type FlashSpiFullPayload = &'static mut [u8; FLASH_SPI_TOTAL_PAYLOAD_SIZE];
+pub type FlashSpiUserPayload = &'static mut [u8; FLASH_SPI_USER_PAYLOAD_SIZE];
+
 pub struct Page {
-    inner: Option<&'static mut [u8; 4 + 2048 + 128]>,
+    inner: Option<FlashSpiFullPayload>,
 }
 
 impl Page {
-    fn new(blank_page: &'static mut [u8; 4 + 2048 + 128]) -> Page {
+    fn new(blank_page: FlashSpiFullPayload) -> Page {
         // NOTE: We include 3 bytes at the beginning of the buffer for the command + column address
         blank_page[0] = CACHE_READ;
         blank_page[1] = 0;
@@ -167,11 +163,15 @@ impl Page {
     }
 
     fn cache_data(&self) -> &[u8] {
-        &self.inner.as_ref().unwrap()[4..]
+        &self.inner.as_ref().unwrap()[FLASH_SPI_HEADER..]
     }
 
     pub fn user_data(&self) -> &[u8] {
-        &self.cache_data()[0..2048]
+        &self.cache_data()[0..FLASH_USER_PAGE_SIZE]
+    }
+
+    pub fn metadata(&self) -> &[u8] {
+        &self.cache_data()[FLASH_USER_PAGE_SIZE..]
     }
 
     pub fn user_metadata_1(&self) -> &[u8] {
@@ -197,7 +197,7 @@ impl Page {
         self.bad_block_data().iter().find(|&x| *x == 0).is_some()
     }
 
-    // User metadata 1 contains 211 bytes
+    // User metadata 1 contains 32 bytes total
     // [0] = set to zero if page is used.
     // [1] = set to zero if this is the *last* page for a file.
     // [2, 3] = length of page used as little-endian u16
@@ -248,7 +248,7 @@ impl Page {
         &mut self.inner.as_mut().unwrap()[..]
     }
 
-    fn take(&mut self) -> &'static mut [u8; 4 + 2048 + 128] {
+    fn take(&mut self) -> FlashSpiFullPayload {
         self.inner.take().unwrap()
     }
 }
@@ -265,25 +265,15 @@ pub unsafe fn extend_lifetime_generic_mut<'b, T>(r: &'b mut T) -> &'static mut T
     mem::transmute::<&'b mut T, &'static mut T>(r)
 }
 
-pub unsafe fn extend_lifetime_generic_mut_2<'b, T, const SIZE: usize>(
+pub unsafe fn extend_lifetime_generic_mut_with_const_size<'b, T, const SIZE: usize>(
     r: &'b mut [T; SIZE],
 ) -> &'static mut [T; SIZE] {
     mem::transmute::<&'b mut [T; SIZE], &'static mut [T; SIZE]>(r)
 }
 
-// pub unsafe fn extend_lifetime_a<'b>(
-//     r: &'b Mutex<RefCell<[FrameSeg; 4]>>,
-// ) -> &'static Mutex<RefCell<[FrameSeg; 4]>> {
-//     mem::transmute::<&'b Mutex<RefCell<[FrameSeg; 4]>>, &'static Mutex<RefCell<[FrameSeg; 4]>>>(r)
-// }
-
 pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
     mem::transmute::<&'b mut [u8], &'static mut [u8]>(r)
 }
-
-// pub unsafe fn extend_lifetime_mut<'b, T>(r: &'b mut T) -> &'static mut T {
-//     mem::transmute::<&'b mut T, &'static mut T>(r)
-// }
 
 pub struct OnboardFlash {
     pub spi: Option<
@@ -313,7 +303,7 @@ pub struct OnboardFlash {
     dma_channel_1: Option<Channel<CH1>>,
     dma_channel_2: Option<Channel<CH2>>,
     record_to_flash: bool,
-    pub payload_buffer: Option<&'static mut [u8; 2115]>,
+    pub payload_buffer: Option<FlashSpiUserPayload>,
     pub file_start_block_index: Option<u16>,
     //could use same block for both but would have to write config every audio change and vice versa
     pub config_block: Option<isize>,
@@ -330,12 +320,12 @@ impl OnboardFlash {
         mosi: Pin<Gpio11, FunctionNull, PullNone>,
         clk: Pin<Gpio10, FunctionNull, PullNone>,
         miso: Pin<Gpio8, FunctionNull, PullNone>,
-        flash_page_buf: &'static mut [u8; 4 + 2048 + 128],
-        flash_page_buf_2: &'static mut [u8; 4 + 2048 + 128],
+        flash_page_buf: FlashSpiFullPayload,
+        flash_page_buf_2: FlashSpiFullPayload,
         dma_channel_1: Channel<CH1>,
         dma_channel_2: Channel<CH2>,
         should_record: bool,
-        payload_buffer: Option<&'static mut [u8; 2115]>,
+        payload_buffer: Option<FlashSpiUserPayload>,
     ) -> OnboardFlash {
         OnboardFlash {
             cs,
@@ -409,22 +399,22 @@ impl OnboardFlash {
         }
         let config_block = self.config_block.unwrap();
         let _ = self.erase_block(config_block);
-        // let mut payload = [0xffu8; 2115];
         let mut start = 0;
         let mut page = 0;
         let mut is_last = false;
 
         while !is_last {
-            let mut end = start + 2048;
+            let mut end = start + FLASH_USER_PAGE_SIZE;
             if end > device_bytes.len() {
                 end = device_bytes.len();
             }
-            let mut payload = [0xffu8; 2116];
+            let mut payload = [0xffu8; FLASH_SPI_USER_PAYLOAD_SIZE];
             is_last = end == device_bytes.len();
 
             let device_chunk = &mut device_bytes[start..end];
-            payload[4..4 + device_chunk.len()].copy_from_slice(&device_chunk);
-            start += 2048;
+            payload[FLASH_SPI_HEADER..FLASH_SPI_HEADER + device_chunk.len()]
+                .copy_from_slice(&device_chunk);
+            start += FLASH_USER_PAGE_SIZE;
             let _ = self.write_config_bytes(
                 &mut payload,
                 device_chunk.len(),
@@ -451,37 +441,46 @@ impl OnboardFlash {
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
-        assert_eq!(bytes.len(), 2112 + 4); // 2116
+        assert_eq!(bytes.len(), FLASH_SPI_USER_PAYLOAD_SIZE); // 2116
 
+        // FIXME: Why is the first byte skipped?
         let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-        let crc = crc_check.checksum(&bytes[4..4 + user_bytes_length]);
-        bytes[1] = PROGRAM_LOAD;
-        bytes[2] = plane;
-        bytes[3] = 0;
+        let crc =
+            crc_check.checksum(&bytes[FLASH_SPI_HEADER..FLASH_SPI_HEADER + user_bytes_length]);
         {
+            // PROGRAM_LOAD only takes 3 bytes for its header, so we skip the first byte of our max
+            // 4 byte header
+            let spi_header = &mut bytes[..FLASH_SPI_HEADER];
+            spi_header[1] = PROGRAM_LOAD;
+            spi_header[2] = plane;
+            spi_header[3] = 0;
+        }
+        {
+            // FIXME: dedupe
+            let user_metadata_bytes = &mut bytes[FLASH_SPI_HEADER..][0x820..=0x83f];
             //Now write into the user meta section
-            bytes[4..][0x820..=0x83f][0] = 0; // Page is used
-            bytes[4..][0x820..=0x83f][1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
+            user_metadata_bytes[0] = 0; // Page is used
+            user_metadata_bytes[1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
             {
-                let space = &mut bytes[4..][0x820..=0x83f][2..=3];
+                let space = &mut user_metadata_bytes[2..=3];
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             // TODO Write user detected bad blocks into user-metadata section?
 
-            bytes[4..][0x820..=0x83f][4] = b as u8;
-            bytes[4..][0x820..=0x83f][5] = p as u8;
+            user_metadata_bytes[4] = b as u8;
+            user_metadata_bytes[5] = p as u8;
             {
-                let space = &mut bytes[4..][0x820..=0x83f][6..=7];
+                let space = &mut user_metadata_bytes[6..=7];
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             {
-                let space = &mut bytes[4..][0x820..=0x83f][8..=9];
+                let space = &mut user_metadata_bytes[8..=9];
                 LittleEndian::write_u16(space, crc);
             }
             {
-                let space = &mut bytes[4..][0x820..=0x83f][10..=11];
+                let space = &mut user_metadata_bytes[10..=11];
                 LittleEndian::write_u16(space, crc);
             }
         }
@@ -508,6 +507,7 @@ impl OnboardFlash {
         Ok(())
     }
 
+    // FIXME: Don't hardcode this size
     pub fn read_device_config(&mut self) -> Result<[u8; 2505], &str> {
         if self.config_block.is_none() {
             panic!("Config block has not been initialized, call flash_storage.init()");
@@ -593,7 +593,7 @@ impl OnboardFlash {
             }
         }
         let mut good_block = false;
-        for block_index in 0..2048 {
+        for block_index in 0..TOTAL_FLASH_BLOCKS {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
@@ -1021,11 +1021,15 @@ impl OnboardFlash {
     ) {
         let plane = (((block % 2) << 4) | offset >> 8) as u8;
         let current_page = self.current_page.take();
-        current_page[0] = CACHE_READ;
-        current_page[1] = plane;
-        current_page[2] = (offset & 0xff) as u8;
-        current_page[3] = 0; // Dummy byte
-        let length = length.unwrap_or((2048 + 128) - offset as usize);
+        {
+            let spi_header = &mut current_page[..FLASH_SPI_HEADER];
+            spi_header[0] = CACHE_READ;
+            spi_header[1] = plane;
+            spi_header[2] = (offset & 0xff) as u8;
+            spi_header[3] = 0; // Dummy byte
+        }
+        let length =
+            length.unwrap_or((FLASH_USER_PAGE_SIZE + FLASH_METADATA_SIZE) - offset as usize);
         // TODO: Use a pair of global buffers for all DMA transfers
 
         let prev_page = self.prev_page.take();
@@ -1035,8 +1039,8 @@ impl OnboardFlash {
             // If the offset is 2048, we want the actual offset in our buffer to be 2052, then the
             // start is at 2048
             let offset = offset as usize;
-            let src_range = 0..length + 4;
-            let dst_range = offset..offset + length + 4;
+            let src_range = 0..length + FLASH_SPI_HEADER;
+            let dst_range = offset..offset + length + FLASH_SPI_HEADER;
             crate::assert_eq!(src_range.len(), dst_range.len());
             let transfer = bidirectional::Config::new(
                 (
@@ -1069,23 +1073,26 @@ impl OnboardFlash {
         &mut self,
         block: isize,
         offset: isize,
-    ) -> [u8; 18] {
+    ) -> [u8; NUM_EVENT_BYTES] {
         let plane = ((block % 2) << 4) as u8;
-        let mut bytes = [0u8; 22];
-        bytes[0] = CACHE_READ;
-        bytes[1] = plane;
-        bytes[2] = offset as u8;
-        bytes[3] = 0;
+        let mut bytes = [0u8; FLASH_SPI_HEADER + NUM_EVENT_BYTES];
+        {
+            let spi_header = &mut bytes[..FLASH_SPI_HEADER];
+            spi_header[0] = CACHE_READ;
+            spi_header[1] = plane;
+            spi_header[2] = offset as u8;
+            spi_header[3] = 0;
+        }
         self.cs.set_low().unwrap();
         self.spi.as_mut().unwrap().transfer(&mut bytes).unwrap();
         self.cs.set_high().unwrap();
-        let mut event = [0u8; 18];
-        event.copy_from_slice(&bytes[4..]);
+        let mut event = [0u8; NUM_EVENT_BYTES];
+        event.copy_from_slice(&bytes[FLASH_SPI_HEADER..]);
         event
     }
 
     pub fn read_page_metadata(&mut self, block: isize) {
-        self.read_from_cache_at_column_offset(block, 2048, None);
+        self.read_from_cache_at_column_offset(block, FLASH_USER_PAGE_SIZE as isize, None);
     }
 
     pub fn read_page_from_cache(&mut self, block: isize) {
@@ -1138,7 +1145,7 @@ impl OnboardFlash {
         transfer: bidirectional::Transfer<
             Channel<CH1>,
             Channel<CH2>,
-            &'static mut [u8; 2115],
+            FlashSpiUserPayload,
             Spi<
                 Enabled,
                 SPI1,
@@ -1148,7 +1155,7 @@ impl OnboardFlash {
                     Pin<Gpio10, FunctionSpi, PullDown>,
                 ),
             >,
-            &'static mut [u8; 2115],
+            FlashSpiUserPayload,
         >,
         address: [u8; 3],
         is_last: bool,
@@ -1195,7 +1202,7 @@ impl OnboardFlash {
             bidirectional::Transfer<
                 Channel<CH1>,
                 Channel<CH2>,
-                &'static mut [u8; 2115],
+                FlashSpiUserPayload,
                 Spi<
                     Enabled,
                     SPI1,
@@ -1205,7 +1212,7 @@ impl OnboardFlash {
                         Pin<Gpio10, FunctionSpi, PullDown>,
                     ),
                 >,
-                &'static mut [u8; 2115],
+                FlashSpiUserPayload,
             >,
         >,
         address: Option<[u8; 3]>,
@@ -1215,7 +1222,7 @@ impl OnboardFlash {
                 bidirectional::Transfer<
                     Channel<CH1>,
                     Channel<CH2>,
-                    &'static mut [u8; 2115],
+                    FlashSpiUserPayload,
                     Spi<
                         Enabled,
                         SPI1,
@@ -1225,7 +1232,7 @@ impl OnboardFlash {
                             Pin<Gpio10, FunctionSpi, PullDown>,
                         ),
                     >,
-                    &'static mut [u8; 2115],
+                    FlashSpiUserPayload,
                 >,
             >,
             Option<[u8; 3]>,
@@ -1247,49 +1254,47 @@ impl OnboardFlash {
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
-        assert_eq!(bytes.len(), 2112 + 4); // 2116
-                                           // Skip the first byte in the buffer
+        assert_eq!(bytes.len(), FLASH_SPI_USER_PAYLOAD_SIZE);
+        // Skip the first byte in the buffer
 
         let address = Some(OnboardFlash::get_address(b, p));
         let plane = ((b % 2) << 4) as u8;
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-        let crc = crc_check.checksum(&bytes[4..4 + user_bytes_length]);
-        bytes[1] = PROGRAM_LOAD;
-        bytes[2] = plane;
-        bytes[3] = 0;
+        let crc =
+            crc_check.checksum(&bytes[FLASH_SPI_HEADER..FLASH_SPI_HEADER + user_bytes_length]);
         {
+            let spi_header = &mut bytes[..FLASH_SPI_HEADER];
+            // PROGRAM_LOAD only takes 3 bytes for its header, so we skip the first byte of our max
+            // 4 byte header
+            spi_header[1] = PROGRAM_LOAD;
+            spi_header[2] = plane;
+            spi_header[3] = 0;
+        }
+        {
+            let user_metadata_bytes = &mut bytes[FLASH_SPI_HEADER..][0x820..=0x83f];
             //Now write into the user meta section
-            bytes[4..][0x820..=0x83f][0] = 0; // Page is used
-            bytes[4..][0x820..=0x83f][1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
+            user_metadata_bytes[0] = 0; // Page is used
+            user_metadata_bytes[1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
             {
-                let space = &mut bytes[4..][0x820..=0x83f][2..=3];
+                let space = &mut user_metadata_bytes[2..=3];
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             // TODO Write user detected bad blocks into user-metadata section?
-
-            bytes[4..][0x820..=0x83f][4] = b as u8;
-            bytes[4..][0x820..=0x83f][5] = p as u8;
+            user_metadata_bytes[4] = b as u8;
+            user_metadata_bytes[5] = p as u8;
             {
-                let space = &mut bytes[4..][0x820..=0x83f][6..=7];
+                let space = &mut user_metadata_bytes[6..=7];
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             {
-                let space = &mut bytes[4..][0x820..=0x83f][8..=9];
+                let space = &mut user_metadata_bytes[8..=9];
                 LittleEndian::write_u16(space, crc);
             }
             {
-                let space = &mut bytes[4..][0x820..=0x83f][10..=11];
+                let space = &mut user_metadata_bytes[10..=11];
                 LittleEndian::write_u16(space, crc);
             }
-            //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }
-        // info!(
-        //     "Writing {} to block:page {}:{}, is last {}",
-        //     user_bytes_length, b, p, is_last
-        // );
-        // if is_last {
-        // warn!("Ending file at {}:{}", b, p);
-        // }
         let mut transfer = None;
         if self.record_to_flash {
             if self.payload_buffer.is_none() {
@@ -1299,7 +1304,7 @@ impl OnboardFlash {
             self.cs.set_low().unwrap();
             let buf = self.payload_buffer.as_mut().unwrap();
 
-            let mut rx_buf = [0x42u8; 2115];
+            let mut rx_buf = [0x42u8; FLASH_SPI_USER_PAYLOAD_SIZE];
             let rx_buf = unsafe { extend_lifetime_generic_mut(&mut rx_buf) };
 
             transfer = Some(
@@ -1340,7 +1345,7 @@ impl OnboardFlash {
         self.write_enable();
         assert_eq!(self.write_enabled(), true);
         // Bytes will always be a full page + metadata + command info at the start
-        assert_eq!(bytes.len(), 2112 + 4); // 2116
+        assert_eq!(bytes.len(), FLASH_SPI_USER_PAYLOAD_SIZE); // 2116
 
         // Skip the first byte in the buffer
         let b = block_index.unwrap_or(self.current_block_index);
@@ -1351,44 +1356,49 @@ impl OnboardFlash {
         let address = OnboardFlash::get_address(b, p);
         let plane = ((b % 2) << 4) as u8;
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-        let crc = crc_check.checksum(&bytes[4..4 + user_bytes_length]);
-        bytes[1] = PROGRAM_LOAD;
-        bytes[2] = plane;
-        bytes[3] = 0;
+        let crc =
+            crc_check.checksum(&bytes[FLASH_SPI_HEADER..FLASH_SPI_HEADER + user_bytes_length]);
         {
+            // PROGRAM_LOAD only takes 3 bytes for its header, so we skip the first byte of our max
+            // 4 byte header
+            let spi_header = &mut bytes[..FLASH_SPI_HEADER];
+            spi_header[1] = PROGRAM_LOAD;
+            spi_header[2] = plane;
+            spi_header[3] = 0;
+        }
+        {
+            let user_metadata_bytes = &mut bytes[FLASH_SPI_HEADER..][0x820..=0x83f];
             //Now write into the user meta section
-            bytes[4..][0x820..=0x83f][0] = 0; // Page is used
-            bytes[4..][0x820..=0x83f][1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
+            user_metadata_bytes[0] = 0; // Page is used
+            user_metadata_bytes[1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
             {
-                let space = &mut bytes[4..][0x820..=0x83f][2..=3];
-                //info!("Writing {} bytes", user_bytes_length);
+                let space = &mut user_metadata_bytes[2..=3];
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             // TODO Write user detected bad blocks into user-metadata section?
 
-            bytes[4..][0x820..=0x83f][4] = b as u8;
-            bytes[4..][0x820..=0x83f][5] = p as u8;
+            user_metadata_bytes[4] = b as u8;
+            user_metadata_bytes[5] = p as u8;
             {
-                let space = &mut bytes[4..][0x820..=0x83f][6..=7];
+                let space = &mut user_metadata_bytes[6..=7];
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             {
-                let space = &mut bytes[4..][0x820..=0x83f][8..=9];
+                let space = &mut user_metadata_bytes[8..=9];
                 LittleEndian::write_u16(space, crc);
             }
             {
-                let space = &mut bytes[4..][0x820..=0x83f][10..=11];
+                let space = &mut user_metadata_bytes[10..=11];
                 LittleEndian::write_u16(space, crc);
             }
             //write file start block
-            let space = &mut bytes[4..][0x820..=0x83f][12..=13];
+            let space = &mut user_metadata_bytes[12..=13];
             LittleEndian::write_u16(space, self.file_start_block_index.unwrap());
             if let Some(previous_start) = self.previous_file_start_block_index {
                 //write previous file start could just write on first page if it matters
-                let space = &mut bytes[4..][0x820..=0x83f][14..=15];
+                let space = &mut user_metadata_bytes[14..=15];
                 LittleEndian::write_u16(space, previous_start as u16);
             }
-            //info!("Wrote user meta {:?}", bytes[4..][0x820..=0x83f][0..10]);
         }
         // info!(
         //     "Writing {} to block:page {}:{}, is last {}",
@@ -1399,6 +1409,7 @@ impl OnboardFlash {
         }
 
         if self.record_to_flash {
+            // PROGRAM_LOAD
             self.spi_write(&bytes[1..]);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         }
@@ -1435,7 +1446,7 @@ impl OnboardFlash {
 
     pub fn write_event(
         &mut self,
-        event_bytes: &[u8; 18],
+        event_bytes: &[u8; NUM_EVENT_BYTES],
         block_index: isize,
         page_index: isize,
         offset: u16,
@@ -1443,15 +1454,16 @@ impl OnboardFlash {
         if self.spi.is_some() {
             self.write_enable();
             assert_eq!(self.write_enabled(), true);
-            let mut bytes = [0u8; 21];
-            bytes[3..21].copy_from_slice(event_bytes);
+            let mut bytes = [0u8; FLASH_SPI_HEADER_SMALL + NUM_EVENT_BYTES];
             let address = OnboardFlash::get_address(block_index, page_index);
             let plane = ((block_index % 2) << 4) as u8;
-
-            // Skip the first byte in the buffer
-            bytes[0] = PROGRAM_LOAD;
-            bytes[1] = plane;
-            bytes[2] = offset as u8;
+            {
+                let spi_header = &mut bytes[..FLASH_SPI_HEADER_SMALL];
+                spi_header[0] = PROGRAM_LOAD;
+                spi_header[1] = plane;
+                spi_header[2] = offset as u8;
+            }
+            bytes[FLASH_SPI_HEADER_SMALL..].copy_from_slice(event_bytes);
             self.spi_write(&bytes);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
             // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?

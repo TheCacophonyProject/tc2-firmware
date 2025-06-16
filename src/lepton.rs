@@ -669,7 +669,7 @@ impl LeptonModule {
             false,
         )) {
             Ok((state, _length)) => {
-                let struct_size = mem::size_of::<FFCState>();
+                let struct_size = size_of::<FFCState>();
                 let mut ffc_state = [0u8; 20];
                 ffc_state.copy_from_slice(&state[0..struct_size]);
                 let ffc_state: FFCState = unsafe { mem::transmute(ffc_state) };
