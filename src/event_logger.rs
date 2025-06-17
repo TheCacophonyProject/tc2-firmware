@@ -1,9 +1,6 @@
-// TODO: Essentially we want to log an error code and a timestamp for each error/event to flash storage.
-//  There would be a maximum number of errors we can store before we run out of memory.  Timestamp can
-//  be in 32bit seconds past a given epoch (let's say Jan 1 2023).  Is a 1 second granularity enough?
 use crate::onboard_flash::OnboardFlash;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
@@ -174,7 +171,17 @@ impl EventLogger {
                 let kind = LittleEndian::read_u16(&event[0..2]);
                 if let Ok(kind) = LoggerEventKind::try_from(kind) {
                     let time = LittleEndian::read_u64(&event[2..10]);
-                    info!("Event #{}, kind {}, timestamp {}", i, kind, time);
+                    let utc_time = DateTime::<Utc>::from_timestamp_micros(time as i64).unwrap();
+                    let year = utc_time.year();
+                    let month = utc_time.month();
+                    let day = utc_time.day();
+                    let hour = utc_time.hour();
+                    let minute = utc_time.minute();
+                    let second = utc_time.second();
+                    info!(
+                        "Event #{}, kind {}, time {}/{}/{} {}:{}:{}",
+                        i, kind, year, month, day, hour, minute, second
+                    );
                 } else {
                     warn!("Unknown event kind found on flash log {}", kind);
                 }

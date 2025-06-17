@@ -59,10 +59,6 @@ use defmt::*;
 use defmt::{assert_eq, panic};
 use defmt_rtt as _;
 use device_config::DeviceConfig;
-use embedded_hal::prelude::{
-    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
-    _embedded_hal_watchdog_WatchdogEnable,
-};
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::clocks::ClocksManager;
@@ -172,8 +168,8 @@ fn main() -> ! {
     // Attiny + RTC comms
     let i2c1 = I2C::i2c1(
         peripherals.I2C1,
-        pins.gpio6.into_function::<FunctionI2C>(),
-        pins.gpio7.into_function::<FunctionI2C>(),
+        pins.gpio6.reconfigure(),
+        pins.gpio7.reconfigure(),
         400.kHz(),
         &mut peripherals.RESETS,
         &clocks.system_clock,
@@ -288,7 +284,7 @@ pub fn thermal_code(
     pi_spi: ExtSpiTransfers,
     onboard_flash: OnboardFlash,
     lepton_pins: LeptonPins,
-    mut watchdog: Watchdog,
+    watchdog: Watchdog,
     system_clock_freq: u32,
     delay: Delay,
     timer: Timer,

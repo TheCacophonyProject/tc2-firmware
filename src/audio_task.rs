@@ -19,10 +19,6 @@ use defmt::{error, info, warn};
 use rp2040_hal::{gpio, Timer};
 
 use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
-use embedded_hal::prelude::{
-    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
-    _embedded_hal_watchdog_WatchdogEnable,
-};
 use fugit::{ExtU32, RateExtU32};
 
 use bsp::hal::Watchdog;

@@ -18,11 +18,9 @@ use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::{error, info, println, warn, Format};
-use embedded_hal::digital::v2::OutputPin;
-use embedded_hal::prelude::{
-    _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
-};
 
+use cortex_m::prelude::*;
+use embedded_hal::digital::OutputPin;
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2};
 use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio8, Gpio9};

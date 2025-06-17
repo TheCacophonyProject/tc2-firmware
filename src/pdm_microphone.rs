@@ -2,17 +2,17 @@ use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{PIO1, SPI1};
 use crate::frame_processing::SyncedDateTime;
 use crate::{bsp, onboard_flash};
+use cortex_m::prelude::*;
 use defmt::{info, warn};
-use embedded_hal::blocking::delay::DelayMs;
 use fugit::HertzU32;
 use rp2040_hal::dma::Channel;
 use rp2040_hal::dma::{double_buffer, CH3, CH4};
 use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
-use rp2040_hal::pio::{PIOBuilder, Running, Rx, StateMachine, Tx, UninitStateMachine, PIO, SM1};
+use rp2040_hal::pio::{
+    PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM1,
+};
 use rp2040_hal::Timer;
-
-use embedded_hal::prelude::_embedded_hal_watchdog_Watchdog;
 
 const PDM_DECIMATION: usize = 64;
 const SAMPLE_RATE: usize = 48000;
@@ -119,10 +119,12 @@ impl PdmMicrophone {
         // clk pin is out
         // let data_pin_id = 1;
         // let clk_pin_id = 0;
-        let (mut sm, rx, tx) = PIOBuilder::from_program(installed_program)
+        let (mut sm, rx, tx) = PIOBuilder::from_installed_program(installed_program)
             .in_pin_base(data_pin_id)
             .side_set_pin_base(clk_pin_id)
             .clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional)
+            .in_shift_direction(ShiftDirection::Left)
+            .out_shift_direction(ShiftDirection::Left)
             .autopush(true)
             .push_threshold(32)
             .pull_threshold(32)

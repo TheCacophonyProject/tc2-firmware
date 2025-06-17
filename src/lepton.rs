@@ -6,7 +6,7 @@ use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking
 use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
 use defmt::{error, info, warn};
 use defmt::{trace, Format};
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};

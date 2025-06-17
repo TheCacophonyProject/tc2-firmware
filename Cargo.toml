@@ -14,28 +14,29 @@ bench = false
 [dependencies]
 
 # bsp dependencies: from rp-hal-boards/rp-pico
-cortex-m = "0.7.2"
+cortex-m = "0.7.7"
 rp2040-boot2 = { version = "0.3.0", optional = true }
-cortex-m-rt = { version = "0.7", optional = true }
-usb-device= "0.2.9"
+cortex-m-rt = { version = "0.7.5", optional = true }
 
 # our dependencies
-embedded-hal = { version = "0.2.7", features = ["unproven"] }
-embedded-io = "0.5.0"
-defmt = "=0.3.2"
-defmt-rtt = "0.4"
-panic-probe = { version = "0.3.1", features = ["print-defmt"] }
-byteorder = { version = "1.4.3", default-features = false }
+embedded-hal = { version = "1.0.0" }
+embedded-io = "0.6.1"
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+byteorder = { version = "1.5.0", default-features = false }
 bytemuck = "1.23.1"
 
-critical-section = "1.1.1"
-fugit = "0.3.6"
-crc = "3.0.1"
+critical-section = "1.2.0"
+fugit = "0.3.7"
+crc = "3.3.0"
 chrono = { version  = "0.4.41", default-features = false }
-num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 
-rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "bcb7683512363d0bf17675217bbafe7b050b7dcb", features = ["defmt", "eh1_0_alpha"] }
-#rp2040-hal = { version = "0.11.0", features = ["defmt"] }
+#rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "bcb7683512363d0bf17675217bbafe7b050b7dcb", features = ["defmt", "eh1_0_alpha"] }
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "d3a2f68770781ed9fe8054c8e9c34b36fa679cf9", features = ["defmt"] }
+#6f6dc5d8df8f35d8223b2d4e3ca52f23958be79f
+#rp2040-hal = { version = "0.10.0", features = ["defmt"] }
 #rp2040-hal = "0.9.0"
 pcf8563 = "0.1.2"
 

@@ -4,11 +4,9 @@ use byteorder::{BigEndian, ByteOrder};
 use chrono::{Timelike, Utc};
 use cortex_m::delay::Delay;
 use crc::{Algorithm, Crc};
-use defmt::{error, info, panic, warn, Format};
-use embedded_hal::digital::v2::InputPin;
-use embedded_hal::prelude::{
-    _embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_i2c_WriteRead,
-};
+use defmt::{error, info, warn, Format};
+use embedded_hal::digital::InputPin;
+use embedded_hal::i2c::I2c;
 use pcf8563::{Control, DateTime, PCF8563};
 use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput};
@@ -18,8 +16,8 @@ use rp2040_hal::I2C;
 pub type I2CConfig = I2C<
     I2C1,
     (
-        Pin<Gpio6, FunctionI2C, PullDown>,
-        Pin<Gpio7, FunctionI2C, PullDown>,
+        Pin<Gpio6, FunctionI2C, PullUp>,
+        Pin<Gpio7, FunctionI2C, PullUp>,
     ),
 >;
 pub struct SharedI2C {
@@ -179,7 +177,7 @@ impl SharedI2C {
     }
 
     fn attiny_write_command(&mut self, command: u8, value: u8, crc: u16) -> Result<(), Error> {
-        let lock_pin = self.unlocked_pin.take().unwrap();
+        let mut lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
             let pin = lock_pin.into_pull_type::<PullUp>();
@@ -220,7 +218,7 @@ impl SharedI2C {
         value: Option<u8>,
         payload: &mut [u8; 3],
     ) -> Result<(), Error> {
-        let lock_pin = self.unlocked_pin.take().unwrap();
+        let mut lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
             let pin = lock_pin.into_pull_type::<PullUp>();
@@ -599,7 +597,7 @@ impl SharedI2C {
     pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, &str> {
         let mut num_attempts = 0;
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -649,7 +647,7 @@ impl SharedI2C {
     pub fn enable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
         let mut attempts = 0;
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -687,7 +685,7 @@ impl SharedI2C {
     pub fn disable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
         let mut attempts = 0;
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -728,7 +726,7 @@ impl SharedI2C {
         info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
         let mut num_attempts = 0;
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -760,7 +758,7 @@ impl SharedI2C {
     pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
         // NOTE: This only returns on success, otherwise it blocks indefinitely.
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -777,9 +775,10 @@ impl SharedI2C {
     }
 
     pub fn clear_alarm(&mut self, delay: &mut Delay) {
+        // FIXME: deal with all this duplicate logic
         // NOTE: This only returns on success, otherwise it blocks indefinitely.
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -799,7 +798,7 @@ impl SharedI2C {
     pub fn alarm_interrupt_enabled(&mut self, delay: &mut Delay) -> Result<bool, &str> {
         let mut attempts = 0;
         loop {
-            let lock_pin = self.unlocked_pin.take().unwrap();
+            let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
@@ -833,7 +832,7 @@ impl SharedI2C {
     }
 
     fn read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), Error> {
-        let lock_pin = self.unlocked_pin.take().unwrap();
+        let mut lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
             let pin = lock_pin.into_pull_type::<PullUp>();

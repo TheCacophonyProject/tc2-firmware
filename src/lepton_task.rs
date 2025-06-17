@@ -15,9 +15,6 @@ use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use critical_section::Mutex;
 use defmt::{info, warn};
-use embedded_hal::prelude::{
-    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogEnable,
-};
 use fugit::{ExtU32, HertzU32, RateExtU32};
 
 pub type FramePacketData = [u8; FRAME_WIDTH];

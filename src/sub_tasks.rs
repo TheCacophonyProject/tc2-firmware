@@ -12,10 +12,6 @@ use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::{info, warn};
-use embedded_hal::prelude::{
-    _embedded_hal_watchdog_Watchdog, _embedded_hal_watchdog_WatchdogDisable,
-    _embedded_hal_watchdog_WatchdogEnable,
-};
 use fugit::{ExtU32, HertzU32, RateExtU32};
 use rp2040_hal::Timer;
 

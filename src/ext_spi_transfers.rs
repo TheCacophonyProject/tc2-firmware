@@ -6,12 +6,9 @@ use crate::onboard_flash::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
+use cortex_m::prelude::*;
 use critical_section::Mutex;
 use defmt::{info, warn, Format};
-use embedded_hal::prelude::{
-    _embedded_hal_blocking_spi_Transfer, _embedded_hal_blocking_spi_Write,
-};
-
 use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{single_buffer, Channel, CH0};
@@ -363,10 +360,11 @@ impl ExtSpiTransfers {
             // Setup a PIO-based SPI slave interface to send bytes to the raspberry pi
             let program_with_defines = pio_proc::pio_file!("./src/soft_spi_slave.pio");
             let installed = self.pio.install(&program_with_defines.program).unwrap();
-            let (mut sm, rx, tx) = PIOBuilder::from_program(installed)
+            let (mut sm, rx, tx) = PIOBuilder::from_installed_program(installed)
                 .out_pins(miso_id, 1)
                 .jmp_pin(spi_cs_pin_id)
                 .out_shift_direction(ShiftDirection::Left)
+                .in_shift_direction(ShiftDirection::Left)
                 .pull_threshold(32)
                 .autopush(true)
                 .autopull(true)
