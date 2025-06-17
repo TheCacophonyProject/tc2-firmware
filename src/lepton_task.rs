@@ -29,8 +29,8 @@ fn go_dormant_until_next_vsync(
 ) -> RingOscillator<bsp::hal::rosc::Enabled> {
     if got_sync && lepton.is_awake() {
         lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-        let dormant_rosc = unsafe { rosc.dormant() };
-        let disabled_rosc = RingOscillator::new(dormant_rosc.free());
+        unsafe { rosc.dormant() };
+        let disabled_rosc = RingOscillator::new(rosc.free());
         let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
         lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
         initialized_rosc
@@ -49,9 +49,9 @@ fn go_dormant_until_woken<T: PinId>(
         .vsync
         .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
-    let dormant_rosc = unsafe { rosc.dormant() };
+    unsafe { rosc.dormant() };
     // Woken by pin
-    let disabled_rosc = RingOscillator::new(dormant_rosc.free());
+    let disabled_rosc = RingOscillator::new(rosc.free());
     let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     initialized_rosc

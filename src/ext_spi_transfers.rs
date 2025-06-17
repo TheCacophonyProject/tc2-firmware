@@ -269,8 +269,9 @@ impl ExtSpiTransfers {
             payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
-                if !dma_peripheral.ch[DMA_CHANNEL_NUM]
-                    .ch_ctrl_trig
+                if !dma_peripheral
+                    .ch(DMA_CHANNEL_NUM)
+                    .ch_ctrl_trig()
                     .read()
                     .busy()
                     .bit_is_set()
@@ -287,8 +288,9 @@ impl ExtSpiTransfers {
                 );
                 config.bswap(true); // DMA peripheral does our swizzling for us.
                 let transfer = config.start();
-                let start_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
-                    .ch_read_addr
+                let start_read_address = dma_peripheral
+                    .ch(DMA_CHANNEL_NUM)
+                    .ch_read_addr()
                     .read()
                     .bits();
 
@@ -318,8 +320,9 @@ impl ExtSpiTransfers {
         );
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
-        let end_read_addr = dma_peripheral.ch[DMA_CHANNEL_NUM]
-            .ch_read_addr
+        let end_read_addr = dma_peripheral
+            .ch(DMA_CHANNEL_NUM)
+            .ch_read_addr()
             .read()
             .bits();
         let did_abort = end_read_addr + 20 < transfer_end_address;
@@ -464,7 +467,11 @@ impl ExtSpiTransfers {
                     self.spi.take().unwrap(),
                 );
                 let transfer = transfer.start();
-                let transfer_read_address = dma_peripheral.ch[0].ch_read_addr.read().bits();
+                let transfer_read_address = dma_peripheral
+                    .ch(DMA_CHANNEL_NUM)
+                    .ch_read_addr()
+                    .read()
+                    .bits();
                 maybe_abort_dma_transfer(
                     dma_peripheral,
                     transfer_read_address + actual_length,
@@ -486,8 +493,9 @@ impl ExtSpiTransfers {
                         self.return_payload_buffer.take().unwrap(),
                     )
                     .start();
-                    let transfer_read_address = dma_peripheral.ch[DMA_CHANNEL_NUM]
-                        .ch_read_addr
+                    let transfer_read_address = dma_peripheral
+                        .ch(DMA_CHANNEL_NUM)
+                        .ch_read_addr()
                         .read()
                         .bits();
 
@@ -590,13 +598,15 @@ fn maybe_abort_dma_transfer(
     let mut some_progress = false;
     // Check that the FIFOs are empty too.
     loop {
-        if dma.ch[DMA_CHANNEL_NUM]
-            .ch_ctrl_trig
+        if dma
+            .ch(DMA_CHANNEL_NUM)
+            .ch_ctrl_trig()
             .read()
             .busy()
             .bit_is_set()
         {
-            let current_transfer_read_address = dma.ch[DMA_CHANNEL_NUM].ch_read_addr.read().bits();
+            let current_transfer_read_address =
+                dma.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
             if some_progress && prev_read_address == current_transfer_read_address {
                 same_address += 1;
             }
@@ -617,8 +627,9 @@ fn maybe_abort_dma_transfer(
     }
 
     if needs_abort
-        && dma.ch[DMA_CHANNEL_NUM]
-            .ch_ctrl_trig
+        && dma
+            .ch(DMA_CHANNEL_NUM)
+            .ch_ctrl_trig()
             .read()
             .busy()
             .bit_is_set()
@@ -631,24 +642,25 @@ fn maybe_abort_dma_transfer(
         );
         //info!("Aborting dma transfer");
         // See RP2040-E13 in rp2040 datasheet for explanation of errata workaround.
-        let inte0 = dma.inte0.read().bits();
-        let inte1 = dma.inte1.read().bits();
+        let inte0 = dma.inte0().read().bits();
+        let inte1 = dma.inte1().read().bits();
         let mask = (1u32 << DMA_CHANNEL_NUM).reverse_bits();
-        dma.inte0.write(|w| unsafe { w.bits(inte0 & mask) });
-        dma.inte1.write(|w| unsafe { w.bits(inte1 & mask) });
+        dma.inte0().write(|w| unsafe { w.bits(inte0 & mask) });
+        dma.inte1().write(|w| unsafe { w.bits(inte1 & mask) });
         // Abort all dma transfers
-        dma.chan_abort
+        dma.chan_abort()
             .write(|w| unsafe { w.bits(1 << DMA_CHANNEL_NUM) });
 
-        while dma.ch[DMA_CHANNEL_NUM]
-            .ch_ctrl_trig
+        while dma
+            .ch(DMA_CHANNEL_NUM)
+            .ch_ctrl_trig()
             .read()
             .busy()
             .bit_is_set()
         {}
 
-        dma.inte0.write(|w| unsafe { w.bits(inte0) });
-        dma.inte1.write(|w| unsafe { w.bits(inte1) });
+        dma.inte0().write(|w| unsafe { w.bits(inte0) });
+        dma.inte1().write(|w| unsafe { w.bits(inte1) });
         true
     } else {
         false
@@ -656,18 +668,18 @@ fn maybe_abort_dma_transfer(
 }
 
 fn abort_dma(dma: &mut DMA, channel: usize) {
-    if dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {
-        let inte0 = dma.inte0.read().bits();
-        let inte1 = dma.inte1.read().bits();
+    if dma.ch(channel).ch_ctrl_trig().read().busy().bit_is_set() {
+        let inte0 = dma.inte0().read().bits();
+        let inte1 = dma.inte1().read().bits();
         let mask = (1u32 << channel).reverse_bits();
-        dma.inte0.write(|w| unsafe { w.bits(inte0 & mask) });
-        dma.inte1.write(|w| unsafe { w.bits(inte1 & mask) });
+        dma.inte0().write(|w| unsafe { w.bits(inte0 & mask) });
+        dma.inte1().write(|w| unsafe { w.bits(inte1 & mask) });
         // Abort all dma transfers
-        dma.chan_abort.write(|w| unsafe { w.bits(1 << channel) });
+        dma.chan_abort().write(|w| unsafe { w.bits(1 << channel) });
 
-        while dma.ch[channel].ch_ctrl_trig.read().busy().bit_is_set() {}
+        while dma.ch(channel).ch_ctrl_trig().read().busy().bit_is_set() {}
 
-        dma.inte0.write(|w| unsafe { w.bits(inte0) });
-        dma.inte1.write(|w| unsafe { w.bits(inte1) });
+        dma.inte0().write(|w| unsafe { w.bits(inte0) });
+        dma.inte1().write(|w| unsafe { w.bits(inte1) });
     }
 }

@@ -1,4 +1,12 @@
 use crate::bsp;
+use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
+use crate::bsp::hal::gpio::FunctionSpi;
+use crate::bsp::hal::spi::Enabled;
+use crate::bsp::hal::{Spi, I2C as I2CInterface};
+use crate::bsp::pac::{RESETS, SPI0};
+use crate::bsp::{hal::gpio::Pin, pac::I2C0};
+use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
+use crate::utils::any_as_u8_slice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
 use core::mem;
@@ -13,15 +21,7 @@ use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
 use rp2040_hal::gpio::{
     FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, PullUp, SioInput, SioOutput,
 };
-
-use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
-use crate::bsp::hal::gpio::FunctionSpi;
-use crate::bsp::hal::spi::Enabled;
-use crate::bsp::hal::{Spi, I2C as I2CInterface};
-use crate::bsp::pac::{RESETS, SPI0};
-use crate::bsp::{hal::gpio::Pin, pac::I2C0};
-use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
-use crate::utils::any_as_u8_slice;
+use rp2040_hal::i2c::Error;
 
 pub enum LeptonCommandType {
     Get = 0b0000_0000_0000_00_00,
@@ -366,31 +366,60 @@ impl LeptonModule {
             warn!("{}", success);
         }
 
+        //let mut t_enabled = false;
         info!("Enable telemetry");
         let success = self.enable_telemetry();
         if !success.is_ok() {
             warn!("{}", success);
         }
-        info!("Telemetry enabled? {}", self.telemetry_enabled());
-        info!("Telemetry location? {}", self.telemetry_location());
+        let telemetry_enabled = self.telemetry_enabled();
+        info!("Telemetry enabled? {}", telemetry_enabled);
+        if let Ok(telemetry_enabled) = telemetry_enabled {
+            if !telemetry_enabled {
+                crate::panic!("Telemetry disabled");
+            }
+        } else {
+            crate::panic!("Telemetry not set");
+        }
+        let telemetry_location = self.telemetry_location();
+        info!("Telemetry location? {}", telemetry_location);
+        if let Ok(telemetry_location) = telemetry_location {
+            if telemetry_location != TelemetryLocation::Header {
+                crate::panic!("Telemetry not in header");
+            }
+        } else {
+            crate::panic!("Telemetry not in header");
+        }
+
         info!("Enable post-processing");
         let success = self.enable_post_processing();
         if !success.is_ok() {
             warn!("{}", success);
         }
-        //let _ = self.disable_t_linear();
-
-        let success = self.radiometric_mode_enabled();
-        info!("Radiometry enabled? {}", success);
-        if !success.is_ok() {
-            warn!("{}", success);
+        let radiometry_enabled = self.radiometric_mode_enabled();
+        info!("Radiometry enabled? {}", radiometry_enabled);
+        if let Ok(radiometry_enabled) = radiometry_enabled {
+            if !radiometry_enabled {
+                crate::panic!("Radiometry not enabled");
+            }
+        } else {
+            crate::panic!("Radiometry not enabled");
         }
+
         info!("Enable vsync");
         let success = self.enable_vsync();
         if !success.is_ok() {
             warn!("{}", success);
         }
-        info!("Vsync enabled? {}", self.vsync_enabled());
+        let vsync_enabled = self.vsync_enabled();
+        info!("Vsync enabled? {}", vsync_enabled);
+        if let Ok(vsync_enabled) = vsync_enabled {
+            if !vsync_enabled {
+                crate::panic!("Vsync not enabled");
+            }
+        } else {
+            crate::panic!("Vsync not enabled");
+        }
     }
 
     fn setup_spot_meter_roi(&mut self) -> Result<bool, LeptonError> {
@@ -1026,15 +1055,12 @@ impl LeptonModule {
         if success != LeptonError::Ok {
             return Err(success);
         }
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok(false);
@@ -1053,16 +1079,12 @@ impl LeptonModule {
         (command, _length): LeptonSynthesizedCommand,
     ) -> Result<bool, LeptonError> {
         self.wait_for_ready(false);
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-                // TODO
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok(false);
@@ -1074,6 +1096,12 @@ impl LeptonModule {
         Ok(true)
     }
 
+    fn write(&mut self, payload: &[u8]) -> Result<(), Error> {
+        let result = self.cci.write(LEPTON_ADDRESS, payload);
+        while self.cci.tx_fifo_used() != 0 {}
+        result
+    }
+
     fn get_attribute(
         &mut self,
         (command, length): LeptonSynthesizedCommand,
@@ -1081,15 +1109,12 @@ impl LeptonModule {
         self.wait_for_ready(false);
         let len = lepton_register_val(length);
         let mut buf = [0u8; 32];
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_DATA_LENGTH_REGISTER[0],
-                LEPTON_DATA_LENGTH_REGISTER[1],
-                len[0],
-                len[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_DATA_LENGTH_REGISTER[0],
+            LEPTON_DATA_LENGTH_REGISTER[1],
+            len[0],
+            len[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok((buf, 0));
@@ -1099,15 +1124,12 @@ impl LeptonModule {
             //warn!("Set attribute error {}", success);
             return Err(success);
         }
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok((buf, 0));
@@ -1167,15 +1189,12 @@ impl LeptonModule {
         //self.wait_for_ffc_status_ready();
         let len = lepton_register_val(length);
 
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_DATA_LENGTH_REGISTER[0],
-                LEPTON_DATA_LENGTH_REGISTER[1],
-                len[0],
-                len[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_DATA_LENGTH_REGISTER[0],
+            LEPTON_DATA_LENGTH_REGISTER[1],
+            len[0],
+            len[1],
+        ]);
 
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
@@ -1191,10 +1210,7 @@ impl LeptonModule {
             // Data reg 0
             let register_address = (0x0008u16 + (index * 2) as u16).to_be_bytes();
             let word = word.to_be_bytes();
-            let success = self.cci.write(
-                LEPTON_ADDRESS,
-                &[register_address[0], register_address[1], word[0], word[1]],
-            );
+            let success = self.write(&[register_address[0], register_address[1], word[0], word[1]]);
             if success.is_err() {
                 warn!("i2c Write error {:?}", success.err().unwrap());
                 return Ok(false);
@@ -1206,16 +1222,12 @@ impl LeptonModule {
             return Err(success);
         }
 
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-                // TODO
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok(false);
@@ -1228,7 +1240,7 @@ impl LeptonModule {
         // Now read out length registers, and assemble them into the return type that we want.
 
         // Now read the status register to see if it worked?
-        return Ok(true);
+        Ok(true)
     }
 }
 
@@ -1345,15 +1357,18 @@ pub fn init_lepton_module(
         LEPTON_SPI_CLOCK_FREQ.Hz(),
         &MODE_3,
     );
+    let i2c = bsp::hal::I2C::i2c0(
+        ic2_peripheral,
+        pins.sda,
+        pins.scl,
+        100.kHz(),
+        resets,
+        system_clock_freq_hz.Hz(),
+    );
+    //I2C0::ptr().ic_tx_tl.write()
+    //*I2C0::ptr().ic_tx_tl.write(|w| unsafe { w.tx_tl().bits(0) });
     let mut lepton = LeptonModule::new(
-        bsp::hal::I2C::i2c0(
-            ic2_peripheral,
-            pins.sda,
-            pins.scl,
-            100.kHz(),
-            resets,
-            system_clock_freq_hz.Hz(),
-        ),
+        i2c,
         spi,
         pins.cs,
         pins.vsync,

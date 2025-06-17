@@ -304,8 +304,7 @@ pub fn thermal_code(
 
     // NOTE: We're allocating the stack memory for core1 on our core0 stack rather than using
     //  a `static` var so that the memory isn't used when we're in the audio mode code-path.
-    let mut core1_stack: Stack<470> = Stack::new();
-    let mem = unsafe { extend_lifetime_generic_mut_with_const_size(&mut core1_stack.mem) };
+    let core1_stack: Stack<470> = Stack::new();
 
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
@@ -323,7 +322,7 @@ pub fn thermal_code(
     watchdog.feed();
     watchdog.disable();
 
-    let _ = core1.spawn(mem, move || {
+    let _ = core1.spawn(core1_stack.take().unwrap(), move || {
         lepton_core1_task(
             lepton_pins,
             watchdog,
