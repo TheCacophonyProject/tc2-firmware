@@ -93,6 +93,7 @@ const REG_VERSION: u8 = 0x01;
 const REG_CAMERA_STATE: u8 = 0x02;
 const REG_CAMERA_CONNECTION: u8 = 0x03;
 const REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
+const REG_KEEP_ALIVE: u8 = 0x0e;
 //const REG_PI_WAKEUP: u8 = 0x06;
 const REG_TC2_AGENT_STATE: u8 = 0x07;
 
@@ -169,6 +170,13 @@ impl SharedI2C {
         }
         self.i2c.as_mut().unwrap()
     }
+
+    fn write_i2c(&mut self, data: &[u8]) -> Result<(), Error> {
+        let result = self.i2c().write(ATTINY_ADDRESS, data);
+        while self.i2c().tx_fifo_used() != 0 {}
+        result
+    }
+
     fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
         if let Some(config) = self.i2c.take() {
             self.rtc = Some(PCF8563::new(config))
@@ -181,10 +189,9 @@ impl SharedI2C {
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
             let pin = lock_pin.into_pull_type::<PullUp>();
-
             let mut payload = [command, value, 0, 0];
             BigEndian::write_u16(&mut payload[2..=3], crc);
-            let result = self.i2c().write(ATTINY_ADDRESS, &payload);
+            let result = self.write_i2c(&payload);
             self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
             result
         } else {
@@ -368,6 +375,10 @@ impl SharedI2C {
             Ok(state) => Ok((state & tc2_agent_state::RECORDING) == tc2_agent_state::RECORDING),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn attiny_keep_alive(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.try_attiny_write_command(REG_KEEP_ALIVE, 0x01, delay)
     }
 
     pub fn set_recording_flag(

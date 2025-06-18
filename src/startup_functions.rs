@@ -1,14 +1,16 @@
 use crate::attiny_rtc_i2c::{tc2_agent_state, SharedI2C};
-use crate::bsp::pac::Peripherals;
+use crate::bsp::pac::RESETS;
 use crate::device_config::{get_datetime_utc, AudioMode, DeviceConfig};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::ExtSpiTransfers;
-use crate::frame_processing::{wake_raspberry_pi, SyncedDateTime};
+use crate::frame_processing::wake_raspberry_pi;
 use crate::onboard_flash::OnboardFlash;
 use crate::sub_tasks::get_existing_device_config_or_config_from_pi_on_initial_handshake;
+use crate::synced_date_time::SyncedDateTime;
 use cortex_m::delay::Delay;
 use defmt::{info, panic, warn};
 use fugit::HertzU32;
+use rp2040_hal::pac::DMA;
 use rp2040_hal::Timer;
 
 pub fn should_record_audio(
@@ -34,7 +36,7 @@ pub fn should_record_audio(
                         is_audio = false;
                     } else {
                         let in_window = config
-                            .time_is_in_recording_window(&synced_date_time.date_time_utc, &None);
+                            .time_is_in_recording_window(&synced_date_time.get_date_time(), &None);
                         if in_window {
                             is_audio = (state
                                 & (tc2_agent_state::LONG_AUDIO_RECORDING
@@ -60,9 +62,9 @@ pub fn get_device_config(
     delay: &mut Delay,
     pi_spi: &mut ExtSpiTransfers,
     system_clock_freq_hz: HertzU32,
-    timer: &mut Timer,
+    resets: &mut RESETS,
+    dma: &mut DMA,
 ) -> DeviceConfig {
-    let mut peripherals = unsafe { Peripherals::steal() };
     let config: Option<DeviceConfig> = DeviceConfig::load_existing_config_from_flash(flash_storage);
     match &config {
         Some(device_config) => {
@@ -81,13 +83,12 @@ pub fn get_device_config(
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             flash_storage,
             pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
+            resets,
+            dma,
             system_clock_freq_hz,
             2u32,  // radiometry enabled
             0,     // camera serial
             false, // audio mode
-            timer,
             config,
         );
     match device_config {
@@ -103,21 +104,19 @@ pub fn get_synced_time(
     delay: &mut Delay,
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
-    timer: &mut Timer,
+    timer: &Timer,
 ) -> SyncedDateTime {
-    let mut synced_date_time = SyncedDateTime::default();
     loop {
         // NOTE: Keep retrying until we get a datetime from RTC.
         match shared_i2c.get_datetime(delay) {
             Ok(now) => {
                 info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
-                synced_date_time.set(get_datetime_utc(now), &timer);
-                break;
+                return SyncedDateTime::new(get_datetime_utc(now), timer);
             }
             Err(e) => {
                 // cant get time so use 0 and add a time when tc2-agent uploads
                 event_logger.log_event(
-                    LoggerEvent::new(LoggerEventKind::RtcCommError, 0),
+                    LoggerEvent::new_with_unknown_time(LoggerEventKind::RtcCommError),
                     flash_storage,
                 );
 
@@ -126,5 +125,4 @@ pub fn get_synced_time(
             }
         }
     }
-    synced_date_time
 }

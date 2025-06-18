@@ -1,7 +1,7 @@
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
-use crate::onboard_flash::extend_lifetime;
+use crate::onboard_flash::{extend_lifetime, FLASH_USER_PAGE_SIZE};
 
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
@@ -62,10 +62,12 @@ fn TIMER_IRQ_0() {
 
 const MESSAGE_TYPE_U8: usize = 1;
 const PAYLOAD_LENGTH_LE_U32: usize = 4;
-const IS_RECORDING_LE_U16: usize = 2;
+const CRC_OR_PROGRESS_LE_U16: usize = 2;
+pub const RPI_PAYLOAD_LENGTH: usize = FLASH_USER_PAGE_SIZE;
+pub const RPI_RETURN_PAYLOAD_LENGTH: usize = 32 + 104;
 // The number of bytes in the header sent for any transfers via `ExtSpiTransfers`
 pub const RPI_TRANSFER_HEADER_LENGTH: usize =
-    (MESSAGE_TYPE_U8 * 2) + (PAYLOAD_LENGTH_LE_U32 * 2) + (IS_RECORDING_LE_U16 * 4);
+    (MESSAGE_TYPE_U8 * 2) + (PAYLOAD_LENGTH_LE_U32 * 2) + (CRC_OR_PROGRESS_LE_U16 * 4);
 pub struct ExtSpiTransfers {
     pub spi: Option<
         Spi<
@@ -91,15 +93,20 @@ pub struct ExtSpiTransfers {
 
     ping: Option<Pin<Gpio5, FunctionSio<SioInput>, PullDown>>,
     dma_channel_0: Option<Channel<CH0>>,
-    payload_buffer: Option<&'static mut [u8; 2066]>,
-    return_payload_buffer: Option<&'static mut [u8; 32 + 104]>,
+    payload_buffer: Option<ExtSpiTransferPayload>,
+    return_payload_buffer: Option<ExtSpiTransferReturnPayload>,
     return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,
     state_machine_0_uninit: Option<UninitStateMachine<(PIO0, SM0)>>,
     state_machine_0_running: Option<(StateMachine<(PIO0, SM0), Running>, Rx<(PIO0, SM0)>)>,
     pio_tx: Option<Tx<(PIO0, SM0)>>,
+    timer: Timer,
 }
 const DMA_CHANNEL_NUM: usize = 0;
+
+pub type ExtSpiTransferPayload = &'static mut [u8; RPI_TRANSFER_HEADER_LENGTH + RPI_PAYLOAD_LENGTH];
+pub type ExtSpiTransferReturnPayload = &'static mut [u8; RPI_RETURN_PAYLOAD_LENGTH];
+
 impl ExtSpiTransfers {
     pub fn new(
         mosi: Pin<Gpio12, FunctionNull, PullNone>,
@@ -108,10 +115,11 @@ impl ExtSpiTransfers {
         miso: Pin<Gpio15, FunctionNull, PullNone>,
         ping: Pin<Gpio5, FunctionSio<SioInput>, PullDown>,
         dma_channel_0: Channel<CH0>,
-        payload_buffer: &'static mut [u8; 2066],
-        return_payload_buffer: &'static mut [u8; 32 + 104],
+        payload_buffer: ExtSpiTransferPayload,
+        return_payload_buffer: ExtSpiTransferReturnPayload,
         pio: PIO<PIO0>,
         state_machine_0_uninit: UninitStateMachine<(PIO0, SM0)>,
+        timer: Timer,
     ) -> ExtSpiTransfers {
         ExtSpiTransfers {
             spi: None,
@@ -134,6 +142,7 @@ impl ExtSpiTransfers {
             state_machine_0_uninit: Some(state_machine_0_uninit),
             state_machine_0_running: None,
             pio_tx: None,
+            timer,
         }
     }
 
@@ -242,7 +251,6 @@ impl ExtSpiTransfers {
         crc: u16,
         is_recording: bool,
         dma_peripheral: &mut DMA,
-        timer: &mut Timer,
     ) -> Option<(
         Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
         u32,
@@ -279,7 +287,8 @@ impl ExtSpiTransfers {
                     break;
                 }
             }
-            if self.ping(timer, false, None) {
+            let mut timer = self.timer.clone();
+            if self.ping(&mut timer, false, None) {
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
@@ -305,7 +314,7 @@ impl ExtSpiTransfers {
 
     pub fn end_message(
         &mut self,
-        dma_peripheral: &mut DMA,
+        dma_peripheral: &DMA,
         transfer_end_address: u32,
         transfer_start_address: u32,
         transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
@@ -413,7 +422,6 @@ impl ExtSpiTransfers {
         payload: &[u8],
         crc: u16,
         dma_peripheral: &mut DMA,
-        timer: &mut Timer,
         resets: &mut RESETS,
         progress_block: Option<u16>,
     ) -> bool {
@@ -426,38 +434,32 @@ impl ExtSpiTransfers {
         // It is followed by the payload itself
         let payload_length = payload.len() as u32;
         let actual_length = self.payload_buffer.as_ref().unwrap().len() as u32;
-        // info!(
-        //     "Send message {:?} of length {}/{}",
-        //     message_type, payload_length, actual_length
-        // );
-        let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
-        let header_len = transfer_header.len() as u32;
-        transfer_header[0] = message_type as u8;
-        transfer_header[1] = message_type as u8;
-        LittleEndian::write_u32(&mut transfer_header[2..6], payload_length);
-        LittleEndian::write_u32(&mut transfer_header[6..10], payload_length);
-        LittleEndian::write_u16(&mut transfer_header[10..12], crc);
-        LittleEndian::write_u16(&mut transfer_header[12..14], crc);
-        LittleEndian::write_u16(&mut transfer_header[14..16], crc.not());
-        LittleEndian::write_u16(&mut transfer_header[16..=17], crc.not());
-        if let Some(block) = progress_block {
-            // If it's a file transfer command forgo the excessive duplication of the CRC info
-            // which is probably overkill, in favour of sending progress information.
-            LittleEndian::write_u16(&mut transfer_header[12..14], block);
+        {
+            let transfer_header =
+                &mut self.payload_buffer.as_mut().unwrap()[..RPI_TRANSFER_HEADER_LENGTH];
+            let header_len = transfer_header.len() as u32;
+            transfer_header[0] = message_type as u8;
+            transfer_header[1] = message_type as u8;
+            LittleEndian::write_u32(&mut transfer_header[2..6], payload_length);
+            LittleEndian::write_u32(&mut transfer_header[6..10], payload_length);
+            LittleEndian::write_u16(&mut transfer_header[10..12], crc);
+            LittleEndian::write_u16(&mut transfer_header[12..14], crc);
+            LittleEndian::write_u16(&mut transfer_header[14..16], crc.not());
+            LittleEndian::write_u16(&mut transfer_header[16..=17], crc.not());
+            if let Some(block) = progress_block {
+                // If it's a file transfer command forgo the excessive duplication of the CRC info
+                // which is probably overkill, in favour of sending progress information.
+                LittleEndian::write_u16(&mut transfer_header[12..14], block);
+            }
         }
-
-        let buffer_len = self.payload_buffer.as_ref().unwrap().len();
-        self.payload_buffer.as_mut().unwrap()[0..transfer_header.len()]
-            .copy_from_slice(&transfer_header);
         self.payload_buffer.as_mut().unwrap()
-            [transfer_header.len()..transfer_header.len() + payload.len()]
+            [RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + payload.len()]
             .copy_from_slice(&payload);
-
-        let len = transfer_header.len() + payload.len();
         let mut transmit_success = false;
         let mut finished_transfer = false;
+        let mut timer = self.timer.clone();
         while !transmit_success {
-            if self.ping(timer, true, Some(3000)) {
+            if self.ping(&mut timer, true, Some(3000)) {
                 finished_transfer = true;
                 let start = timer.get_counter();
 
@@ -585,7 +587,7 @@ impl ExtSpiTransfers {
 }
 
 fn maybe_abort_dma_transfer(
-    dma: &mut DMA,
+    dma: &DMA,
     transfer_end_address: u32,
     transfer_start_address: u32,
     location: u8,
@@ -597,6 +599,7 @@ fn maybe_abort_dma_transfer(
     let mut needs_abort = false;
     let mut some_progress = false;
     // Check that the FIFOs are empty too.
+
     loop {
         if dma
             .ch(DMA_CHANNEL_NUM)

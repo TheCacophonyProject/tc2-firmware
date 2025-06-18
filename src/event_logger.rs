@@ -5,6 +5,7 @@ use core::ops::Range;
 use defmt::{error, info, warn, Format};
 
 use crate::audio_task::AlarmMode;
+use crate::synced_date_time::SyncedDateTime;
 
 #[repr(u8)]
 #[derive(Format, Copy, Clone)]
@@ -140,8 +141,18 @@ pub struct LoggerEvent {
 }
 
 impl LoggerEvent {
-    pub fn new(event: LoggerEventKind, timestamp: u64) -> LoggerEvent {
-        LoggerEvent { event, timestamp }
+    pub fn new(event: LoggerEventKind, synced_date_time: &SyncedDateTime) -> LoggerEvent {
+        LoggerEvent {
+            event,
+            timestamp: synced_date_time.get_timestamp_micros(),
+        }
+    }
+
+    pub fn new_with_unknown_time(event: LoggerEventKind) -> LoggerEvent {
+        LoggerEvent {
+            event,
+            timestamp: 0,
+        }
     }
 
     pub fn timestamp(&self) -> Option<DateTime<Utc>> {

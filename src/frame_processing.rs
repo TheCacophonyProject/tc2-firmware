@@ -2,8 +2,7 @@
 #![allow(unused_variables)]
 
 use crate::attiny_rtc_i2c::SharedI2C;
-use crate::bsp::pac;
-use crate::bsp::pac::Peripherals;
+use crate::bsp::pac::DMA;
 use crate::cptv_encoder::huffman::{HuffmanEntry, HUFFMAN_TABLE};
 use crate::cptv_encoder::streaming_cptv::{make_crc_table, CptvStream};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -20,17 +19,17 @@ use crate::motion_detector::{track_motion, MotionTracking};
 use crate::onboard_flash::OnboardFlash;
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Timelike, Utc};
 
+use crate::audio_task::{
+    check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
+};
+use crate::synced_date_time::SyncedDateTime;
 use core::ops::Add;
 use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{error, info, warn, Format};
-use rp2040_hal::timer::Instant;
-use rp2040_hal::{Sio, Timer};
-
-use crate::audio_task::{
-    check_alarm_still_valid_with_thermal_window, schedule_audio_rec, AlarmMode, MAX_GAP_MIN,
-};
+use rp2040_hal::pac::RESETS;
+use rp2040_hal::Sio;
 
 pub const NUM_LEPTON_SEGMENTS: usize = 4;
 pub const NUM_LINES_PER_LEPTON_SEGMENT: usize = 61;
@@ -211,58 +210,19 @@ fn is_frame_telemetry_is_valid(
     }
 }
 
-// NOTE: Important: If we start using dormant states again, the timer will be incorrect
-pub struct SyncedDateTime {
-    pub date_time_utc: DateTime<Utc>,
-    pub timer_offset: Instant,
-}
-
-impl Default for SyncedDateTime {
-    fn default() -> Self {
-        SyncedDateTime {
-            date_time_utc: DateTime::default(),
-            timer_offset: Instant::from_ticks(0),
-        }
-    }
-}
-
-impl SyncedDateTime {
-    pub fn get_timestamp_micros(&self, timer: &Timer) -> u64 {
-        (self.date_time_utc
-            + Duration::microseconds((timer.get_counter() - self.timer_offset).to_micros() as i64))
-        .timestamp_micros() as u64
-    }
-
-    pub fn get_adjusted_dt(&self, timer: &Timer) -> DateTime<Utc> {
-        self.date_time_utc
-            + Duration::microseconds((timer.get_counter() - self.timer_offset).to_micros() as i64)
-    }
-
-    pub fn set(&mut self, date_time: DateTime<Utc>, timer: &Timer) {
-        self.date_time_utc = date_time;
-        self.timer_offset = timer.get_counter();
-    }
-
-    pub fn new(date_time: DateTime<Utc>, timer: &Timer) -> SyncedDateTime {
-        SyncedDateTime {
-            date_time_utc: date_time,
-            timer_offset: timer.get_counter(),
-        }
-    }
-}
-
 pub fn thermal_motion_task(
+    mut delay: Delay,
+    mut sio: Sio,
+    mut dma: DMA,
+    mut resets: RESETS,
     mut shared_i2c: SharedI2C,
     mut pi_spi: ExtSpiTransfers,
     mut flash_storage: OnboardFlash,
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
-    clock_freq: u32,
-    woken_by_alarm: bool,
-    mut timer: Timer,
     device_config: &DeviceConfig,
-    event_logger: &mut EventLogger,
-    synced_date_time: &mut SyncedDateTime,
+    mut event_logger: EventLogger,
+    mut synced_date_time: SyncedDateTime,
 ) -> ! {
     let dev_mode = false;
     info!("=== Core 0 Thermal Motion start ===");
@@ -271,12 +231,7 @@ pub fn thermal_motion_task(
     } else {
         warn!("FIELD MODE");
     }
-
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let core = unsafe { pac::CorePeripherals::steal() };
-    let mut delay = Delay::new(core.SYST, clock_freq);
-    let mut sio = Sio::new(peripherals.SIO);
-
+    let timer = synced_date_time.get_timer();
     {
         if flash_storage.has_files_to_offload() {
             info!("Finished scan, has files to offload");
@@ -288,19 +243,13 @@ pub fn thermal_motion_task(
     }
 
     event_logger.log_event(
-        LoggerEvent::new(
-            LoggerEventKind::ThermalMode,
-            synced_date_time.get_timestamp_micros(&timer),
-        ),
+        LoggerEvent::new(LoggerEventKind::ThermalMode, &synced_date_time),
         &mut flash_storage,
     );
     if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
         if is_recording {
             event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::RecordingNotFinished,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
+                LoggerEvent::new(LoggerEventKind::RecordingNotFinished, &synced_date_time),
                 &mut flash_storage,
             );
         }
@@ -309,7 +258,7 @@ pub fn thermal_motion_task(
     let _ = shared_i2c
         .set_recording_flag(&mut delay, false)
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-    let startup_date_time_utc: DateTime<Utc> = synced_date_time.date_time_utc.clone();
+    let startup_date_time_utc: DateTime<Utc> = synced_date_time.get_date_time();
 
     // This is the 'raw' frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
@@ -351,20 +300,12 @@ pub fn thermal_motion_task(
             firmware_dsp_parts[2],
         ),
     );
-    if woken_by_alarm {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::Rp2040WokenByAlarm,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-    }
 
     let record_audio: bool;
     let mut audio_pending: bool = false;
     let mut next_audio_alarm: Option<DateTime<Utc>> = None;
 
+    // FIXME: Shouldn't this have already happened on startup?
     match device_config.config().audio_mode {
         AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
             let (audio_mode, audio_alarm) = get_audio_alarm(&mut flash_storage);
@@ -374,7 +315,7 @@ pub fn thermal_motion_task(
             if let Some(audio_alarm) = audio_alarm {
                 if let Ok(audio_mode) = audio_mode {
                     if audio_mode == AlarmMode::AUDIO {
-                        let synced = synced_date_time.date_time_utc;
+                        let synced = synced_date_time.get_date_time();
                         let until_alarm = (audio_alarm - synced).num_minutes();
                         if until_alarm <= MAX_GAP_MIN as i64 {
                             info!(
@@ -394,8 +335,8 @@ pub fn thermal_motion_task(
                                 schedule_alarm = false;
                             } else {
                                 schedule_alarm = true;
-                                //if window time changed and alarm is after rec window start
-                                info!("Rescehduling as alarm is after window start");
+                                // if window time changed and alarm is after rec window start
+                                info!("Rescheduling as alarm is after window start");
                             }
                         } else {
                             info!("Alarm is missed");
@@ -409,8 +350,7 @@ pub fn thermal_motion_task(
                     &synced_date_time,
                     &mut shared_i2c,
                     &mut flash_storage,
-                    &mut timer,
-                    event_logger,
+                    &mut event_logger,
                     &device_config,
                 ) {
                     next_audio_alarm = Some(next_alarm);
@@ -432,20 +372,18 @@ pub fn thermal_motion_task(
             event_logger.log_event(
                 LoggerEvent::new(
                     LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
-                    synced_date_time.get_timestamp_micros(&timer),
+                    &synced_date_time,
                 ),
                 &mut flash_storage,
             );
         }
         maybe_offload_events(
             &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
+            &mut resets,
+            &mut dma,
             &mut delay,
-            &mut timer,
-            event_logger,
+            &mut event_logger,
             &mut flash_storage,
-            clock_freq,
             &synced_date_time,
             &mut None,
         );
@@ -456,16 +394,16 @@ pub fn thermal_motion_task(
     // always start the pi up, which we don't want.
     let has_files_to_offload = flash_storage.has_files_to_offload();
     let should_offload = (has_files_to_offload
-        && !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None))
+        && !device_config.time_is_in_recording_window(&synced_date_time.get_date_time(), &None))
         || flash_storage.is_too_full_to_start_new_recordings()
         || (has_files_to_offload && flash_storage.file_start_block_index.is_none());
-    //means old file system offload once
+    // means old file system offload once
 
     if should_offload {
         event_logger.log_event(
             LoggerEvent::new(
                 LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffload),
-                synced_date_time.get_timestamp_micros(&timer),
+                &synced_date_time,
             ),
             &mut flash_storage,
         );
@@ -474,10 +412,12 @@ pub fn thermal_motion_task(
         let previous_offload_time = event_logger
             .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
             .map(|event| event.timestamp());
+
+        // FIXME
         let duration_since_prev_offload: Duration =
             if let Some(previous_offload_time) = previous_offload_time {
                 if let Some(timestamp) = previous_offload_time {
-                    synced_date_time.date_time_utc.clone() - timestamp
+                    synced_date_time.get_date_time() - timestamp
                 } else {
                     Duration::minutes(0)
                 }
@@ -488,7 +428,7 @@ pub fn thermal_motion_task(
             event_logger.log_event(
                 LoggerEvent::new(
                     LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffloadAfter24Hours),
-                    synced_date_time.get_timestamp_micros(&timer),
+                    &synced_date_time,
                 ),
                 &mut flash_storage,
             );
@@ -500,20 +440,20 @@ pub fn thermal_motion_task(
         should_offload
     };
 
-    let is_cptv = flash_storage.has_cptv_files(false);
-    let mut made_startup_status_recording = is_cptv;
+    let has_cptv_files_saved = flash_storage.has_cptv_files(false);
+    let mut made_startup_status_recording = has_cptv_files_saved;
 
     let current_recording_window =
-        device_config.next_or_current_recording_window(&synced_date_time.date_time_utc);
+        device_config.next_or_current_recording_window(&synced_date_time.get_date_time());
 
     let mut made_shutdown_status_recording = !device_config.time_is_in_recording_window(
-        &synced_date_time.date_time_utc,
+        &synced_date_time.get_date_time(),
         &Some(current_recording_window),
     );
 
     info!(
         "Has cptv files? {} has files? {}",
-        is_cptv,
+        has_cptv_files_saved,
         flash_storage.has_files_to_offload()
     );
 
@@ -521,14 +461,12 @@ pub fn thermal_motion_task(
         offload_flash_storage_and_events(
             &mut flash_storage,
             &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            clock_freq,
+            &mut resets,
+            &mut dma,
             &mut shared_i2c,
             &mut delay,
-            &mut timer,
-            event_logger,
-            synced_date_time,
+            &mut event_logger,
+            &mut synced_date_time,
             None,
             false,
         )
@@ -562,11 +500,11 @@ pub fn thermal_motion_task(
     let mut prev_frame_telemetry: Option<Telemetry> = None;
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
-    let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
+    let mut is_daytime = device_config.time_is_in_daylight(&synced_date_time.get_date_time());
 
     info!(
         "Current time is in recording window? {}",
-        device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
+        device_config.time_is_in_recording_window(&synced_date_time.get_date_time(), &None)
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
@@ -696,8 +634,7 @@ pub fn thermal_motion_task(
                     .as_u8_slice_mut(),
                 0,
                 cptv_stream.is_some(),
-                &mut peripherals.DMA,
-                &mut timer,
+                &mut dma,
             )
         } else {
             None
@@ -707,16 +644,13 @@ pub fn thermal_motion_task(
                 event_logger.log_event(
                     LoggerEvent::new(
                         LoggerEventKind::StartedSendingFramesToRpi,
-                        synced_date_time.get_timestamp_micros(&timer),
+                        &synced_date_time,
                     ),
                     &mut flash_storage,
                 );
             } else {
                 event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::StartedGettingFrames,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
+                    LoggerEvent::new(LoggerEventKind::StartedGettingFrames, &synced_date_time),
                     &mut flash_storage,
                 );
             }
@@ -771,7 +705,7 @@ pub fn thermal_motion_task(
                     && status_recording_pending.is_none()
                 {
                     if dev_mode {
-                        if synced_date_time.date_time_utc + Duration::minutes(1)
+                        if synced_date_time.get_date_time() + Duration::minutes(1)
                             > startup_date_time_utc + Duration::minutes(4)
                         {
                             warn!("Make shutdown status recording");
@@ -779,7 +713,7 @@ pub fn thermal_motion_task(
                         }
                     } else {
                         let (_, window_end) = &current_recording_window;
-                        if &(synced_date_time.date_time_utc + Duration::minutes(1)) > window_end {
+                        if &(synced_date_time.get_date_time() + Duration::minutes(1)) > window_end {
                             warn!("Make shutdown status recording");
                             status_recording_pending = Some(StatusRecording::ShutdownStatus);
                         }
@@ -815,12 +749,12 @@ pub fn thermal_motion_task(
                     // (when we do our once a minute checks) when we're *not* trying to start a recording.
                     let is_inside_recording_window = if !dev_mode {
                         device_config.time_is_in_recording_window(
-                            &synced_date_time.date_time_utc,
+                            &synced_date_time.get_date_time(),
                             &Some(current_recording_window),
                         )
                     } else {
                         // Recording window is 5 minutes from startup time in dev mode.
-                        synced_date_time.date_time_utc
+                        synced_date_time.get_date_time()
                             < startup_date_time_utc + Duration::minutes(5)
                     };
                     // start recording below so frame buffer is out of scope
@@ -886,7 +820,7 @@ pub fn thermal_motion_task(
                             event_logger.log_event(
                                 LoggerEvent::new(
                                     LoggerEventKind::WouldDiscardAsFalsePositive,
-                                    synced_date_time.get_timestamp_micros(&timer),
+                                    &synced_date_time,
                                 ),
                                 &mut flash_storage,
                             );
@@ -899,7 +833,7 @@ pub fn thermal_motion_task(
                             event_logger.log_event(
                                 LoggerEvent::new(
                                     LoggerEventKind::EndedRecording,
-                                    synced_date_time.get_timestamp_micros(&timer),
+                                    &synced_date_time,
                                 ),
                                 &mut flash_storage,
                             );
@@ -908,7 +842,7 @@ pub fn thermal_motion_task(
                                 event_logger.log_event(
                                     LoggerEvent::new(
                                         LoggerEventKind::LostFrames(lost_frames as u64),
-                                        synced_date_time.get_timestamp_micros(&timer),
+                                        &synced_date_time,
                                     ),
                                     &mut flash_storage,
                                 );
@@ -953,12 +887,8 @@ pub fn thermal_motion_task(
         }
 
         if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
-            let did_abort_transfer = pi_spi.end_message(
-                &mut peripherals.DMA,
-                transfer_end_address,
-                transfer_start_address,
-                transfer,
-            );
+            let did_abort_transfer =
+                pi_spi.end_message(&dma, transfer_end_address, transfer_start_address, transfer);
             if did_abort_transfer {
                 warn!(
                     "Transfer aborted for frame #{}, pi must be asleep?",
@@ -982,7 +912,7 @@ pub fn thermal_motion_task(
 
             error!("Starting new recording, {:?}", &frame_telemetry);
             let mut cptv_streamer = CptvStream::new(
-                synced_date_time.get_timestamp_micros(&timer), // Microseconds
+                synced_date_time.get_timestamp_micros(), // Microseconds
                 lepton_version,
                 lepton_serial,
                 lepton_firmware_version,
@@ -1004,10 +934,7 @@ pub fn thermal_motion_task(
             frames_written += 1;
 
             event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::StartedRecording,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
+                LoggerEvent::new(LoggerEventKind::StartedRecording, &synced_date_time),
                 &mut flash_storage,
             );
 
@@ -1084,10 +1011,7 @@ pub fn thermal_motion_task(
                 advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                 if !logged_told_rpi_to_sleep {
                     event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::ToldRpiToSleep,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
+                        LoggerEvent::new(LoggerEventKind::ToldRpiToSleep, &synced_date_time),
                         &mut flash_storage,
                     );
                     logged_told_rpi_to_sleep = true;
@@ -1100,13 +1024,10 @@ pub fn thermal_motion_task(
             let sync_rtc_start_real = timer.get_counter();
 
             match shared_i2c.get_datetime(&mut delay) {
-                Ok(now) => synced_date_time.set(get_datetime_utc(now), &timer),
+                Ok(now) => synced_date_time.set(get_datetime_utc(now)),
                 Err(err_str) => {
                     event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::RtcCommError,
-                            synced_date_time.get_timestamp_micros(&timer),
-                        ),
+                        LoggerEvent::new(LoggerEventKind::RtcCommError, &synced_date_time),
                         &mut flash_storage,
                     );
                     error!("Unable to get DateTime from RTC: {}", err_str);
@@ -1121,22 +1042,19 @@ pub fn thermal_motion_task(
             // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
             // is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
             // never shut down.
-            is_daytime = device_config.time_is_in_daylight(&synced_date_time.date_time_utc);
+            is_daytime = device_config.time_is_in_daylight(&synced_date_time.get_date_time());
             let is_outside_recording_window = if !dev_mode {
-                !device_config.time_is_in_recording_window(&synced_date_time.date_time_utc, &None)
+                !device_config.time_is_in_recording_window(&synced_date_time.get_date_time(), &None)
             } else {
                 let is_inside_recording_window =
-                    synced_date_time.date_time_utc < startup_date_time_utc + Duration::minutes(5);
+                    synced_date_time.get_date_time() < startup_date_time_utc + Duration::minutes(5);
                 !is_inside_recording_window
             };
 
             let flash_storage_nearly_full = flash_storage.is_too_full_to_start_new_recordings();
             if flash_storage_nearly_full && !logged_flash_storage_nearly_full {
                 event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::FlashStorageNearlyFull,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
+                    LoggerEvent::new(LoggerEventKind::FlashStorageNearlyFull, &synced_date_time),
                     &mut flash_storage,
                 );
                 logged_flash_storage_nearly_full = true;
@@ -1165,10 +1083,7 @@ pub fn thermal_motion_task(
                     advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
                     if !logged_told_rpi_to_sleep {
                         event_logger.log_event(
-                            LoggerEvent::new(
-                                LoggerEventKind::ToldRpiToSleep,
-                                synced_date_time.get_timestamp_micros(&timer),
-                            ),
+                            LoggerEvent::new(LoggerEventKind::ToldRpiToSleep, &synced_date_time),
                             &mut flash_storage,
                         );
                         logged_told_rpi_to_sleep = true;
@@ -1183,7 +1098,7 @@ pub fn thermal_motion_task(
                             event_logger.log_event(
                                 LoggerEvent::new(
                                     LoggerEventKind::GotRpiPoweredDown,
-                                    synced_date_time.get_timestamp_micros(&timer),
+                                    &synced_date_time,
                                 ),
                                 &mut flash_storage,
                             );
@@ -1208,19 +1123,16 @@ pub fn thermal_motion_task(
                         //  and ask for the rp2040 to be put to sleep.
                         let next_recording_window_start = if !dev_mode {
                             device_config
-                                .next_recording_window_start(&synced_date_time.date_time_utc)
+                                .next_recording_window_start(&synced_date_time.get_date_time())
                         } else {
                             // In dev mode, we always set the restart alarm for 2 minutes time.
-                            synced_date_time.date_time_utc + Duration::minutes(2)
+                            synced_date_time.get_date_time() + Duration::minutes(2)
                         };
                         let enabled_alarm = shared_i2c.enable_alarm(&mut delay);
                         if enabled_alarm.is_err() {
                             error!("Failed enabling alarm");
                             event_logger.log_event(
-                                LoggerEvent::new(
-                                    LoggerEventKind::RtcCommError,
-                                    synced_date_time.get_timestamp_micros(&timer),
-                                ),
+                                LoggerEvent::new(LoggerEventKind::RtcCommError, &synced_date_time),
                                 &mut flash_storage,
                             );
                         }
@@ -1237,7 +1149,7 @@ pub fn thermal_motion_task(
                                         LoggerEventKind::SetAlarm(
                                             next_recording_window_start.timestamp_micros() as u64,
                                         ),
-                                        synced_date_time.get_timestamp_micros(&timer),
+                                        &synced_date_time,
                                     ),
                                     &mut flash_storage,
                                 );
@@ -1257,7 +1169,7 @@ pub fn thermal_motion_task(
                                 event_logger.log_event(
                                     LoggerEvent::new(
                                         LoggerEventKind::Rp2040Sleep,
-                                        synced_date_time.get_timestamp_micros(&timer),
+                                        &synced_date_time,
                                     ),
                                     &mut flash_storage,
                                 );
@@ -1270,7 +1182,7 @@ pub fn thermal_motion_task(
                                     event_logger.log_event(
                                         LoggerEvent::new(
                                             LoggerEventKind::AttinyCommError,
-                                            synced_date_time.get_timestamp_micros(&timer),
+                                            &synced_date_time,
                                         ),
                                         &mut flash_storage,
                                     );
@@ -1280,7 +1192,7 @@ pub fn thermal_motion_task(
                                 event_logger.log_event(
                                     LoggerEvent::new(
                                         LoggerEventKind::RtcCommError,
-                                        synced_date_time.get_timestamp_micros(&timer),
+                                        &synced_date_time,
                                     ),
                                     &mut flash_storage,
                                 );
@@ -1289,10 +1201,7 @@ pub fn thermal_motion_task(
                         } else {
                             error!("Failed setting wake alarm, can't go to sleep");
                             event_logger.log_event(
-                                LoggerEvent::new(
-                                    LoggerEventKind::RtcCommError,
-                                    synced_date_time.get_timestamp_micros(&timer),
-                                ),
+                                LoggerEvent::new(LoggerEventKind::RtcCommError, &synced_date_time),
                                 &mut flash_storage,
                             );
                         }
@@ -1311,7 +1220,7 @@ pub fn thermal_motion_task(
                     event_logger.log_event(
                         LoggerEvent::new(
                             LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
-                            synced_date_time.get_timestamp_micros(&timer),
+                            &synced_date_time,
                         ),
                         &mut flash_storage,
                     );
@@ -1339,7 +1248,7 @@ pub fn thermal_motion_task(
             // NOTE: We only get the actual date from the RTC every minutes' worth of frames, so that we
             // don't have too many stalls trying to communicate via I2C with the RTC.
 
-            let mut incremented_datetime = synced_date_time.date_time_utc.clone();
+            let mut incremented_datetime = synced_date_time.get_date_time();
 
             let frames_elapsed = if frame_header_is_valid {
                 get_frames_elapsed(&frame_telemetry, &prev_frame_telemetry)
@@ -1350,8 +1259,8 @@ pub fn thermal_motion_task(
                 warn!("Got {} elapsed frames, ignoring", frames_elapsed);
             } else {
                 incremented_datetime += Duration::milliseconds(115 * frames_elapsed as i64);
-                if incremented_datetime > synced_date_time.date_time_utc {
-                    synced_date_time.set(incremented_datetime, &timer);
+                if incremented_datetime > synced_date_time.get_date_time() {
+                    synced_date_time.set(incremented_datetime);
                 }
             }
 
@@ -1369,22 +1278,17 @@ pub fn thermal_motion_task(
         // );
         if record_audio {
             if let Some(next_audio_alarm) = next_audio_alarm {
-                if !audio_pending && synced_date_time.date_time_utc > next_audio_alarm {
+                if !audio_pending && synced_date_time.get_date_time() > next_audio_alarm {
                     //Should we be checking alarm triggered? or just use this and clear alarm
                     audio_pending = true;
-                    let cur_time = &synced_date_time.date_time_utc;
-
+                    let cur_time = &synced_date_time.get_date_time();
                     info!(
-                            "Audio recording is pending because time {}:{} from {}:{} and timer {:?} startup {:?} is after {}:{} ",
-                            cur_time.hour(),
-                            cur_time.minute(),
-                            synced_date_time.date_time_utc.hour(),
-                            synced_date_time.date_time_utc.minute(),
-                            timer.get_counter().ticks(),
-                            synced_date_time.timer_offset.ticks(),
-                            next_audio_alarm.hour(),
-                            next_audio_alarm.minute()
-                            )
+                        "Audio recording is pending because time {}:{} is after {}:{} ",
+                        cur_time.hour(),
+                        cur_time.minute(),
+                        next_audio_alarm.hour(),
+                        next_audio_alarm.minute()
+                    )
                 }
             }
 
@@ -1398,7 +1302,7 @@ pub fn thermal_motion_task(
                 // this ensures we always make the status recording
                 if !device_config.use_low_power_mode()
                     || made_shutdown_status_recording
-                    || &(synced_date_time.date_time_utc + Duration::minutes(2)) < window_end
+                    || &(synced_date_time.get_date_time() + Duration::minutes(2)) < window_end
                 {
                     // handles case where thermal recorder on the rPi is doing recording
                     if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {

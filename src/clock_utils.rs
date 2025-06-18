@@ -1,6 +1,6 @@
 use crate::bsp;
 use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
-use crate::bsp::pac::{Peripherals, CLOCKS, ROSC, XOSC};
+use crate::bsp::pac::{CLOCKS, ROSC, XOSC};
 use crate::bsp::XOSC_CRYSTAL_FREQ;
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::clocks::{ClockSource, ClocksManager, StoppableClock};
@@ -210,7 +210,6 @@ pub fn setup_rosc_as_system_clock(
     desired_rosc_freq: HertzU32,
 ) -> (ClocksManager, RingOscillator<bsp::hal::rosc::Enabled>) {
     // Setup the crystal oscillator to do accurate measurements against
-    let peripherals = unsafe { Peripherals::steal() };
     let xosc = setup_xosc_blocking(xosc_peripheral, XOSC_CRYSTAL_FREQ.Hz()).unwrap();
 
     // Find appropriate settings for the desired ring oscillator frequency.

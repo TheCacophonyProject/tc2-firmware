@@ -1,6 +1,5 @@
 use crate::bsp::pac::RESETS;
 use crate::bsp::pac::{PIO1, SPI1};
-use crate::frame_processing::SyncedDateTime;
 use crate::{bsp, onboard_flash};
 use cortex_m::prelude::*;
 use defmt::{info, warn};
@@ -12,7 +11,6 @@ use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{
     PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM1,
 };
-use rp2040_hal::Timer;
 
 const PDM_DECIMATION: usize = 64;
 const SAMPLE_RATE: usize = 48000;
@@ -24,7 +22,7 @@ struct RecordingStatus {
     total_samples: usize,
     samples_taken: usize,
 }
-use crate::onboard_flash::{OnboardFlash, FLASH_SPI_USER_PAYLOAD_SIZE};
+use crate::onboard_flash::OnboardFlash;
 use onboard_flash::extend_lifetime_generic_mut;
 
 use crc::{Crc, CRC_16_XMODEM};
@@ -36,6 +34,8 @@ impl RecordingStatus {
 }
 
 use crate::pdm_filter::PDMFilter;
+use crate::synced_date_time::SyncedDateTime;
+
 pub struct PdmMicrophone {
     data_disabled: Option<Pin<Gpio0, FunctionNull, PullNone>>,
     clk_disabled: Option<Pin<Gpio1, FunctionNull, PullNone>>,
@@ -210,17 +210,17 @@ impl PdmMicrophone {
         num_seconds: usize,
         ch3: Channel<CH3>,
         ch4: Channel<CH4>,
-        timer: &mut Timer,
         resets: &mut RESETS,
         spi: SPI1,
         flash_storage: &mut OnboardFlash,
         timestamp: u64,
         watchdog: &mut bsp::hal::Watchdog,
-        date_time: &SyncedDateTime,
+        synced_date_time: &SyncedDateTime,
     ) -> bool {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
 
+        let mut timer = synced_date_time.get_timer();
         watchdog.feed();
         //how long to warm up??
         timer.delay_ms(2000);
@@ -243,18 +243,9 @@ impl PdmMicrophone {
         };
         let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
         let mut recorded_successfully = false;
-        // Swap our buffers?
-        let use_async: bool = false;
-        let mut flash_payload_buf = [0x42u8; FLASH_SPI_USER_PAYLOAD_SIZE];
-        if use_async {
-            flash_storage.payload_buffer =
-                Some(unsafe { extend_lifetime_generic_mut(&mut flash_payload_buf) });
-        }
-
         // Pull out more samples via dma double_buffering.
-        let mut transfer = None;
-        let mut address = None;
         if let Some(pio_rx) = self.pio_rx.take() {
+            // Get timer in microseconds
             let mut start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
             // Chain some buffers together for continuous transfers
             let mut b_0 = [0u32; 512];
@@ -272,15 +263,6 @@ impl PdmMicrophone {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
                     warn!("Couldn't keep up with data {}", cycle);
-                    if use_async && transfer.is_some() {
-                        flash_storage.finish_transfer(
-                            None,
-                            None,
-                            transfer.take().unwrap(),
-                            address.take().unwrap(),
-                            true,
-                        );
-                    }
                     let _ = flash_storage.erase_last_file();
 
                     break;
@@ -312,26 +294,11 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
-                        if use_async {
-                            match flash_storage.append_file_bytes_async(
-                                data, data_size, false, None, None, transfer, address,
-                            ) {
-                                Ok((new_t, new_a)) => {
-                                    transfer = new_t;
-                                    address = new_a;
-                                }
-                                Err(e) => {
-                                    warn!("Error writing bytes to flash ending rec early {}", e);
-                                    break;
-                                }
-                            }
-                        } else {
-                            if let Err(e) =
-                                flash_storage.append_file_bytes(data, data_size, false, None, None)
-                            {
-                                warn!("Error writing bytes to flash ending rec early {}", e);
-                                break;
-                            }
+                        if let Err(e) =
+                            flash_storage.append_file_bytes(data, data_size, false, None, None)
+                        {
+                            warn!("Error writing bytes to flash ending rec early {}", e);
+                            break;
                         }
                         audio_buffer.reset();
                         if leftover.len() > 0 {
@@ -347,26 +314,14 @@ impl PdmMicrophone {
                             "Recording done took {} ms",
                             (timer.get_counter() - start).to_millis(),
                         );
-                        let start = date_time.get_adjusted_dt(timer);
+                        let start = synced_date_time.get_date_time();
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
-                        if use_async {
-                            match flash_storage.append_file_bytes_async(
-                                payload, data_size, true, None, None, transfer, address,
-                            ) {
-                                Ok(_) => (),
-                                Err(e) => {
-                                    warn!("Error writing bytes to flash ending rec early {}", e);
-                                    break;
-                                }
-                            }
-                        } else {
-                            if let Err(e) = flash_storage
-                                .append_file_bytes(payload, data_size, true, None, None)
-                            {
-                                warn!("Error writing bytes to flash ending rec early {}", e);
-                                break;
-                            }
+                        if let Err(e) =
+                            flash_storage.append_file_bytes(payload, data_size, true, None, None)
+                        {
+                            warn!("Error writing bytes to flash ending rec early {}", e);
+                            break;
                         }
                         recorded_successfully = true;
                         break;
@@ -382,6 +337,7 @@ impl PdmMicrophone {
 
 const USER_BUFFER_LENGTH: usize = 1024;
 
+// FIXME: Where does this number come from?
 // expecting 2066 bytes
 // so for u16 data
 pub struct AudioBuffer {
@@ -393,7 +349,7 @@ const AUDIO_SHEBANG: u16 = 1;
 impl AudioBuffer {
     pub const fn new() -> AudioBuffer {
         AudioBuffer {
-            data: [0xffffu16; (512 * 2 + 34)],
+            data: [0xffffu16; 512 * 2 + 34],
             index: PAGE_COMMAND_ADDRESS,
         }
     }

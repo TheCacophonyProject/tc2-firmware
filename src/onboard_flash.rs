@@ -16,20 +16,20 @@ use crate::byte_slice_cursor::CursorMut;
 
 use byteorder::{ByteOrder, LittleEndian};
 use core::mem;
-use crc::{Crc, CRC_16_XMODEM};
-use defmt::{error, info, println, warn, Format};
+use crc::{CRC_16_XMODEM, Crc};
+use defmt::{Format, error, info, println, warn};
 
 use cortex_m::prelude::*;
 use embedded_hal::digital::OutputPin;
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::dma::{bidirectional, Channel, CH1, CH2};
-use rp2040_hal::gpio::bank0::{Gpio10, Gpio11, Gpio8, Gpio9};
+use rp2040_hal::Spi;
+use rp2040_hal::dma::{CH1, CH2, Channel, bidirectional};
+use rp2040_hal::gpio::bank0::{Gpio8, Gpio9, Gpio10, Gpio11};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
 };
 use rp2040_hal::pac::RESETS;
 use rp2040_hal::spi::Enabled;
-use rp2040_hal::Spi;
 
 const WRITE_ENABLE: u8 = 0x06;
 
@@ -143,6 +143,21 @@ pub const FLASH_SPI_USER_PAYLOAD_SIZE: usize =
 
 pub type FlashSpiFullPayload = &'static mut [u8; FLASH_SPI_TOTAL_PAYLOAD_SIZE];
 pub type FlashSpiUserPayload = &'static mut [u8; FLASH_SPI_USER_PAYLOAD_SIZE];
+type FlashDmaTransfer = bidirectional::Transfer<
+    Channel<CH1>,
+    Channel<CH2>,
+    FlashSpiUserPayload,
+    Spi<
+        Enabled,
+        SPI1,
+        (
+            Pin<Gpio11, FunctionSpi, PullDown>,
+            Pin<Gpio8, FunctionSpi, PullDown>,
+            Pin<Gpio10, FunctionSpi, PullDown>,
+        ),
+    >,
+    FlashSpiUserPayload,
+>;
 
 pub struct Page {
     inner: Option<FlashSpiFullPayload>,
@@ -205,20 +220,12 @@ impl Page {
 
     pub fn file_start_block_index(&self) -> Option<u16> {
         let start = LittleEndian::read_u16(&self.user_metadata_1()[12..=13]);
-        if start == u16::MAX {
-            None
-        } else {
-            Some(start)
-        }
+        if start == u16::MAX { None } else { Some(start) }
     }
 
     pub fn previous_file_start_block_index(&self) -> Option<u16> {
         let block = LittleEndian::read_u16(&self.user_metadata_1()[14..=15]);
-        if block == u16::MAX {
-            None
-        } else {
-            Some(block)
-        }
+        if block == u16::MAX { None } else { Some(block) }
     }
 
     fn is_last_page_for_file(&self) -> bool {
@@ -252,25 +259,25 @@ impl Page {
 }
 
 pub unsafe fn extend_lifetime<'b>(r: &'b [u8]) -> &'static [u8] {
-    mem::transmute::<&'b [u8], &'static [u8]>(r)
+    unsafe { mem::transmute::<&'b [u8], &'static [u8]>(r) }
 }
 
 pub unsafe fn extend_lifetime_generic<'b, T>(r: &'b T) -> &'static T {
-    mem::transmute::<&'b T, &'static T>(r)
+    unsafe { mem::transmute::<&'b T, &'static T>(r) }
 }
 
 pub unsafe fn extend_lifetime_generic_mut<'b, T>(r: &'b mut T) -> &'static mut T {
-    mem::transmute::<&'b mut T, &'static mut T>(r)
+    unsafe { mem::transmute::<&'b mut T, &'static mut T>(r) }
 }
 
 pub unsafe fn extend_lifetime_generic_mut_with_const_size<'b, T, const SIZE: usize>(
     r: &'b mut [T; SIZE],
 ) -> &'static mut [T; SIZE] {
-    mem::transmute::<&'b mut [T; SIZE], &'static mut [T; SIZE]>(r)
+    unsafe { mem::transmute::<&'b mut [T; SIZE], &'static mut [T; SIZE]>(r) }
 }
 
 pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
-    mem::transmute::<&'b mut [u8], &'static mut [u8]>(r)
+    unsafe { mem::transmute::<&'b mut [u8], &'static mut [u8]>(r) }
 }
 
 pub struct OnboardFlash {
@@ -300,12 +307,12 @@ pub struct OnboardFlash {
     pub prev_page: Page,
     dma_channel_1: Option<Channel<CH1>>,
     dma_channel_2: Option<Channel<CH2>>,
-    record_to_flash: bool,
     pub payload_buffer: Option<FlashSpiUserPayload>,
     pub file_start_block_index: Option<u16>,
     //could use same block for both but would have to write config every audio change and vice versa
     pub config_block: Option<isize>,
     pub audio_block: Option<isize>,
+    system_clock_hz: HertzU32,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -322,8 +329,8 @@ impl OnboardFlash {
         flash_page_buf_2: FlashSpiFullPayload,
         dma_channel_1: Channel<CH1>,
         dma_channel_2: Channel<CH2>,
-        should_record: bool,
         payload_buffer: Option<FlashSpiUserPayload>,
+        system_clock_hz: HertzU32,
     ) -> OnboardFlash {
         OnboardFlash {
             cs,
@@ -340,12 +347,12 @@ impl OnboardFlash {
             prev_page: Page::new(flash_page_buf_2),
             dma_channel_1: Some(dma_channel_1),
             dma_channel_2: Some(dma_channel_2),
-            record_to_flash: should_record,
             payload_buffer,
             file_start_block_index: None,
             previous_file_start_block_index: None,
             config_block: None,
             audio_block: None,
+            system_clock_hz,
         }
     }
     pub fn init(&mut self) {
@@ -486,11 +493,8 @@ impl OnboardFlash {
             warn!("Ending Config at {}:{}", b, p);
         }
 
-        if self.record_to_flash {
-            self.spi_write(&bytes[1..]);
-            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-        }
-
+        self.spi_write(&bytes[1..]);
+        self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
         let status = self.wait_for_ready();
 
@@ -654,7 +658,7 @@ impl OnboardFlash {
         self.bad_blocks = bad_blocks;
     }
 
-    pub fn take_spi(&mut self, peripheral: SPI1, resets: &mut RESETS, freq: HertzU32) {
+    pub fn take_spi(&mut self, peripheral: SPI1, resets: &mut RESETS) {
         let miso = self.miso_disabled.take().unwrap();
         let mosi = self.mosi_disabled.take().unwrap();
         let clk = self.clk_disabled.take().unwrap();
@@ -666,7 +670,12 @@ impl OnboardFlash {
                 clk.into_function().into_pull_type(),
             ),
         )
-        .init(resets, freq, 40_000_000.Hz(), &embedded_hal::spi::MODE_3);
+        .init(
+            resets,
+            self.system_clock_hz,
+            40_000_000.Hz(),
+            &embedded_hal::spi::MODE_3,
+        );
         self.spi = Some(spi);
     }
 
@@ -829,7 +838,7 @@ impl OnboardFlash {
         }
     }
     pub fn get_file_part(&mut self) -> Option<((&[u8], u16, isize, isize), bool, SPI1)> {
-        // TODO: Could interleave using cache_random_read
+        // TODO: Could interleave using cache_random_read, might improve throughput slightly?
         if self
             .read_page(self.current_block_index, self.current_page_index)
             .is_ok()
@@ -957,7 +966,7 @@ impl OnboardFlash {
     pub fn begin_offload_reverse(&mut self) -> bool {
         if let Some(last_block_index) = self.last_used_block_index {
             if let Some(file_start) = self.file_start_block_index {
-                //read 1 as if incomplete 0 won't be writen too
+                // read 1 as if incomplete 0 won't be writen to
                 self.read_page(file_start as isize, 1).unwrap();
                 self.read_page_metadata(file_start as isize);
                 self.wait_for_all_ready();
@@ -971,7 +980,7 @@ impl OnboardFlash {
                 );
                 return true;
             }
-            //old file system should only happen once
+            // old file system should only happen once
             self.current_block_index = self.find_start(last_block_index);
             self.current_page_index = 0;
             self.file_start_block_index = Some(self.current_block_index as u16);
@@ -1029,18 +1038,18 @@ impl OnboardFlash {
         }
         let length =
             length.unwrap_or((FLASH_USER_PAGE_SIZE + FLASH_METADATA_SIZE) - offset as usize);
-        // TODO: Use a pair of global buffers for all DMA transfers
-
         let prev_page = self.prev_page.take();
         {
             self.cs.set_low().unwrap();
-
             // If the offset is 2048, we want the actual offset in our buffer to be 2052, then the
             // start is at 2048
             let offset = offset as usize;
             let src_range = 0..length + FLASH_SPI_HEADER;
             let dst_range = offset..offset + length + FLASH_SPI_HEADER;
             crate::assert_eq!(src_range.len(), dst_range.len());
+
+            // FIXME: Why is this a bidirectional transfer again?
+            //  That seems to be the main reason we need these Page abstractions.
             let transfer = bidirectional::Config::new(
                 (
                     self.dma_channel_1.take().unwrap(),
@@ -1137,202 +1146,6 @@ impl OnboardFlash {
         self.current_block_index
     }
 
-    pub fn finish_transfer(
-        &mut self,
-        block_index: Option<isize>,
-        page_index: Option<isize>,
-        transfer: bidirectional::Transfer<
-            Channel<CH1>,
-            Channel<CH2>,
-            FlashSpiUserPayload,
-            Spi<
-                Enabled,
-                SPI1,
-                (
-                    Pin<Gpio11, FunctionSpi, PullDown>,
-                    Pin<Gpio8, FunctionSpi, PullDown>,
-                    Pin<Gpio10, FunctionSpi, PullDown>,
-                ),
-            >,
-            FlashSpiUserPayload,
-        >,
-        address: [u8; 3],
-        is_last: bool,
-    ) -> OnboardFlashStatus {
-        let b = block_index.unwrap_or(self.current_block_index);
-        let p = page_index.unwrap_or(self.current_page_index);
-        let ((r_ch1, r_ch2), tx_buf, spi, rx_buf) = transfer.wait();
-        self.cs.set_high().unwrap();
-        self.payload_buffer = Some(tx_buf);
-        self.dma_channel_1 = Some(r_ch1);
-        self.dma_channel_2 = Some(r_ch2);
-        self.spi = Some(spi);
-        self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-        let status = self.wait_for_ready();
-        if !status.program_failed() {
-            if self.first_used_block_index.is_none() {
-                self.first_used_block_index = Some(b);
-            }
-            if self.last_used_block_index.is_none() {
-                self.last_used_block_index = Some(b);
-            } else if let Some(last_used_block_index) = self.last_used_block_index {
-                if last_used_block_index < b {
-                    self.last_used_block_index = Some(b);
-                }
-            }
-
-            if block_index.is_none() && page_index.is_none() {
-                self.advance_file_cursor(is_last);
-            }
-        } else {
-            error!("Programming failed");
-        }
-        return status;
-    }
-
-    pub fn append_file_bytes_async(
-        &mut self,
-        bytes: &mut [u8],
-        user_bytes_length: usize,
-        is_last: bool,
-        block_index: Option<isize>,
-        page_index: Option<isize>,
-        transfer: Option<
-            bidirectional::Transfer<
-                Channel<CH1>,
-                Channel<CH2>,
-                FlashSpiUserPayload,
-                Spi<
-                    Enabled,
-                    SPI1,
-                    (
-                        Pin<Gpio11, FunctionSpi, PullDown>,
-                        Pin<Gpio8, FunctionSpi, PullDown>,
-                        Pin<Gpio10, FunctionSpi, PullDown>,
-                    ),
-                >,
-                FlashSpiUserPayload,
-            >,
-        >,
-        address: Option<[u8; 3]>,
-    ) -> Result<
-        (
-            Option<
-                bidirectional::Transfer<
-                    Channel<CH1>,
-                    Channel<CH2>,
-                    FlashSpiUserPayload,
-                    Spi<
-                        Enabled,
-                        SPI1,
-                        (
-                            Pin<Gpio11, FunctionSpi, PullDown>,
-                            Pin<Gpio8, FunctionSpi, PullDown>,
-                            Pin<Gpio10, FunctionSpi, PullDown>,
-                        ),
-                    >,
-                    FlashSpiUserPayload,
-                >,
-            >,
-            Option<[u8; 3]>,
-        ),
-        &str,
-    > {
-        if let Some(transfer) = transfer {
-            let status =
-                self.finish_transfer(block_index, page_index, transfer, address.unwrap(), false);
-
-            if !status.erase_failed() {}
-        }
-        let b = block_index.unwrap_or(self.current_block_index);
-        let p = page_index.unwrap_or(self.current_page_index);
-
-        if b > NUM_RECORDING_BLOCKS {
-            return Err(&"Flash full");
-        }
-        self.write_enable();
-        assert_eq!(self.write_enabled(), true);
-        // Bytes will always be a full page + metadata + command info at the start
-        assert_eq!(bytes.len(), FLASH_SPI_USER_PAYLOAD_SIZE);
-        // Skip the first byte in the buffer
-
-        let address = Some(OnboardFlash::get_address(b, p));
-        let plane = ((b % 2) << 4) as u8;
-        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-        let crc =
-            crc_check.checksum(&bytes[FLASH_SPI_HEADER..FLASH_SPI_HEADER + user_bytes_length]);
-        {
-            let spi_header = &mut bytes[..FLASH_SPI_HEADER];
-            // PROGRAM_LOAD only takes 3 bytes for its header, so we skip the first byte of our max
-            // 4 byte header
-            spi_header[1] = PROGRAM_LOAD;
-            spi_header[2] = plane;
-            spi_header[3] = 0;
-        }
-        {
-            let user_metadata_bytes = &mut bytes[FLASH_SPI_HEADER..][0x820..=0x83f];
-            //Now write into the user meta section
-            user_metadata_bytes[0] = 0; // Page is used
-            user_metadata_bytes[1] = if is_last { 0 } else { 0xff }; // Page is last page of file?
-            {
-                let space = &mut user_metadata_bytes[2..=3];
-                LittleEndian::write_u16(space, user_bytes_length as u16);
-            }
-            // TODO Write user detected bad blocks into user-metadata section?
-            user_metadata_bytes[4] = b as u8;
-            user_metadata_bytes[5] = p as u8;
-            {
-                let space = &mut user_metadata_bytes[6..=7];
-                LittleEndian::write_u16(space, user_bytes_length as u16);
-            }
-            {
-                let space = &mut user_metadata_bytes[8..=9];
-                LittleEndian::write_u16(space, crc);
-            }
-            {
-                let space = &mut user_metadata_bytes[10..=11];
-                LittleEndian::write_u16(space, crc);
-            }
-        }
-        let mut transfer = None;
-        if self.record_to_flash {
-            if self.payload_buffer.is_none() {
-                return Err("Payload buffer is None have you called init_async_buf??");
-            }
-            self.payload_buffer.as_mut().unwrap()[..bytes.len() - 1].copy_from_slice(&bytes[1..]);
-            self.cs.set_low().unwrap();
-            let buf = self.payload_buffer.as_mut().unwrap();
-
-            let mut rx_buf = [0x42u8; FLASH_SPI_USER_PAYLOAD_SIZE];
-            let rx_buf = unsafe { extend_lifetime_generic_mut(&mut rx_buf) };
-
-            transfer = Some(
-                bidirectional::Config::new(
-                    (
-                        self.dma_channel_1.take().unwrap(),
-                        self.dma_channel_2.take().unwrap(),
-                    ),
-                    self.payload_buffer.take().unwrap(),
-                    self.spi.take().unwrap(),
-                    rx_buf,
-                )
-                .start(),
-            );
-            if is_last {
-                let status = self.finish_transfer(
-                    block_index,
-                    page_index,
-                    transfer.take().unwrap(),
-                    address.unwrap(),
-                    true,
-                );
-                return Ok((None, None));
-            }
-        }
-
-        return Ok((transfer, address));
-    }
-
     pub fn append_file_bytes(
         &mut self,
         bytes: &mut [u8],
@@ -1406,13 +1219,9 @@ impl OnboardFlash {
         if is_last {
             warn!("Ending file at {}:{}", b, p);
         }
-
-        if self.record_to_flash {
-            // PROGRAM_LOAD
-            self.spi_write(&bytes[1..]);
-            self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-        }
-
+        // PROGRAM_LOAD
+        self.spi_write(&bytes[1..]);
+        self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
         let status = self.wait_for_ready();
 

@@ -12,7 +12,7 @@ use core::convert::Infallible;
 use core::mem;
 use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
 use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
-use defmt::{error, info, warn};
+use defmt::{error, info, panic, warn};
 use defmt::{trace, Format};
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
@@ -376,19 +376,19 @@ impl LeptonModule {
         info!("Telemetry enabled? {}", telemetry_enabled);
         if let Ok(telemetry_enabled) = telemetry_enabled {
             if !telemetry_enabled {
-                crate::panic!("Telemetry disabled");
+                panic!("Telemetry disabled");
             }
         } else {
-            crate::panic!("Telemetry not set");
+            panic!("Telemetry not set");
         }
         let telemetry_location = self.telemetry_location();
         info!("Telemetry location? {}", telemetry_location);
         if let Ok(telemetry_location) = telemetry_location {
             if telemetry_location != TelemetryLocation::Header {
-                crate::panic!("Telemetry not in header");
+                panic!("Telemetry not in header");
             }
         } else {
-            crate::panic!("Telemetry not in header");
+            panic!("Telemetry not in header");
         }
 
         info!("Enable post-processing");
@@ -400,10 +400,10 @@ impl LeptonModule {
         info!("Radiometry enabled? {}", radiometry_enabled);
         if let Ok(radiometry_enabled) = radiometry_enabled {
             if !radiometry_enabled {
-                crate::panic!("Radiometry not enabled");
+                panic!("Radiometry not enabled");
             }
         } else {
-            crate::panic!("Radiometry not enabled");
+            panic!("Radiometry not enabled");
         }
 
         info!("Enable vsync");
@@ -415,10 +415,10 @@ impl LeptonModule {
         info!("Vsync enabled? {}", vsync_enabled);
         if let Ok(vsync_enabled) = vsync_enabled {
             if !vsync_enabled {
-                crate::panic!("Vsync not enabled");
+                panic!("Vsync not enabled");
             }
         } else {
-            crate::panic!("Vsync not enabled");
+            panic!("Vsync not enabled");
         }
     }
 
@@ -1346,29 +1346,26 @@ pub struct LeptonPins {
 pub fn init_lepton_module(
     spi_peripheral: SPI0,
     ic2_peripheral: I2C0,
-    system_clock_freq_hz: u32,
+    system_clock_freq_hz: HertzU32,
     resets: &mut RESETS,
     delay: &mut Delay,
     pins: LeptonPins,
 ) -> LeptonModule {
     let spi = Spi::new(spi_peripheral, (pins.tx, pins.rx, pins.clk)).init(
         resets,
-        system_clock_freq_hz.Hz(),
+        system_clock_freq_hz,
         LEPTON_SPI_CLOCK_FREQ.Hz(),
         &MODE_3,
     );
-    let i2c = bsp::hal::I2C::i2c0(
-        ic2_peripheral,
-        pins.sda,
-        pins.scl,
-        100.kHz(),
-        resets,
-        system_clock_freq_hz.Hz(),
-    );
-    //I2C0::ptr().ic_tx_tl.write()
-    //*I2C0::ptr().ic_tx_tl.write(|w| unsafe { w.tx_tl().bits(0) });
     let mut lepton = LeptonModule::new(
-        i2c,
+        bsp::hal::I2C::i2c0(
+            ic2_peripheral,
+            pins.sda,
+            pins.scl,
+            100.kHz(),
+            resets,
+            system_clock_freq_hz,
+        ),
         spi,
         pins.cs,
         pins.vsync,

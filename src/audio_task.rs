@@ -1,26 +1,25 @@
 use crate::attiny_rtc_i2c::{tc2_agent_state, RecordingType, SharedI2C};
 use crate::bsp;
 use crate::bsp::pac;
-use crate::bsp::pac::Peripherals;
+use crate::bsp::pac::{Peripherals, PIO1};
 use crate::device_config::{AudioMode, DeviceConfig};
 use crate::event_logger::{
     clear_audio_alarm, get_audio_alarm, write_audio_alarm, EventLogger, LoggerEvent,
     LoggerEventKind, WakeReason,
 };
 use crate::ext_spi_transfers::ExtSpiTransfers;
-use crate::frame_processing::{
-    advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi, SyncedDateTime,
-};
+use crate::frame_processing::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi};
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
 use crate::sub_tasks::offload_flash_storage_and_events;
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
-use rp2040_hal::{gpio, Timer};
+use rp2040_hal::gpio;
 
 use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
-use fugit::{ExtU32, RateExtU32};
+use fugit::{ExtU32, HertzU32};
 
+use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use cortex_m::asm::nop;
 use gpio::bank0::{Gpio0, Gpio1};
@@ -28,7 +27,9 @@ use gpio::FunctionNull;
 use picorand::{PicoRandGenerate, WyRand, RNG};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio::PullDown;
-use rp2040_hal::pio::PIOExt;
+use rp2040_hal::pio::UninitStateMachine;
+use rp2040_hal::pio::PIO;
+use rp2040_hal::pio::SM1;
 
 #[repr(u8)]
 #[derive(PartialEq, Eq)]
@@ -56,8 +57,7 @@ pub const MAX_GAP_MIN: u8 = 60;
 
 pub fn audio_task(
     mut shared_i2c: SharedI2C,
-    clock_freq: u32,
-    mut timer: Timer,
+    clock_freq: HertzU32,
     gpio0: gpio::Pin<Gpio0, FunctionNull, PullDown>,
     gpio1: gpio::Pin<Gpio1, FunctionNull, PullDown>,
     mut watchdog: Watchdog,
@@ -67,29 +67,14 @@ pub fn audio_task(
     mut pi_spi: ExtSpiTransfers,
     mut event_logger: EventLogger,
     synced_date_time: SyncedDateTime,
+    pio1: PIO<PIO1>,
+    sm1: UninitStateMachine<(PIO1, SM1)>,
 ) -> ! {
     watchdog.feed();
-
-    let core = unsafe { pac::CorePeripherals::steal() };
-    let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
-
-    let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
-
-    watchdog.feed();
-
-    let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
-    let mut delay = Delay::new(core.SYST, clock_freq);
-
-    if alarm_triggered {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::Rp2040WokenByAlarm,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
-            &mut flash_storage,
-        );
-    }
-
+    let mut delay = Delay::new(
+        pac::CorePeripherals::take().unwrap().SYST,
+        clock_freq.to_Hz(),
+    );
     let mut duration = 60;
     let mut recording_type = None;
     let mut user_recording_requested = false;
@@ -148,20 +133,14 @@ pub fn audio_task(
         }
 
         event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::AudioMode,
-                synced_date_time.get_timestamp_micros(&timer),
-            ),
+            LoggerEvent::new(LoggerEventKind::AudioMode, &synced_date_time),
             &mut flash_storage,
         );
         // Unset the is_recording flag on attiny on startup
         if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
             if is_recording {
                 event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::RecordingNotFinished,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
+                    LoggerEvent::new(LoggerEventKind::RecordingNotFinished, &synced_date_time),
                     &mut flash_storage,
                 );
             }
@@ -177,10 +156,8 @@ pub fn audio_task(
         let mut should_wake = false;
         match device_config.config().audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                let in_window = device_config.time_is_in_recording_window(
-                    &synced_date_time.get_adjusted_dt(&mut timer),
-                    &None,
-                );
+                let in_window = device_config
+                    .time_is_in_recording_window(&synced_date_time.get_date_time(), &None);
                 if !in_window {
                     let is_cptv = flash_storage.has_cptv_files(true);
                     //this means end of thermal window so should offload recordings
@@ -190,7 +167,7 @@ pub fn audio_task(
                         event_logger.log_event(
                             LoggerEvent::new(
                                 LoggerEventKind::ToldRpiToWake(WakeReason::AudioThermalEnded),
-                                synced_date_time.get_timestamp_micros(&timer),
+                                &synced_date_time,
                             ),
                             &mut flash_storage,
                         );
@@ -205,7 +182,7 @@ pub fn audio_task(
                 event_logger.log_event(
                     LoggerEvent::new(
                         LoggerEventKind::ToldRpiToWake(WakeReason::AudioShouldOffload),
-                        synced_date_time.get_timestamp_micros(&timer),
+                        &synced_date_time,
                     ),
                     &mut flash_storage,
                 );
@@ -217,7 +194,6 @@ pub fn audio_task(
             clock_freq,
             &mut flash_storage,
             &mut pi_spi,
-            &mut timer,
             &mut event_logger,
             should_wake,
             &mut delay,
@@ -239,9 +215,7 @@ pub fn audio_task(
         if recording_type.is_none() && scheduled {
             // check we haven't missed the alarm somehow
             if let Some(alarm) = alarm_date_time {
-                let synced = synced_date_time.get_adjusted_dt(&mut timer);
-                let until_alarm =
-                    (alarm - synced_date_time.get_adjusted_dt(&mut timer)).num_minutes();
+                let until_alarm = (alarm - synced_date_time.get_date_time()).num_minutes();
                 if until_alarm <= 0 || until_alarm > MAX_GAP_MIN as i64 {
                     info!(
                         "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
@@ -257,7 +231,7 @@ pub fn audio_task(
                             LoggerEventKind::Rp2040MissedAudioAlarm(
                                 alarm.timestamp_micros() as u64,
                             ),
-                            synced_date_time.get_timestamp_micros(&timer),
+                            &synced_date_time,
                         ),
                         &mut flash_storage,
                     );
@@ -273,23 +247,20 @@ pub fn audio_task(
             let _ = shared_i2c
                 .set_recording_flag(&mut delay, true)
                 .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
-            let timestamp = synced_date_time.get_timestamp_micros(&timer);
+            let timestamp = synced_date_time.get_timestamp_micros();
             let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
 
             let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
             let mut microphone = PdmMicrophone::new(
                 gpio0.into_function().into_pull_type(),
                 gpio1.into_function().into_pull_type(),
-                clock_freq.Hz(),
+                clock_freq,
                 pio1,
                 sm1,
             );
 
             event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::StartedAudioRecording,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
+                LoggerEvent::new(LoggerEventKind::StartedAudioRecording, &synced_date_time),
                 &mut flash_storage,
             );
 
@@ -297,7 +268,6 @@ pub fn audio_task(
                 duration,
                 dma_channels.ch3,
                 dma_channels.ch4,
-                &mut timer,
                 &mut peripherals.RESETS,
                 peripherals.SPI1,
                 &mut flash_storage,
@@ -311,20 +281,14 @@ pub fn audio_task(
 
             if !recorded {
                 event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::AudioRecordingFailed,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
+                    LoggerEvent::new(LoggerEventKind::AudioRecordingFailed, &synced_date_time),
                     &mut flash_storage,
                 );
                 info!("Recording failed restarting and will try again");
                 restart(&mut watchdog);
             } else {
                 event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::EndedRecording,
-                        synced_date_time.get_timestamp_micros(&timer),
-                    ),
+                    LoggerEvent::new(LoggerEventKind::EndedRecording, &synced_date_time),
                     &mut flash_storage,
                 );
                 match recording_type.as_mut().unwrap() {
@@ -356,10 +320,8 @@ pub fn audio_task(
                             &mut pi_spi,
                             &mut peripherals.RESETS,
                             &mut peripherals.DMA,
-                            clock_freq,
                             &mut shared_i2c,
                             &mut delay,
-                            &mut timer,
                             &mut event_logger,
                             &synced_date_time,
                             Some(&mut watchdog),
@@ -396,7 +358,6 @@ pub fn audio_task(
             &synced_date_time,
             &mut shared_i2c,
             &mut flash_storage,
-            &mut timer,
             &mut event_logger,
             &device_config,
         ) {
@@ -424,17 +385,13 @@ pub fn audio_task(
         _ => false,
     };
     let in_window = device_config.config().audio_mode == AudioMode::AudioAndThermal
-        && device_config
-            .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(&mut timer), &None);
+        && device_config.time_is_in_recording_window(&synced_date_time.get_date_time(), &None);
 
     loop {
         advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         if !logged_power_down {
             event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToSleep,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
+                LoggerEvent::new(LoggerEventKind::ToldRpiToSleep, &synced_date_time),
                 &mut flash_storage,
             );
             logged_power_down = true;
@@ -445,9 +402,8 @@ pub fn audio_task(
             if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
                 if pi_is_powered_down {
                     if let Some(alarm_time) = alarm_date_time {
-                        let until_alarm = (alarm_time
-                            - synced_date_time.get_adjusted_dt(&mut timer))
-                        .num_minutes();
+                        let until_alarm =
+                            (alarm_time - synced_date_time.get_date_time()).num_minutes();
 
                         if until_alarm < 1 {
                             // otherwise the alarm could trigger  between here and sleeping
@@ -463,10 +419,7 @@ pub fn audio_task(
                     if !in_window {
                         info!("Ask Attiny to power down rp2040");
                         event_logger.log_event(
-                            LoggerEvent::new(
-                                LoggerEventKind::Rp2040Sleep,
-                                synced_date_time.get_timestamp_micros(&timer),
-                            ),
+                            LoggerEvent::new(LoggerEventKind::Rp2040Sleep, &synced_date_time),
                             &mut flash_storage,
                         );
 
@@ -485,7 +438,6 @@ pub fn audio_task(
                         clock_freq,
                         &mut flash_storage,
                         &mut pi_spi,
-                        &mut timer,
                         &mut event_logger,
                         false,
                         &mut delay,
@@ -511,7 +463,7 @@ pub fn audio_task(
 
         let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
         if alarm_triggered {
-            info!("Alarm triggered after taking a recording reseeting rp2040");
+            info!("Alarm triggered after taking a recording resetting rp2040");
             restart(&mut watchdog);
         }
 
@@ -529,10 +481,9 @@ fn restart(watchdog: &mut Watchdog) {
 
 pub fn offload(
     i2c: &mut SharedI2C,
-    clock_freq: u32,
+    clock_freq: HertzU32,
     flash_storage: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
-    timer: &mut Timer,
     event_logger: &mut EventLogger,
     mut wake_if_asleep: bool,
     delay: &mut Delay,
@@ -558,10 +509,8 @@ pub fn offload(
                 pi_spi,
                 &mut peripherals.RESETS,
                 &mut peripherals.DMA,
-                clock_freq,
                 i2c,
                 delay,
-                timer,
                 event_logger,
                 &synced_date_time,
                 Some(watchdog),
@@ -580,7 +529,6 @@ pub fn schedule_audio_rec(
     synced_date_time: &SyncedDateTime,
     i2c: &mut SharedI2C,
     flash_storage: &mut OnboardFlash,
-    timer: &mut Timer,
     event_logger: &mut EventLogger,
     device_config: &DeviceConfig,
 ) -> Result<DateTime<Utc>, ()> {
@@ -590,7 +538,7 @@ pub fn schedule_audio_rec(
     }
     let mut wakeup: DateTime<Utc>;
     let seed: u64;
-    let current_time = synced_date_time.get_adjusted_dt(timer);
+    let current_time = synced_date_time.get_date_time();
 
     if device_config.config().audio_seed > 0 {
         wakeup = current_time
@@ -602,7 +550,7 @@ pub fn schedule_audio_rec(
             device_config.config().audio_seed as u64,
         );
     } else {
-        seed = synced_date_time.date_time_utc.timestamp() as u64;
+        seed = synced_date_time.get_date_time().timestamp() as u64;
         wakeup = current_time;
     };
     let mut rng = RNG::<WyRand, u16>::new(seed);
@@ -627,8 +575,8 @@ pub fn schedule_audio_rec(
     }
     info!(
         "Set alarm, current time is {}:{} Next alarm is {}:{}",
-        synced_date_time.date_time_utc.time().hour(),
-        synced_date_time.date_time_utc.time().minute(),
+        synced_date_time.get_date_time().time().hour(),
+        synced_date_time.get_date_time().time().minute(),
         wakeup.hour(),
         wakeup.minute()
     );
@@ -649,7 +597,7 @@ pub fn schedule_audio_rec(
                 if start < current_time {
                     if let AudioMode::AudioAndThermal = device_config.config().audio_mode {
                         //audio recording inside recording window
-                        info!("Scheudling audio inside thermal window");
+                        info!("Scheduling audio inside thermal window");
                     } else {
                         info!("Already in rec window so restart now");
                         return Err(());
@@ -674,7 +622,7 @@ pub fn schedule_audio_rec(
                 event_logger.log_event(
                     LoggerEvent::new(
                         LoggerEventKind::SetAlarm(wakeup.timestamp_micros() as u64),
-                        synced_date_time.get_timestamp_micros(&timer),
+                        synced_date_time,
                     ),
                     flash_storage,
                 );

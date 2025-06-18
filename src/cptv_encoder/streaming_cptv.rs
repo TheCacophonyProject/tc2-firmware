@@ -1,3 +1,4 @@
+use crate::FIRMWARE_VERSION;
 use crate::byte_slice_cursor::CursorMut;
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
@@ -5,11 +6,10 @@ use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::DeviceConfig;
 use crate::lepton::Telemetry;
 use crate::onboard_flash::OnboardFlash;
-use crate::FIRMWARE_VERSION;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
 use core::ops::{Index, IndexMut};
-use defmt::{info, Format};
+use defmt::{Format, info};
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Copy, Clone, Format)]
@@ -54,6 +54,7 @@ pub enum FieldType {
 
 // This is *either* a zero-terminated string,
 // *or* a string taking the full length of the `data` array.
+#[derive(Copy, Clone)]
 pub struct MaybeZeroTerminatedString<const LENGTH: usize> {
     data: [u8; LENGTH],
 }
@@ -676,7 +677,7 @@ impl<'a> CptvStream<'a> {
         // Now write the CPTV header into the first page of the starting block as a separate gzip member,
         // now that we know the total frame count for the recording, and the min/max pixel values.
         self.init_gzip_stream(flash_storage, true);
-        for byte in push_header_iterator(&self.cptv_header) {
+        for byte in push_header_iterator(&self.cptv_header.clone()) {
             self.push_byte(byte, flash_storage);
         }
         self.write_gzip_trailer(flash_storage, true);
@@ -831,6 +832,7 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
 // "flir"
 // "lepton3.5"
 // "<unknown>"
+#[derive(Copy, Clone)]
 pub struct Cptv2Header {
     pub timestamp: u64,
     pub device_name: MaybeZeroTerminatedString<63>,

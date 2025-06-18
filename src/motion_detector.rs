@@ -1,5 +1,5 @@
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use defmt::{info, Format};
+use defmt::{Format, info};
 
 const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;
@@ -105,7 +105,7 @@ pub fn track_motion(
     //  The hot map stores whether a segment is currently triggering, and what it's previous
     //  (pre-triggering) max value was.
     let mut motion_tracking = match prev_frame_stats {
-        Some(ref stats) => MotionTracking::with_previous(&stats),
+        Some(stats) => MotionTracking::with_previous(&stats),
         None => MotionTracking::new(),
     };
     let trigger_threshold_val = trigger_threshold(is_daytime);

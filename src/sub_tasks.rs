@@ -4,27 +4,25 @@ use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-use crate::frame_processing::{wake_raspberry_pi, SyncedDateTime};
+use crate::frame_processing::wake_raspberry_pi;
 use crate::onboard_flash::OnboardFlash;
+use crate::synced_date_time::SyncedDateTime;
 use crate::FIRMWARE_VERSION;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use crc::{Crc, CRC_16_XMODEM};
 use defmt::{info, warn};
-use fugit::{ExtU32, HertzU32, RateExtU32};
-use rp2040_hal::Timer;
+use fugit::{ExtU32, HertzU32};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
     delay: &mut Delay,
-    timer: &mut Timer,
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
-    clock_freq: u32,
-    time: &SyncedDateTime,
+    synced_date_time: &SyncedDateTime,
     watchdog: &mut Option<&mut Watchdog>,
 ) -> bool {
     let mut success = true;
@@ -48,7 +46,6 @@ pub fn maybe_offload_events(
                             &event_bytes,
                             current_crc,
                             dma,
-                            timer,
                             resets,
                             None, // FIXME: Do we want progress here?
                         );
@@ -67,7 +64,7 @@ pub fn maybe_offload_events(
                         }
                     }
                     if let Some(spi) = pi_spi.disable() {
-                        flash_storage.take_spi(spi, resets, clock_freq.Hz());
+                        flash_storage.take_spi(spi, resets);
                     }
                     if !success {
                         break 'transfer_all_events;
@@ -77,25 +74,14 @@ pub fn maybe_offload_events(
         }
         info!("Offloaded {} event(s)", total_events);
         if success {
-            let start = timer.get_counter();
             event_logger.clear(flash_storage);
-            info!(
-                "Clear events took {}µs",
-                (timer.get_counter() - start).to_micros()
-            );
             event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::OffloadedLogs,
-                    time.get_timestamp_micros(&timer),
-                ),
+                LoggerEvent::new(LoggerEventKind::OffloadedLogs, synced_date_time),
                 flash_storage,
             );
         } else {
             event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::LogOffloadFailed,
-                    time.get_timestamp_micros(&timer),
-                ),
+                LoggerEvent::new(LoggerEventKind::LogOffloadFailed, synced_date_time),
                 flash_storage,
             );
         }
@@ -108,12 +94,10 @@ pub fn offload_flash_storage_and_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    clock_freq: u32,
     shared_i2c: &mut SharedI2C,
     delay: &mut Delay,
-    timer: &mut Timer,
     event_logger: &mut EventLogger,
-    time: &SyncedDateTime,
+    synced_date_time: &SyncedDateTime,
     mut watchdog: Option<&mut Watchdog>,
     only_last_file: bool,
 ) -> bool {
@@ -122,10 +106,7 @@ pub fn offload_flash_storage_and_events(
 
     if wake_raspberry_pi(shared_i2c, delay) {
         event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::GotRpiPoweredOn,
-                time.get_timestamp_micros(&timer),
-            ),
+            LoggerEvent::new(LoggerEventKind::GotRpiPoweredOn, synced_date_time),
             flash_storage,
         );
     }
@@ -137,11 +118,9 @@ pub fn offload_flash_storage_and_events(
             resets,
             dma,
             delay,
-            timer,
             event_logger,
             flash_storage,
-            clock_freq,
-            time,
+            synced_date_time,
             &mut watchdog,
         );
     }
@@ -158,7 +137,14 @@ pub fn offload_flash_storage_and_events(
         let mut part_count = 0;
         let mut file_ended = false;
         let last_used_block_index = flash_storage.last_used_block_index.unwrap_or(0) as u16;
-        while let Some(((part, crc, block_index, page_index), is_last, spi)) =
+
+        // For speed of offloading, we read from flash cache into a one of the page buffers
+        // held by the flash_storage.  Then we swap buffers and return the just read page,
+        // so that it can be immediately transferred via DMA to the raspberry pi.
+        // Only, we're sharing the same SPI peripheral to do this, so while the transfer is happening
+        // we can't be transferring more to the back buffer from the flash.  So what's the point
+        // of having a complex double buffering system?
+        'outer: while let Some(((part, crc, block_index, page_index), is_last, spi)) =
             flash_storage.get_file_part()
         {
             watchdog.as_mut().map(|w| w.feed());
@@ -206,7 +192,6 @@ pub fn offload_flash_storage_and_events(
                     &part,
                     current_crc,
                     dma,
-                    timer,
                     resets,
                     progress,
                 );
@@ -226,19 +211,16 @@ pub fn offload_flash_storage_and_events(
 
             // Give spi peripheral back to flash storage.
             if let Some(spi) = pi_spi.disable() {
-                flash_storage.take_spi(spi, resets, clock_freq.Hz());
-                if is_last {
+                flash_storage.take_spi(spi, resets);
+                if is_last && success {
                     event_logger.log_event(
-                        LoggerEvent::new(
-                            LoggerEventKind::OffloadedRecording,
-                            time.get_timestamp_micros(&timer),
-                        ),
+                        LoggerEvent::new(LoggerEventKind::OffloadedRecording, synced_date_time),
                         flash_storage,
                     );
                 }
             }
             if !success {
-                break;
+                break 'outer;
             }
 
             part_count += 1;
@@ -252,9 +234,6 @@ pub fn offload_flash_storage_and_events(
             }
             file_start = false;
         }
-        if !success {
-            break;
-        }
 
         if !file_ended {
             info!(
@@ -266,7 +245,7 @@ pub fn offload_flash_storage_and_events(
                 event_logger.log_event(
                     LoggerEvent::new(
                         LoggerEventKind::ErasePartialOrCorruptRecording,
-                        time.get_timestamp_micros(&timer),
+                        synced_date_time,
                     ),
                     flash_storage,
                 );
@@ -288,10 +267,7 @@ pub fn offload_flash_storage_and_events(
         file_count != 0
     } else {
         event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::FileOffloadFailed,
-                time.get_timestamp_micros(&timer),
-            ),
+            LoggerEvent::new(LoggerEventKind::FileOffloadFailed, synced_date_time),
             flash_storage,
         );
         flash_storage.scan();
@@ -310,7 +286,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     radiometry_enabled: u32,
     camera_serial_number: u32,
     audio_mode: bool,
-    timer: &mut Timer,
     existing_config: Option<DeviceConfig>,
 ) -> (Option<DeviceConfig>, bool) {
     let mut payload = [0u8; 16];
@@ -318,6 +293,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     if let Some(free_spi) = flash_storage.free_spi() {
         pi_spi.enable(free_spi, resets);
 
+        // FIXME: Rework initial handshake
         LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
         LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
         LittleEndian::write_u32(&mut payload[8..12], camera_serial_number);
@@ -330,7 +306,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             &payload,
             crc,
             dma,
-            timer,
             resets,
             None,
         ) {
@@ -357,7 +332,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 &payload,
                                 crc,
                                 dma,
-                                timer,
                                 resets,
                                 None,
                             ) {
@@ -395,7 +369,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let mut slice_to_write = &mut new_config_bytes[0..length_used + 2400];
                         if let Some(spi_free) = pi_spi.disable() {
-                            flash_storage.take_spi(spi_free, resets, clock_freq);
+                            flash_storage.take_spi(spi_free, resets);
                         }
                         flash_storage.write_device_config(&mut slice_to_write);
                         new_config.cursor_position += 2400;
@@ -408,12 +382,12 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 (existing_config, config_was_updated)
             };
             if let Some(spi_free) = pi_spi.disable() {
-                flash_storage.take_spi(spi_free, resets, clock_freq);
+                flash_storage.take_spi(spi_free, resets);
             }
             new_config
         } else {
             if let Some(spi_free) = pi_spi.disable() {
-                flash_storage.take_spi(spi_free, resets, clock_freq);
+                flash_storage.take_spi(spi_free, resets);
             }
             (existing_config, config_was_updated)
         }

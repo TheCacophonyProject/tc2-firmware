@@ -77,8 +77,6 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
-
-    // FIXME: I don't think we should rewrite DeviceConfig each time the audio mode changes, can we do better?
     pub audio_mode: AudioMode,
     pub audio_seed: u32,
 }
