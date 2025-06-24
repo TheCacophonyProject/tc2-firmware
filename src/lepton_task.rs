@@ -2,8 +2,8 @@ use crate::cptv_encoder::FRAME_WIDTH;
 use crate::frame_processing::{
     Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT,
 };
-use crate::lepton::{read_telemetry, FFCStatus, LeptonModule};
-use crate::{bsp, FFC_INTERVAL_MS};
+use crate::lepton::{FFCStatus, LeptonModule, read_telemetry};
+use crate::{FFC_INTERVAL_MS, bsp};
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
 use bsp::hal::rosc::RingOscillator;
@@ -12,7 +12,7 @@ use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
-use crc::{Crc, CRC_16_XMODEM};
+use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
 use defmt::{info, warn};
 use fugit::{ExtU32, HertzU32, RateExtU32};
@@ -45,9 +45,7 @@ fn go_dormant_until_woken<T: PinId>(
     lepton: &mut LeptonModule,
     rosc_freq: HertzU32,
 ) -> RingOscillator<bsp::hal::rosc::Enabled> {
-    lepton
-        .vsync
-        .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
+    lepton.vsync.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
     unsafe { rosc.dormant() };
     // Woken by pin
@@ -57,8 +55,12 @@ fn go_dormant_until_woken<T: PinId>(
     initialized_rosc
 }
 
+/// # Panics
+///
+/// Does not panic, spi read is actually infallible
+#[allow(clippy::too_many_lines)]
 pub fn frame_acquisition_loop(
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
+    rosc: &RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,
@@ -111,7 +113,7 @@ pub fn frame_acquisition_loop(
     let mut last_frame_seen = None;
 
     watchdog.pause_on_debug(true);
-    watchdog.start(8388607.micros());
+    watchdog.start(8_388_607.micros());
     // should not feed watchdog if we dont receive a message and are in low power mode
     'frame_loop: loop {
         if got_sync || is_recording {
@@ -153,7 +155,7 @@ pub fn frame_acquisition_loop(
         }
         {
             // Read the next frame
-            let mut prev_packet_id = -1;
+            let mut prev_packet_id = 0;
             'scanline: loop {
                 // This is one scanline
                 let packet = lepton.transfer(&mut scanline_buffer).unwrap();
@@ -163,11 +165,11 @@ pub fn frame_acquisition_loop(
                 if is_discard_packet {
                     continue 'scanline;
                 }
-                let packet_id = (packet_header & 0x0fff) as isize;
-                let is_valid_packet_num = packet_id >= 0 && packet_id <= last_packet_id_for_segment;
+                let packet_id = usize::from(packet_header & 0x0fff);
+                let is_valid_packet_num = packet_id <= last_packet_id_for_segment;
 
                 if packet_id == 0 {
-                    prev_packet_id = -1;
+                    prev_packet_id = 0;
                     started_segment = true;
                     // If we don't know, always start at segment 1 so that things will be
                     // written out.
@@ -179,65 +181,64 @@ pub fn frame_acquisition_loop(
 
                     if got_sync && valid_frame_current_segment_num == 1 {
                         // Check if we need an FFC
-                        if unverified_frame_counter == prev_frame_counter + 2 {
-                            if !needs_ffc
-                                && !is_recording
-                                && telemetry.msec_on != 0
-                                && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
+                        if unverified_frame_counter == prev_frame_counter + 2
+                            && !needs_ffc
+                            && !is_recording
+                            && telemetry.msec_on != 0
+                            && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
+                        {
+                            // If time on ms is zero, that indicates a corrupt/invalid frame.
+                            if telemetry.msec_on < telemetry.time_at_last_ffc {
+                                warn!(
+                                    "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
+                                    telemetry.msec_on, telemetry.time_at_last_ffc
+                                );
+                            } else if telemetry.msec_on - telemetry.time_at_last_ffc
+                                > FFC_INTERVAL_MS
+                                && telemetry.ffc_status != FFCStatus::Imminent
+                                && telemetry.ffc_status != FFCStatus::InProgress
                             {
-                                // If time on ms is zero, that indicates a corrupt/invalid frame.
-                                if telemetry.msec_on < telemetry.time_at_last_ffc {
-                                    warn!(
-                                        "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
-                                        telemetry.msec_on, telemetry.time_at_last_ffc
-                                    );
-                                } else if telemetry.msec_on - telemetry.time_at_last_ffc
-                                    > FFC_INTERVAL_MS
-                                    && telemetry.ffc_status != FFCStatus::Imminent
-                                    && telemetry.ffc_status != FFCStatus::InProgress
-                                {
-                                    needs_ffc = true;
-                                    ffc_requested = false;
-                                    if high_power_mode {
-                                        // FIXME: Why, if we're in high-power mode, can't we do an FFC here?  Document this.
-                                        can_do_ffc = false;
-                                    }
+                                needs_ffc = true;
+                                ffc_requested = false;
+                                if high_power_mode {
+                                    // FIXME: Why, if we're in high-power mode, can't we do an FFC here?  Document this.
+                                    can_do_ffc = false;
                                 }
+                            }
 
-                                // Sometimes the header is invalid, but the frame becomes valid and gets sync.
-                                // Because the telemetry revision is static across frame headers we can detect this
-                                // case and not send the frame, as it may cause false triggers.
-                                if times_telemetry_revision_stable > -1
-                                    && times_telemetry_revision_stable <= 2
+                            // Sometimes the header is invalid, but the frame becomes valid and gets sync.
+                            // Because the telemetry revision is static across frame headers we can detect this
+                            // case and not send the frame, as it may cause false triggers.
+                            if times_telemetry_revision_stable > -1
+                                && times_telemetry_revision_stable <= 2
+                            {
+                                if seen_telemetry_revision[0] == telemetry.revision[0]
+                                    && seen_telemetry_revision[1] == telemetry.revision[1]
                                 {
-                                    if seen_telemetry_revision[0] == telemetry.revision[0]
-                                        && seen_telemetry_revision[1] == telemetry.revision[1]
-                                    {
-                                        times_telemetry_revision_stable += 1;
-                                    } else {
-                                        times_telemetry_revision_stable = -1;
-                                    }
-                                    if times_telemetry_revision_stable > 2 {
-                                        info!(
-                                            "Got stable telemetry revision (core 1) {:?}",
-                                            telemetry.revision
-                                        );
-                                    }
-                                }
-                                if times_telemetry_revision_stable == -1 {
-                                    // Initialise seen telemetry revision.
-                                    seen_telemetry_revision =
-                                        [telemetry.revision[0], telemetry.revision[1]];
                                     times_telemetry_revision_stable += 1;
+                                } else {
+                                    times_telemetry_revision_stable = -1;
                                 }
-                                if times_telemetry_revision_stable > 2
-                                    && (seen_telemetry_revision[0] != telemetry.revision[0]
-                                        || seen_telemetry_revision[1] != telemetry.revision[1])
-                                {
-                                    // We have a misaligned/invalid frame.
-                                    warn!("Got misaligned frame header");
-                                    got_sync = false;
+                                if times_telemetry_revision_stable > 2 {
+                                    info!(
+                                        "Got stable telemetry revision (core 1) {:?}",
+                                        telemetry.revision
+                                    );
                                 }
+                            }
+                            if times_telemetry_revision_stable == -1 {
+                                // Initialise seen telemetry revision.
+                                seen_telemetry_revision =
+                                    [telemetry.revision[0], telemetry.revision[1]];
+                                times_telemetry_revision_stable += 1;
+                            }
+                            if times_telemetry_revision_stable > 2
+                                && (seen_telemetry_revision[0] != telemetry.revision[0]
+                                    || seen_telemetry_revision[1] != telemetry.revision[1])
+                            {
+                                // We have a misaligned/invalid frame.
+                                warn!("Got misaligned frame header");
+                                got_sync = false;
                             }
                         }
                     }
@@ -302,7 +303,7 @@ pub fn frame_acquisition_loop(
 
                 let is_valid_segment_num = valid_frame_current_segment_num > 0
                     && valid_frame_current_segment_num <= last_segment_num_for_frame;
-                let packets_are_in_order = packet_id == prev_packet_id + 1;
+                let packets_are_in_order = packet_id == 0 || packet_id == prev_packet_id + 1;
                 if is_valid_segment_num
                     && is_valid_packet_num
                     && started_segment
@@ -311,7 +312,7 @@ pub fn frame_acquisition_loop(
                     if do_crc_check {
                         let crc = scanline_buffer[1].to_le();
                         BigEndian::write_u16_into(&scanline_buffer, &mut crc_buffer);
-                        crc_buffer[0] = crc_buffer[0] & 0x0f;
+                        crc_buffer[0] &= 0x0f;
                         crc_buffer[2] = 0;
                         crc_buffer[3] = 0;
                         if crc_check.checksum(&crc_buffer) != crc
@@ -328,7 +329,7 @@ pub fn frame_acquisition_loop(
                     // Copy the line out to the appropriate place in the current segment buffer.
                     critical_section::with(|cs| {
                         let segment_index =
-                            ((valid_frame_current_segment_num as u8).max(1).min(4) - 1) as usize;
+                            usize::from(valid_frame_current_segment_num.clamp(1, 4) - 1);
                         // NOTE: We may be writing the incorrect seg number here initially, but it will always be
                         //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
                         let buffer = if selected_frame_buffer == 0 {
@@ -337,14 +338,14 @@ pub fn frame_acquisition_loop(
                             frame_buffer_local_2
                         };
 
-                        LittleEndian::write_u16_into(
-                            &scanline_buffer[2..],
-                            buffer
-                                .borrow_ref_mut(cs)
-                                .as_mut()
-                                .unwrap()
-                                .packet(segment_index, packet_id as usize),
-                        );
+                        if let Some(buffer) = buffer.borrow_ref_mut(cs).as_mut() {
+                            LittleEndian::write_u16_into(
+                                &scanline_buffer[2..],
+                                buffer.packet(segment_index, packet_id),
+                            );
+                        } else {
+                            defmt::error!("Failed to write to frame buffer");
+                        }
                     });
 
                     let is_last_segment = valid_frame_current_segment_num == 4;
@@ -461,9 +462,8 @@ pub fn frame_acquisition_loop(
                             lepton.power_on_sequence(delay);
                         }
                         break 'scanline;
-                    } else {
-                        continue 'scanline;
                     }
+                    continue 'scanline;
                 }
                 prev_packet_id = packet_id;
 

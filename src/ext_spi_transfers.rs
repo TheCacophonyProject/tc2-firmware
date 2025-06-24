@@ -1,24 +1,24 @@
 use crate::bsp;
 use crate::bsp::pac;
-use crate::bsp::pac::{interrupt, DMA, PIO0, RESETS, SPI1};
-use crate::onboard_flash::{extend_lifetime, FLASH_USER_PAGE_SIZE};
+use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1, interrupt};
+use crate::onboard_flash::{FLASH_USER_PAGE_SIZE, extend_lifetime};
 
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
 use cortex_m::prelude::*;
 use critical_section::Mutex;
-use defmt::{info, warn, Format};
+use defmt::{Format, info, warn};
 use fugit::MicrosDurationU32;
 use rp2040_hal::dma::single_buffer::Transfer;
-use rp2040_hal::dma::{single_buffer, Channel, CH0};
-use rp2040_hal::gpio::bank0::{Gpio12, Gpio13, Gpio14, Gpio15, Gpio5};
+use rp2040_hal::dma::{CH0, Channel, single_buffer};
 use rp2040_hal::gpio::Interrupt::LevelLow;
+use rp2040_hal::gpio::bank0::{Gpio5, Gpio12, Gpio13, Gpio14, Gpio15};
 use rp2040_hal::gpio::{
     FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, PullUp, SioInput,
 };
 use rp2040_hal::pio::{
-    PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM0,
+    PIO, PIOBuilder, Running, Rx, SM0, ShiftDirection, StateMachine, Tx, UninitStateMachine,
 };
 use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
@@ -33,12 +33,14 @@ pub enum ExtTransferMessage {
     BeginAndEndFileTransfer = 0x6,
     GetMotionDetectionMask = 0x7,
     SendLoggerEvent = 0x8,
+    StartupHandshake = 0x9,
 }
 
+type StaticSlot<T> = Mutex<RefCell<Option<T>>>;
+type RpiPingPin = Pin<Gpio5, FunctionSio<SioInput>, PullUp>;
 // We can store our ping pin here when we enter the ping-back interrupt
-static GLOBAL_PING_PIN: Mutex<RefCell<Option<Pin<Gpio5, FunctionSio<SioInput>, PullUp>>>> =
-    Mutex::new(RefCell::new(None));
-static GLOBAL_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
+static GLOBAL_PING_PIN: StaticSlot<RpiPingPin> = Mutex::new(RefCell::new(None));
+static GLOBAL_ALARM: StaticSlot<Alarm0> = Mutex::new(RefCell::new(None));
 
 #[interrupt]
 fn IO_IRQ_BANK0() {
@@ -68,19 +70,19 @@ pub const RPI_RETURN_PAYLOAD_LENGTH: usize = 32 + 104;
 // The number of bytes in the header sent for any transfers via `ExtSpiTransfers`
 pub const RPI_TRANSFER_HEADER_LENGTH: usize =
     (MESSAGE_TYPE_U8 * 2) + (PAYLOAD_LENGTH_LE_U32 * 2) + (CRC_OR_PROGRESS_LE_U16 * 4);
+type SpiEnabledPeripheral = Spi<
+    rp2040_hal::spi::Enabled,
+    SPI1,
+    (
+        Pin<Gpio15, FunctionSpi, PullNone>, // miso
+        Pin<Gpio12, FunctionSpi, PullNone>, // mosi
+        Pin<Gpio14, FunctionSpi, PullNone>, // clk
+    ),
+    8,
+>;
+type RunningPioStateMachine<PIO, SM> = (StateMachine<(PIO, SM), Running>, Rx<(PIO, SM)>);
 pub struct ExtSpiTransfers {
-    pub spi: Option<
-        Spi<
-            rp2040_hal::spi::Enabled,
-            SPI1,
-            (
-                Pin<Gpio15, FunctionSpi, PullNone>, // miso
-                Pin<Gpio12, FunctionSpi, PullNone>, // mosi
-                Pin<Gpio14, FunctionSpi, PullNone>, // clk
-            ),
-            8,
-        >,
-    >,
+    pub spi: Option<SpiEnabledPeripheral>,
     cs_enabled: Option<Pin<Gpio13, FunctionSpi, PullNone>>, // cs
     miso_disabled: Option<Pin<Gpio15, FunctionNull, PullNone>>,
     mosi_disabled: Option<Pin<Gpio12, FunctionNull, PullNone>>,
@@ -98,7 +100,7 @@ pub struct ExtSpiTransfers {
     return_payload_offset: Option<usize>,
     pio: PIO<PIO0>,
     state_machine_0_uninit: Option<UninitStateMachine<(PIO0, SM0)>>,
-    state_machine_0_running: Option<(StateMachine<(PIO0, SM0), Running>, Rx<(PIO0, SM0)>)>,
+    state_machine_0_running: Option<RunningPioStateMachine<PIO0, SM0>>,
     pio_tx: Option<Tx<(PIO0, SM0)>>,
     timer: Timer,
 }
@@ -106,6 +108,7 @@ const DMA_CHANNEL_NUM: usize = 0;
 
 pub type ExtSpiTransferPayload = &'static mut [u8; RPI_TRANSFER_HEADER_LENGTH + RPI_PAYLOAD_LENGTH];
 pub type ExtSpiTransferReturnPayload = &'static mut [u8; RPI_RETURN_PAYLOAD_LENGTH];
+type PioDmaTransfer = Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>;
 
 impl ExtSpiTransfers {
     pub fn new(
@@ -158,11 +161,7 @@ impl ExtSpiTransfers {
         self.disable_pio_spi();
         if self.spi.is_none() {
             self.cs_enabled = Some(
-                self.cs_disabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionSpi>()
-                    .into_pull_type(),
+                self.cs_disabled.take().unwrap().into_function::<FunctionSpi>().into_pull_type(),
             );
             let spi = Spi::<_, _, _, 8>::new(
                 spi,
@@ -184,7 +183,7 @@ impl ExtSpiTransfers {
                         .into_pull_type(),
                 ),
             )
-            .init_slave(resets, &embedded_hal::spi::MODE_3);
+            .init_slave(resets, embedded_hal::spi::MODE_3);
             self.spi = Some(spi);
         }
     }
@@ -200,9 +199,7 @@ impl ExtSpiTransfers {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
         let alarm_timeout = timeout.unwrap_or(300);
-        let _ = alarm
-            .schedule(MicrosDurationU32::micros(alarm_timeout))
-            .unwrap();
+        alarm.schedule(MicrosDurationU32::micros(alarm_timeout)).expect("Alarm schedule failed");
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
@@ -223,10 +220,7 @@ impl ExtSpiTransfers {
 
         let ping_time = (timer.get_counter() - start).to_micros();
         let (ping_pin, mut alarm) = critical_section::with(|cs| {
-            (
-                GLOBAL_PING_PIN.borrow(cs).take().unwrap(),
-                GLOBAL_ALARM.borrow(cs).take().unwrap(),
-            )
+            (GLOBAL_PING_PIN.borrow(cs).take().unwrap(), GLOBAL_ALARM.borrow(cs).take().unwrap())
         });
         let finished = alarm.finished();
         alarm.clear_interrupt();
@@ -251,25 +245,22 @@ impl ExtSpiTransfers {
         crc: u16,
         is_recording: bool,
         dma_peripheral: &mut DMA,
-    ) -> Option<(
-        Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
-        u32,
-        u32,
-    )> {
+    ) -> Option<(PioDmaTransfer, u32, u32)> {
         if self.pio_tx.is_some() {
             // The transfer header contains the transfer type (2x)
             // the number of bytes to read for the payload (2x)
             // the 16 bit crc of the payload (twice)
 
             // It is followed by the payload itself
+            #[allow(clippy::cast_possible_truncation)]
             let length = payload.len() as u32;
-            let is_recording = if is_recording { 1 } else { 0 };
+            let is_recording = u16::from(is_recording);
 
             let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
-            LittleEndian::write_u32(&mut transfer_header[2..6], payload.len() as u32);
-            LittleEndian::write_u32(&mut transfer_header[6..10], payload.len() as u32);
+            LittleEndian::write_u32(&mut transfer_header[2..6], length);
+            LittleEndian::write_u32(&mut transfer_header[6..10], length);
             LittleEndian::write_u16(&mut transfer_header[10..12], is_recording);
             LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
             LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.not());
@@ -277,17 +268,11 @@ impl ExtSpiTransfers {
             payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
-                if !dma_peripheral
-                    .ch(DMA_CHANNEL_NUM)
-                    .ch_ctrl_trig()
-                    .read()
-                    .busy()
-                    .bit_is_set()
-                {
+                if !dma_peripheral.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {
                     break;
                 }
             }
-            let mut timer = self.timer.clone();
+            let mut timer = self.timer;
             if self.ping(&mut timer, false, None) {
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
@@ -297,11 +282,8 @@ impl ExtSpiTransfers {
                 );
                 config.bswap(true); // DMA peripheral does our swizzling for us.
                 let transfer = config.start();
-                let start_read_address = dma_peripheral
-                    .ch(DMA_CHANNEL_NUM)
-                    .ch_read_addr()
-                    .read()
-                    .bits();
+                let start_read_address =
+                    dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
 
                 Some((transfer, start_read_address + length, start_read_address))
             } else {
@@ -321,19 +303,10 @@ impl ExtSpiTransfers {
     ) -> bool {
         // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
-        maybe_abort_dma_transfer(
-            dma_peripheral,
-            transfer_end_address,
-            transfer_start_address,
-            0,
-        );
+        maybe_abort_dma_transfer(dma_peripheral, transfer_end_address, transfer_start_address, 0);
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
-        let end_read_addr = dma_peripheral
-            .ch(DMA_CHANNEL_NUM)
-            .ch_read_addr()
-            .read()
-            .bits();
+        let end_read_addr = dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
         let did_abort = end_read_addr + 20 < transfer_end_address;
         self.dma_channel_0 = Some(r_ch0);
         self.pio_tx = Some(tx);
@@ -346,27 +319,10 @@ impl ExtSpiTransfers {
             && self.cs_disabled.is_some()
             && self.clk_disabled.is_some()
         {
-            self.miso_pio = Some(
-                self.miso_disabled
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
-            self.cs_pio = Some(
-                self.cs_disabled
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
-            self.clk_pio = Some(
-                self.clk_disabled
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
+            self.miso_pio =
+                Some(self.miso_disabled.take().unwrap().into_function().into_pull_type());
+            self.cs_pio = Some(self.cs_disabled.take().unwrap().into_function().into_pull_type());
+            self.clk_pio = Some(self.clk_disabled.take().unwrap().into_function().into_pull_type());
             let spi_cs_pin_id = 13;
             let miso_id = 15;
             // Setup a PIO-based SPI slave interface to send bytes to the raspberry pi
@@ -396,26 +352,17 @@ impl ExtSpiTransfers {
             let (sm, program) = sm.uninit(rx, tx);
             self.pio.uninstall(program);
 
-            self.miso_disabled = Some(
-                self.miso_pio
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
+            self.miso_disabled =
+                Some(self.miso_pio.take().unwrap().into_function().into_pull_type());
             self.cs_disabled = Some(self.cs_pio.take().unwrap().into_function().into_pull_type());
-            self.clk_disabled = Some(
-                self.clk_pio
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
+            self.clk_disabled = Some(self.clk_pio.take().unwrap().into_function().into_pull_type());
 
             self.state_machine_0_uninit = Some(sm);
         }
     }
 
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn send_message_over_spi(
         &mut self,
         message_type: ExtTransferMessage,
@@ -454,10 +401,10 @@ impl ExtSpiTransfers {
         }
         self.payload_buffer.as_mut().unwrap()
             [RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + payload.len()]
-            .copy_from_slice(&payload);
+            .copy_from_slice(payload);
         let mut transmit_success = false;
         let mut finished_transfer = false;
-        let mut timer = self.timer.clone();
+        let mut timer = self.timer;
         while !transmit_success {
             if self.ping(&mut timer, true, Some(3000)) {
                 finished_transfer = true;
@@ -469,11 +416,8 @@ impl ExtSpiTransfers {
                     self.spi.take().unwrap(),
                 );
                 let transfer = transfer.start();
-                let transfer_read_address = dma_peripheral
-                    .ch(DMA_CHANNEL_NUM)
-                    .ch_read_addr()
-                    .read()
-                    .bits();
+                let transfer_read_address =
+                    dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
                 maybe_abort_dma_transfer(
                     dma_peripheral,
                     transfer_read_address + actual_length,
@@ -495,11 +439,8 @@ impl ExtSpiTransfers {
                         self.return_payload_buffer.take().unwrap(),
                     )
                     .start();
-                    let transfer_read_address = dma_peripheral
-                        .ch(DMA_CHANNEL_NUM)
-                        .ch_read_addr()
-                        .read()
-                        .bits();
+                    let transfer_read_address =
+                        dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
 
                     let aborted = maybe_abort_dma_transfer(
                         dma_peripheral,
@@ -558,11 +499,7 @@ impl ExtSpiTransfers {
             let (spi_free, (miso, mosi, clk)) = spi_disabled.free();
             self.mosi_disabled = Some(mosi.into_function::<FunctionNull>().into_pull_type());
             self.cs_disabled = Some(
-                self.cs_enabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionNull>()
-                    .into_pull_type(),
+                self.cs_enabled.take().unwrap().into_function::<FunctionNull>().into_pull_type(),
             );
 
             self.clk_disabled = Some(clk.into_function::<FunctionNull>().into_pull_type());
@@ -574,7 +511,7 @@ impl ExtSpiTransfers {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
-        self.spi.as_mut().unwrap().write(bytes).unwrap()
+        self.spi.as_mut().unwrap().write(bytes).unwrap();
     }
 
     pub fn transfer<'a>(&mut self, bytes: &'a mut [u8]) -> &'a [u8] {
@@ -601,13 +538,7 @@ fn maybe_abort_dma_transfer(
     // Check that the FIFOs are empty too.
 
     loop {
-        if dma
-            .ch(DMA_CHANNEL_NUM)
-            .ch_ctrl_trig()
-            .read()
-            .busy()
-            .bit_is_set()
-        {
+        if dma.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {
             let current_transfer_read_address =
                 dma.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
             if some_progress && prev_read_address == current_transfer_read_address {
@@ -629,14 +560,7 @@ fn maybe_abort_dma_transfer(
         }
     }
 
-    if needs_abort
-        && dma
-            .ch(DMA_CHANNEL_NUM)
-            .ch_ctrl_trig()
-            .read()
-            .busy()
-            .bit_is_set()
-    {
+    if needs_abort && dma.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {
         info!(
             "Aborting dma transfer at {}/{}, #{}",
             prev_read_address - transfer_start_address,
@@ -651,16 +575,9 @@ fn maybe_abort_dma_transfer(
         dma.inte0().write(|w| unsafe { w.bits(inte0 & mask) });
         dma.inte1().write(|w| unsafe { w.bits(inte1 & mask) });
         // Abort all dma transfers
-        dma.chan_abort()
-            .write(|w| unsafe { w.bits(1 << DMA_CHANNEL_NUM) });
+        dma.chan_abort().write(|w| unsafe { w.bits(1 << DMA_CHANNEL_NUM) });
 
-        while dma
-            .ch(DMA_CHANNEL_NUM)
-            .ch_ctrl_trig()
-            .read()
-            .busy()
-            .bit_is_set()
-        {}
+        while dma.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {}
 
         dma.inte0().write(|w| unsafe { w.bits(inte0) });
         dma.inte1().write(|w| unsafe { w.bits(inte1) });

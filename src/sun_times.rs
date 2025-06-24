@@ -1,9 +1,9 @@
 use chrono::{DateTime, TimeZone, Timelike, Utc};
 #[allow(unused_imports)]
 use num_traits::real::Real; // Allows sin/cosine for suntimes
-const UNIX_EPOCH: JulianDate = JulianDate(2440587.5);
+const UNIX_EPOCH: JulianDate = JulianDate(2_440_587.5);
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
-const JAN_2000: JulianDate = JulianDate(2451545.0);
+const JAN_2000: JulianDate = JulianDate(2_451_545.0);
 const LEAP_SECONDS: JulianDate = JulianDate(0.0008);
 const OBLIQUITY_OF_THE_ECLIPTIC: f64 = 23.44;
 
@@ -11,20 +11,20 @@ const OBLIQUITY_OF_THE_ECLIPTIC: f64 = 23.44;
 struct JulianDate(f64);
 
 impl JulianDate {
-    fn ceil_days(&self) -> f64 {
+    fn ceil_days(self) -> f64 {
         self.0.ceil()
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_precision_loss)]
     fn to_datetime(self) -> Option<DateTime<Utc>> {
-        Utc.timestamp_opt(
-            ((self - UNIX_EPOCH).0 * SECONDS_PER_DAY as f64).round() as i64,
-            0,
-        )
-        .single()
+        Utc.timestamp_opt(((self - UNIX_EPOCH).0 * SECONDS_PER_DAY as f64).round() as i64, 0)
+            .single()
     }
 }
 
 impl From<DateTime<Utc>> for JulianDate {
+    #[allow(clippy::cast_precision_loss)]
     fn from(date: DateTime<Utc>) -> Self {
         Self((date.timestamp() as f64 / SECONDS_PER_DAY as f64) + UNIX_EPOCH.0)
     }
@@ -48,11 +48,7 @@ impl core::ops::Add<JulianDate> for JulianDate {
 
 fn rem_euclid(lhs: f64, rhs: f64) -> f64 {
     let r = lhs % rhs;
-    if r < 0.0 {
-        r + rhs.abs()
-    } else {
-        r
-    }
+    if r < 0.0 { r + rhs.abs() } else { r }
 }
 
 /// Calculates the approximate sunset and sunrise times at a given latitude, longitude, and altitude
@@ -99,14 +95,12 @@ pub fn sun_times(
     let days_since_2000 = (julian_date - JAN_2000 + LEAP_SECONDS).ceil_days();
 
     let mean_solar_time = days_since_2000 - (longitude / 360.0);
-    let solar_mean_anomaly = rem_euclid(357.5291 + 0.98560028 * mean_solar_time, 360.0);
+    let solar_mean_anomaly = rem_euclid(357.5291 + 0.985_600_280 * mean_solar_time, 360.0);
     let center = 1.9148 * solar_mean_anomaly.to_radians().sin()
         + 0.0200 * (2.0 * solar_mean_anomaly).to_radians().sin()
         + 0.0003 * (3.0 * solar_mean_anomaly).to_radians().sin();
-    let ecliptic_longitude = rem_euclid(
-        solar_mean_anomaly + center + 180.0 + ARGUMENT_OF_PERIHELION,
-        360.0,
-    );
+    let ecliptic_longitude =
+        rem_euclid(solar_mean_anomaly + center + 180.0 + ARGUMENT_OF_PERIHELION, 360.0);
 
     let declination = (ecliptic_longitude.to_radians().sin()
         * OBLIQUITY_OF_THE_ECLIPTIC.to_radians().sin())
@@ -130,9 +124,5 @@ pub fn sun_times(
     let julian_set = JulianDate(solar_transit_julian.0 + event_hour_angle / 360.0);
     let rise = julian_rise.to_datetime();
     let set = julian_set.to_datetime();
-    if let (Some(rise), Some(set)) = (rise, set) {
-        Some((rise, set))
-    } else {
-        None
-    }
+    if let (Some(rise), Some(set)) = (rise, set) { Some((rise, set)) } else { None }
 }

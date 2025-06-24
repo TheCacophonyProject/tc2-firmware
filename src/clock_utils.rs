@@ -1,12 +1,12 @@
 use crate::bsp;
+use crate::bsp::XOSC_CRYSTAL_FREQ;
 use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
 use crate::bsp::pac::{CLOCKS, ROSC, XOSC};
-use crate::bsp::XOSC_CRYSTAL_FREQ;
 use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::Clock;
 use rp2040_hal::clocks::{ClockSource, ClocksManager, StoppableClock};
 use rp2040_hal::rosc::RingOscillator;
 use rp2040_hal::xosc::setup_xosc_blocking;
-use rp2040_hal::Clock;
 
 fn set_rosc_div(rosc: &ROSC, div: u32) {
     assert!(div <= 32);
@@ -35,13 +35,14 @@ fn read_freq_stage(rosc: &ROSC, stage: u8) -> u8 {
     }
 }
 
-/// Increase the ROSC drive strength bits for the current freq_range
+/// Increase the ROSC drive strength bits for the current `freq_range`
 fn increase_drive_strength(rosc: &ROSC) -> bool {
     const MAX_STAGE_DRIVE: u8 = 3;
     // Assume div is 1, and freq_range is high
     let mut stages: [u8; 8] = [0; 8];
+    #[allow(clippy::cast_possible_truncation)]
     for (stage_index, stage) in stages.iter_mut().enumerate() {
-        *stage = read_freq_stage(rosc, stage_index as u8)
+        *stage = read_freq_stage(rosc, stage_index as u8);
     }
     let num_stages_at_drive_level = match rosc.ctrl().read().freq_range().variant() {
         Some(FREQ_RANGE_A::LOW) => 8,
@@ -77,15 +78,16 @@ fn increase_drive_strength(rosc: &ROSC) -> bool {
 }
 
 /// Sets the `freqa` and `freqb` ROSC drive strength stage registers.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn write_freq_stages(rosc: &ROSC, stages: &[u8; 8]) {
     let passwd: u32 = 0x9696 << 16;
     let mut freq_a = passwd;
     let mut freq_b = passwd;
     for (stage_index, stage) in stages.iter().enumerate().take(4) {
-        freq_a |= ((*stage & 0x07) as u32) << (stage_index * 4);
+        freq_a |= u32::from(*stage & 0x07) << (stage_index * 4);
     }
     for (stage_index, stage) in stages.iter().enumerate().skip(4) {
-        freq_b |= ((*stage & 0x07) as u32) << ((stage_index - 4) * 4);
+        freq_b |= u32::from(*stage & 0x07) << ((stage_index - 4) * 4);
     }
     rosc.freqa().write(|w| unsafe { w.bits(freq_a) });
     rosc.freqb().write(|w| unsafe { w.bits(freq_b) });
@@ -116,14 +118,14 @@ fn increase_freq_range(rosc: &ROSC) -> bool {
             write_freq_stages(rosc, &[0, 0, 0, 0, 0, 0, 0, 0]);
             true
         }
-        Some(FREQ_RANGE_A::HIGH) | Some(FREQ_RANGE_A::TOOHIGH) => {
+        Some(FREQ_RANGE_A::HIGH | FREQ_RANGE_A::TOOHIGH) => {
             // Already in the HIGH frequency range, and can't increase
             false
         }
     }
 }
 
-/// Measure the actual speed of the ROSC at the current freq_range and drive strength config
+/// Measure the actual speed of the ROSC at the current `freq_range` and drive strength config
 fn rosc_frequency_count_hz(clocks: &CLOCKS) -> HertzU32 {
     // Wait for the frequency counter to be ready
     while clocks.fc0_status().read().running().bit_is_set() {

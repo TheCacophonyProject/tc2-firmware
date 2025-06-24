@@ -2,12 +2,12 @@
 //! with changes made for the Cacophony Project TC2 board.
 //!
 //! This crate serves as a HAL (Hardware Abstraction Layer) for the Raspberry Pi Pico. Since the Raspberry Pi Pico
-//! is based on the RP2040 chip, it re-exports the [rp2040_hal] crate which contains the tooling to work with the
+//! is based on the RP2040 chip, it re-exports the [`rp2040_hal`] crate which contains the tooling to work with the
 //! rp2040 chip.
 //!
 //! # Examples:
 //!
-//! The following example turns on the onboard LED. Note that most of the logic works through the [rp2040_hal] crate.
+//! The following example turns on the onboard LED. Note that most of the logic works through the [`rp2040_hal`] crate.
 //! ```ignore
 //! #![no_main]
 //! use rp_pico::entry;
@@ -53,7 +53,6 @@ extern crate cortex_m_rt;
 ///   loop {}
 /// }
 /// ```
-
 #[cfg(feature = "rt")]
 pub use hal::entry;
 

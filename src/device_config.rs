@@ -12,7 +12,7 @@ pub struct SmallString([u8; 64]);
 
 impl Format for SmallString {
     fn format(&self, fmt: Formatter) {
-        defmt::write!(fmt, "{}", self.as_str())
+        defmt::write!(fmt, "{}", self.as_str());
     }
 }
 
@@ -21,9 +21,11 @@ impl SmallString {
         SmallString(data)
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::range_plus_one)]
     pub fn new_from_bytes(data: &[u8]) -> SmallString {
         let mut inner = [0u8; 64];
-        assert!(data.len() <= 64, "Invalid small string length");
+        assert!(data.len() < inner.len(), "Invalid small string length");
         inner[0] = data.len().min(inner.len()) as u8;
         inner[1..1 + data.len()].copy_from_slice(data);
         SmallString(inner)
@@ -35,6 +37,7 @@ impl SmallString {
         core::str::from_utf8(&self.0[1..(1 + len).min(slice_len)]).unwrap_or("Invalid str")
     }
 
+    #[allow(clippy::range_plus_one)]
     pub fn as_bytes(&self) -> &[u8] {
         let len = self.0[0] as usize;
         &self.0[1..1 + len]
@@ -54,13 +57,11 @@ impl TryFrom<u8> for AudioMode {
     type Error = ();
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        use AudioMode::*;
-
         match value {
-            0 => Ok(Disabled),
-            1 => Ok(AudioOnly),
-            2 => Ok(AudioOrThermal),
-            3 => Ok(AudioAndThermal),
+            0 => Ok(AudioMode::Disabled),
+            1 => Ok(AudioMode::AudioOnly),
+            2 => Ok(AudioMode::AudioOrThermal),
+            3 => Ok(AudioMode::AudioAndThermal),
             _ => Err(()),
         }
     }
@@ -96,7 +97,7 @@ impl DeviceConfigInner {
     pub fn time_is_in_recording_window(
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
-        window: &Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
+        window: Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
     ) -> bool {
         if self.is_continuous_recorder() {
             // info!("Continuous recording mode enabled");
@@ -132,6 +133,7 @@ impl DeviceConfigInner {
         *date_time_utc >= start_time && *date_time_utc <= end_time
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &chrono::DateTime<Utc>,
@@ -139,11 +141,12 @@ impl DeviceConfigInner {
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
 
+        // Make sure start and end offsets are positive integers
         if is_absolute_end && end_offset < 0 {
-            end_offset = 86_400 + end_offset;
+            end_offset += 86_400;
         }
         if is_absolute_start && start_offset < 0 {
-            start_offset = 86_400 + start_offset;
+            start_offset += 86_400;
         }
         let (window_start, window_end) = if !is_absolute_start || !is_absolute_end {
             let (lat, lng) = self.location;
@@ -151,42 +154,42 @@ impl DeviceConfigInner {
             let yesterday_utc = *now_utc - Duration::days(1);
             let (_, yesterday_sunset) = sun_times(
                 yesterday_utc,
-                lat as f64,
-                lng as f64,
-                altitude.unwrap_or(0.0) as f64,
+                f64::from(lat),
+                f64::from(lng),
+                f64::from(altitude.unwrap_or(0.0)),
             )
             .unwrap();
-            let yesterday_sunset = yesterday_sunset + Duration::seconds(start_offset as i64);
+            let yesterday_sunset = yesterday_sunset + Duration::seconds(i64::from(start_offset));
             let (today_sunrise, today_sunset) = sun_times(
                 *now_utc,
-                lat as f64,
-                lng as f64,
-                altitude.unwrap_or(0.0) as f64,
+                f64::from(lat),
+                f64::from(lng),
+                f64::from(altitude.unwrap_or(0.0)),
             )
             .unwrap();
-            let today_sunrise = today_sunrise + Duration::seconds(end_offset as i64);
-            let today_sunset = today_sunset + Duration::seconds(start_offset as i64);
+            let today_sunrise = today_sunrise + Duration::seconds(i64::from(end_offset));
+            let today_sunset = today_sunset + Duration::seconds(i64::from(start_offset));
             let tomorrow_utc = *now_utc + Duration::days(1);
             let (tomorrow_sunrise, tomorrow_sunset) = sun_times(
                 tomorrow_utc,
-                lat as f64,
-                lng as f64,
-                altitude.unwrap_or(0.0) as f64,
+                f64::from(lat),
+                f64::from(lng),
+                f64::from(altitude.unwrap_or(0.0)),
             )
             .unwrap();
-            let tomorrow_sunrise = tomorrow_sunrise + Duration::seconds(end_offset as i64);
-            let tomorrow_sunset = tomorrow_sunset + Duration::seconds(start_offset as i64);
+            let tomorrow_sunrise = tomorrow_sunrise + Duration::seconds(i64::from(end_offset));
+            let tomorrow_sunset = tomorrow_sunset + Duration::seconds(i64::from(start_offset));
 
             if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
                 let two_days_from_now_utc = *now_utc + Duration::days(2);
                 let (two_days_sunrise, _) = sun_times(
                     two_days_from_now_utc,
-                    lat as f64,
-                    lng as f64,
-                    altitude.unwrap_or(0.0) as f64,
+                    f64::from(lat),
+                    f64::from(lng),
+                    f64::from(altitude.unwrap_or(0.0)),
                 )
                 .unwrap();
-                let two_days_sunrise = two_days_sunrise + Duration::seconds(end_offset as i64);
+                let two_days_sunrise = two_days_sunrise + Duration::seconds(i64::from(end_offset));
                 (Some(tomorrow_sunset), Some(two_days_sunrise))
             } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
@@ -200,24 +203,21 @@ impl DeviceConfigInner {
         } else {
             (None, None)
         };
-
-        let mut start_time = if !is_absolute_start {
+        let start_offset = u32::try_from(start_offset).expect("start offset should be positive");
+        let end_offset = u32::try_from(end_offset).expect("end offset should be positive");
+        let mut start_time = if is_absolute_start {
+            now_utc
+                .with_time(NaiveTime::from_num_seconds_from_midnight_opt(start_offset, 0).unwrap())
+                .unwrap()
+        } else {
             window_start.unwrap()
-        } else {
-            now_utc
-                .with_time(
-                    NaiveTime::from_num_seconds_from_midnight_opt(start_offset as u32, 0).unwrap(),
-                )
-                .unwrap()
         };
-        let mut end_time = if !is_absolute_end {
-            window_end.unwrap()
-        } else {
+        let mut end_time = if is_absolute_end {
             now_utc
-                .with_time(
-                    NaiveTime::from_num_seconds_from_midnight_opt(end_offset as u32, 0).unwrap(),
-                )
+                .with_time(NaiveTime::from_num_seconds_from_midnight_opt(end_offset, 0).unwrap())
                 .unwrap()
+        } else {
+            window_end.unwrap()
         };
 
         if is_absolute_start || is_absolute_end {
@@ -227,7 +227,7 @@ impl DeviceConfigInner {
             let end_plus_one_day = end_time + Duration::days(1);
 
             if start_minus_one_day > end_minus_one_day {
-                end_minus_one_day = end_minus_one_day + Duration::days(1);
+                end_minus_one_day += Duration::days(1);
             }
             if start_plus_one_day > end_plus_one_day {
                 start_plus_one_day = start_time;
@@ -302,8 +302,7 @@ impl DeviceConfig {
     ) -> Option<DeviceConfig> {
         let slice = flash_storage.read_device_config();
         if let Ok(slice) = slice {
-            let device_config = DeviceConfig::from_bytes(&slice);
-            device_config
+            DeviceConfig::from_bytes(&slice)
         } else {
             None
         }
@@ -334,13 +333,13 @@ impl DeviceConfig {
         let end_recording_time = (cursor.read_bool(), cursor.read_i32());
         let is_continuous_recorder = cursor.read_bool();
         let use_low_power_mode = cursor.read_bool();
-        let device_name_length = cursor.read_u8() as usize;
+        let device_name_length = cursor.read_u8();
         let mut device_name = [0u8; 64];
-        device_name[0] = device_name_length as u8;
+        device_name[0] = device_name_length;
         let len = device_name.len();
         let device_name = {
             let read_bytes = cursor
-                .read(&mut device_name[1..(device_name_length + 1).min(len)])
+                .read(&mut device_name[1..(1 + usize::from(device_name_length)).min(len)])
                 .unwrap();
             device_name
         };
@@ -366,13 +365,8 @@ impl DeviceConfig {
         ))
     }
     pub fn from_bytes(bytes: &[u8]) -> Option<DeviceConfig> {
-        let inner = Self::inner_from_bytes(bytes);
+        let (inner, mut cursor_pos) = Self::inner_from_bytes(bytes)?;
 
-        if inner.is_none() {
-            // Device config is uninitialised in flash
-            return None;
-        }
-        let (inner, mut cursor_pos) = inner.unwrap();
         // let mask_length = cursor.read_i32();
         let mut cursor = Cursor::new(bytes);
         cursor.set_position(cursor_pos);
@@ -380,11 +374,11 @@ impl DeviceConfig {
         motion_detection_mask = DetectionMask::new(Some([0u8; 2400]));
         let len = cursor.read(&mut motion_detection_mask.inner).unwrap();
 
-        if len != motion_detection_mask.inner.len() {
+        if len == motion_detection_mask.inner.len() {
+            cursor_pos = cursor.position();
+        } else {
             // This payload came without the mask attached (i.e. from the rPi)
             motion_detection_mask.set_empty();
-        } else {
-            cursor_pos = cursor.position();
         }
 
         Some(DeviceConfig {
@@ -429,9 +423,9 @@ impl DeviceConfig {
         let altitude = self.config_inner.location_altitude;
         let (sunrise, sunset) = sun_times(
             *date_time_utc,
-            lat as f64,
-            lng as f64,
-            altitude.unwrap_or(0.0) as f64,
+            f64::from(lat),
+            f64::from(lng),
+            f64::from(altitude.unwrap_or(0.0)),
         )
         .unwrap();
         date_time_utc.hour() > sunrise.hour() && date_time_utc.hour() < sunset.hour()
@@ -440,7 +434,7 @@ impl DeviceConfig {
     pub fn time_is_in_recording_window(
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
-        window: &Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
+        window: Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
     ) -> bool {
         self.config_inner
             .time_is_in_recording_window(date_time_utc, window)
@@ -449,29 +443,32 @@ impl DeviceConfig {
 
 pub fn get_datetime_utc(datetime: DateTime) -> chrono::DateTime<Utc> {
     let naive_date = NaiveDate::from_ymd_opt(
-        2000 + datetime.year as i32,
-        datetime.month as u32,
-        datetime.day as u32,
+        2000 + i32::from(datetime.year),
+        u32::from(datetime.month),
+        u32::from(datetime.day),
     );
-    if naive_date.is_none() {
-        panic!(
-            "Couldn't get date for {}, {}, {}",
-            2000 + datetime.year as i32,
-            datetime.month as u32,
-            datetime.day as u32
-        );
-    }
+
+    assert!(
+        naive_date.is_some(),
+        "Couldn't get date for {}, {}, {}",
+        2000 + i32::from(datetime.year),
+        u32::from(datetime.month),
+        u32::from(datetime.day)
+    );
     let naive_time = NaiveTime::from_hms_opt(
-        datetime.hours as u32,
-        datetime.minutes as u32,
-        datetime.seconds as u32,
+        u32::from(datetime.hours),
+        u32::from(datetime.minutes),
+        u32::from(datetime.seconds),
     );
-    if naive_time.is_none() {
-        panic!(
-            "Couldn't get time for {}, {}, {}",
-            datetime.hours as u32, datetime.minutes as u32, datetime.seconds as u32,
-        );
-    }
+
+    assert!(
+        naive_time.is_some(),
+        "Couldn't get time for {}, {}, {}",
+        u32::from(datetime.hours),
+        u32::from(datetime.minutes),
+        u32::from(datetime.seconds),
+    );
+
     let naive_datetime = NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());
     naive_datetime.and_utc()
 }

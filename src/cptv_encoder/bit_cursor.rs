@@ -4,9 +4,10 @@ const PAGE_COMMAND_ADDRESS: usize = 4;
 const USER_BUFFER_LENGTH: usize = 2048;
 const META_BUFFER_LENGTH: usize = 128;
 
-// Total buffer length is the same as a single page to be written to our onboard nand flash.
-// LZ encoding only uses the first 2048 bytes, which is the user data section.  Other meta data
-// is written in the remaining 128 bytes.
+// The total buffer length is the same as a single page to be written to our onboard nand flash.
+// LZ encoding only uses the first 2048 bytes, which is the user data section.  Other metadata
+// is written in the remaining 128 bytes.  Here we only care about the first metadata section,
+// so the buffer is truncated from the full page+metadata size.
 const BUFFER_LENGTH: usize = PAGE_COMMAND_ADDRESS + 2112; //USER_BUFFER_LENGTH + META_BUFFER_LENGTH;
 type PageBuffer = [u8; BUFFER_LENGTH];
 pub struct BitCursor {
@@ -16,6 +17,7 @@ pub struct BitCursor {
     buffer: PageBuffer,
 }
 
+#[allow(clippy::inline_always)]
 impl BitCursor {
     // Writing 16 bits needs to be able to succeed, but then we need to
     pub fn new() -> BitCursor {
@@ -29,7 +31,7 @@ impl BitCursor {
 
     #[inline(always)]
     pub fn write_byte(&mut self, value: u8) {
-        self.write_bits(value as u32, 8)
+        self.write_bits(u32::from(value), 8);
     }
 
     #[inline(always)]
@@ -40,6 +42,7 @@ impl BitCursor {
 
     #[inline(always)]
     pub fn do_flush(&mut self) -> bool {
+        #[allow(clippy::cast_possible_truncation)]
         while self.used_bits >= 8 {
             self.buffer[PAGE_COMMAND_ADDRESS..PAGE_COMMAND_ADDRESS + USER_BUFFER_LENGTH]
                 [self.cursor] = self.accumulator as u8;
@@ -52,12 +55,15 @@ impl BitCursor {
         }
         self.is_full()
     }
+
+    #[inline(always)]
     pub fn flush(&mut self) -> (&mut PageBuffer, usize) {
         let num_bytes = self.cursor;
         self.cursor = 0;
         (&mut self.buffer, num_bytes)
     }
 
+    #[inline(always)]
     pub fn flush_residual_bits(&mut self) {
         if self.used_bits > 17 {
             let _ = self.do_flush();

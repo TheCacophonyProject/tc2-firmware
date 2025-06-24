@@ -1,6 +1,6 @@
-use crate::attiny_rtc_i2c::{tc2_agent_state, SharedI2C};
+use crate::attiny_rtc_i2c::{SharedI2C, tc2_agent_state};
 use crate::bsp::pac::RESETS;
-use crate::device_config::{get_datetime_utc, AudioMode, DeviceConfig};
+use crate::device_config::{AudioMode, DeviceConfig, get_datetime_utc};
 use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::frame_processing::wake_raspberry_pi;
@@ -10,8 +10,8 @@ use crate::synced_date_time::SyncedDateTime;
 use cortex_m::delay::Delay;
 use defmt::{info, panic, warn};
 use fugit::HertzU32;
-use rp2040_hal::pac::DMA;
 use rp2040_hal::Timer;
+use rp2040_hal::pac::DMA;
 
 pub fn should_record_audio(
     config: &DeviceConfig,
@@ -21,7 +21,7 @@ pub fn should_record_audio(
 ) -> bool {
     let mut is_audio: bool = config.config().is_audio_device();
 
-    if let Ok(audio_only) = shared_i2c.is_audio_device(delay) {
+    if let Ok(audio_only) = shared_i2c.check_if_is_audio_device(delay) {
         info!("EEPROM audio device: {}", audio_only);
         is_audio = is_audio || audio_only;
     }
@@ -36,7 +36,7 @@ pub fn should_record_audio(
                         is_audio = false;
                     } else {
                         let in_window = config
-                            .time_is_in_recording_window(&synced_date_time.get_date_time(), &None);
+                            .time_is_in_recording_window(&synced_date_time.get_date_time(), None);
                         if in_window {
                             is_audio = (state
                                 & (tc2_agent_state::LONG_AUDIO_RECORDING
@@ -65,31 +65,26 @@ pub fn get_device_config(
     resets: &mut RESETS,
     dma: &mut DMA,
 ) -> DeviceConfig {
-    let config: Option<DeviceConfig> = DeviceConfig::load_existing_config_from_flash(flash_storage);
-    match &config {
-        Some(device_config) => {
-            info!("Existing config {:#?}", device_config.config());
-        }
-        None => {
-            info!("Waking pi to get config");
-            // We need to wake up the rpi and get a config
-            wake_raspberry_pi(shared_i2c, delay);
-        }
+    let device_config: Option<DeviceConfig> =
+        DeviceConfig::load_existing_config_from_flash(flash_storage);
+    if let Some(device_config) = &device_config {
+        info!("Existing config {:#?}", device_config.config());
+    } else {
+        info!("Waking pi to get config");
+        // We need to wake up the rpi and get a config
+        wake_raspberry_pi(shared_i2c, delay);
     }
 
     // FIXME: This should become "config startup handshake", and we have another
     //  camera config handshake later on when the lepton has actually initialised or whatever.
-    let (device_config, device_config_was_updated) =
+    let (device_config, device_config_was_updated, prefer_not_to_offload_files) =
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             flash_storage,
             pi_spi,
             resets,
             dma,
             system_clock_freq_hz,
-            2u32,  // radiometry enabled
-            0,     // camera serial
-            false, // audio mode
-            config,
+            device_config,
         );
     match device_config {
         Some(device_config) => device_config,
@@ -104,7 +99,7 @@ pub fn get_synced_time(
     delay: &mut Delay,
     event_logger: &mut EventLogger,
     flash_storage: &mut OnboardFlash,
-    timer: &Timer,
+    timer: Timer,
 ) -> SyncedDateTime {
     loop {
         // NOTE: Keep retrying until we get a datetime from RTC.

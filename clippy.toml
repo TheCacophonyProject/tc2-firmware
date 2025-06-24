@@ -1,0 +1,2 @@
+msrv = "1.86.0"
+too-many-arguments-threshold = 15

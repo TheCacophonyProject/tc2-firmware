@@ -1,17 +1,17 @@
-use crate::bsp::pac::I2C1;
 use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
+use crate::bsp::pac::I2C1;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Timelike, Utc};
 use cortex_m::delay::Delay;
 use crc::{Algorithm, Crc};
-use defmt::{error, info, warn, Format};
+use defmt::{Format, error, info, warn};
 use embedded_hal::digital::InputPin;
 use embedded_hal::i2c::I2c;
 use pcf8563::{Control, DateTime, PCF8563};
+use rp2040_hal::I2C;
 use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput};
 use rp2040_hal::i2c::Error;
-use rp2040_hal::I2C;
 
 pub type I2CConfig = I2C<
     I2C1,
@@ -48,18 +48,12 @@ enum CameraState {
     InvalidState = 0x05,
 }
 
-impl Into<u8> for CameraState {
-    fn into(self) -> u8 {
-        self as u8
-    }
-}
-
 impl From<u8> for CameraState {
     fn from(value: u8) -> Self {
         match value {
             0x00 => CameraState::PoweringOn,
             0x01 => CameraState::PoweredOn,
-            0x02 => CameraState::PoweredOff,
+            0x02 => CameraState::PoweringOff,
             0x03 => CameraState::PoweredOff,
             0x04 => CameraState::PowerOnTimeout,
             0x05 => CameraState::InvalidState,
@@ -75,10 +69,10 @@ impl From<u8> for CameraState {
 #[derive(Format)]
 
 pub enum RecordingType {
-    TestRecording = 0,
-    LongRecording = 1,
-    ScheduledRecording = 2,
-    ThermalRequestedScheduledRecording = 3,
+    Test = 0,
+    Long = 1,
+    Scheduled = 2,
+    ThermalRequestedScheduled = 3,
 }
 
 #[repr(u8)]
@@ -121,7 +115,7 @@ impl SharedI2C {
 
         let mut attempts = 0;
         loop {
-            let _ = match shared_i2c.get_attiny_firmware_version(delay) {
+            match shared_i2c.get_attiny_firmware_version(delay) {
                 Ok(version) => match version {
                     EXPECTED_ATTINY_FIRMWARE_VERSION => {
                         break;
@@ -143,7 +137,7 @@ impl SharedI2C {
                         delay.delay_us(500);
                     }
                 }
-            };
+            }
         }
         shared_i2c
     }
@@ -179,7 +173,7 @@ impl SharedI2C {
 
     fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
         if let Some(config) = self.i2c.take() {
-            self.rtc = Some(PCF8563::new(config))
+            self.rtc = Some(PCF8563::new(config));
         }
         self.rtc.as_mut().unwrap()
     }
@@ -284,18 +278,17 @@ impl SharedI2C {
         loop {
             payload[0] = 0;
             match self.attiny_write_read_command(command, None, &mut payload) {
-                Ok(_) => {
+                Ok(()) => {
                     let value = payload[0];
                     let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&payload[0..1]);
                     if BigEndian::read_u16(&payload[1..=2]) == crc {
                         return Ok(payload[0]);
-                    } else {
-                        num_attempts += 1;
-                        if num_attempts == max_attempts {
-                            return Err(Error::Abort(1));
-                        }
-                        delay.delay_us(500);
                     }
+                    num_attempts += 1;
+                    if num_attempts == max_attempts {
+                        return Err(Error::Abort(1));
+                    }
+                    delay.delay_us(500);
                 }
                 Err(e) => {
                     num_attempts += 1;
@@ -318,18 +311,17 @@ impl SharedI2C {
         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command, value]);
         loop {
             match self.attiny_write_command(command, value, crc) {
-                Ok(_) => {
+                Ok(()) => {
                     // Now immediately read it back to see that it actually got set properly.
                     let result = self.try_attiny_read_command(command, delay, None);
                     if let Ok(set_val) = result {
                         if set_val == value {
                             return Ok(());
-                        } else {
-                            warn!(
-                                "Failed writing command {} with value {} to attiny, got {}",
-                                command, value, set_val
-                            );
                         }
+                        warn!(
+                            "Failed writing command {} with value {} to attiny, got {}",
+                            command, value, set_val
+                        );
                     } else {
                         warn!(
                             "Failed reading back value from attiny for command {}",
@@ -386,11 +378,7 @@ impl SharedI2C {
         delay: &mut Delay,
         is_recording: bool,
     ) -> Result<(), Error> {
-        let state = match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok(state),
-            Err(e) => Err(e),
-        };
-        match state {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(mut state) => {
                 if is_recording {
                     state |= tc2_agent_state::RECORDING;
@@ -398,7 +386,7 @@ impl SharedI2C {
                     state &= !tc2_agent_state::RECORDING;
                 }
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
-                    Ok(_) => Ok(()),
+                    Ok(()) => Ok(()),
                     Err(x) => Err(x),
                 }
             }
@@ -442,12 +430,11 @@ impl SharedI2C {
             }
             Err(e) => Err(e),
         };
-        if let Ok(is_awake) = pi_is_awake {
+        pi_is_awake.and_then(|is_awake| {
             if is_awake {
                 // If the agent is ready, make sure the REG_RP2040_PI_POWER_CTRL is set to 1
                 let _ = self.tell_pi_to_wakeup(delay);
-                let agent_ready = self.tc2_agent_is_ready(delay, print, None);
-                agent_ready
+                self.tc2_agent_is_ready(delay, print, None)
             } else {
                 if print {
                     if let Some(state) = &recorded_camera_state {
@@ -456,9 +443,7 @@ impl SharedI2C {
                 }
                 Ok(false)
             }
-        } else {
-            pi_is_awake
-        }
+        })
     }
 
     pub fn tc2_agent_is_ready(
@@ -500,19 +485,18 @@ impl SharedI2C {
     ) -> Result<Option<RecordingType>, Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
-                let rec_state: bool =
-                    state & tc2_agent_state::READY == state & tc2_agent_state::READY;
+                let rec_state: bool = state & tc2_agent_state::READY == tc2_agent_state::READY;
                 if rec_state {
                     if state & tc2_agent_state::TEST_AUDIO_RECORDING
                         == tc2_agent_state::TEST_AUDIO_RECORDING
                     {
-                        return Ok(Some(RecordingType::TestRecording));
+                        return Ok(Some(RecordingType::Test));
                     } else if state & tc2_agent_state::LONG_AUDIO_RECORDING
                         == tc2_agent_state::LONG_AUDIO_RECORDING
                     {
-                        return Ok(Some(RecordingType::LongRecording));
+                        return Ok(Some(RecordingType::Long));
                     } else if state & tc2_agent_state::TAKE_AUDIO == tc2_agent_state::TAKE_AUDIO {
-                        return Ok(Some(RecordingType::ThermalRequestedScheduledRecording));
+                        return Ok(Some(RecordingType::ThermalRequestedScheduled));
                     }
                 }
                 Ok(None)
@@ -535,7 +519,7 @@ impl SharedI2C {
             Ok(state) => {
                 let val = if set { state | flag } else { state & !flag };
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
-                    Ok(_) => Ok(()),
+                    Ok(()) => Ok(()),
                     Err(x) => Err(x),
                 }
             }
@@ -553,11 +537,11 @@ impl SharedI2C {
             Ok(state) => {
                 let mut val = state & !clear_flag;
                 if let Some(flag) = set_flag {
-                    val = val | flag;
+                    val |= flag;
                 }
 
                 match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
-                    Ok(_) => Ok(()),
+                    Ok(()) => Ok(()),
                     Err(x) => Err(x),
                 }
             }
@@ -634,16 +618,11 @@ impl SharedI2C {
                 };
 
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if result.is_err() {
-                    if num_attempts == 100 {
-                        return result;
-                    } else {
-                        num_attempts += 1;
-                        delay.delay_us(500);
-                    }
-                } else {
+                if result.is_ok() || num_attempts == 100 {
                     return result;
-                };
+                }
+                num_attempts += 1;
+                delay.delay_us(500);
             } else {
                 num_attempts += 1;
                 delay.delay_us(500);
@@ -673,22 +652,19 @@ impl SharedI2C {
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
                 if success {
                     return Ok(());
-                } else {
-                    attempts += 1;
-                    if attempts == 100 {
-                        return Err("Failed to enable alarm");
-                    } else {
-                        delay.delay_us(500);
-                    }
                 }
+                attempts += 1;
+                if attempts == 100 {
+                    return Err("Failed to enable alarm");
+                }
+                delay.delay_us(500);
             } else {
                 attempts += 1;
                 self.unlocked_pin = Some(lock_pin);
                 if attempts == 100 {
                     return Err("Failed to access I2C to enable alarm");
-                } else {
-                    delay.delay_us(500);
                 }
+                delay.delay_us(500);
             }
         }
     }
@@ -708,22 +684,19 @@ impl SharedI2C {
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
                 if success {
                     return Ok(());
-                } else {
-                    attempts += 1;
-                    if attempts == 100 {
-                        return Err("Failed to enable alarm");
-                    } else {
-                        delay.delay_us(500);
-                    }
                 }
+                attempts += 1;
+                if attempts == 100 {
+                    return Err("Failed to enable alarm");
+                }
+                delay.delay_us(500);
             } else {
                 attempts += 1;
                 self.unlocked_pin = Some(lock_pin);
                 if attempts == 100 {
                     return Err("Failed to access I2C to enable alarm");
-                } else {
-                    delay.delay_us(500);
                 }
+                delay.delay_us(500);
             }
         }
     }
@@ -739,6 +712,7 @@ impl SharedI2C {
         loop {
             let mut lock_pin = self.unlocked_pin.take().unwrap();
             let is_low = lock_pin.is_low().unwrap_or(false);
+            #[allow(clippy::cast_possible_truncation)]
             if is_low {
                 let pin = lock_pin.into_pull_type::<PullUp>();
                 let mut success = true;
@@ -747,21 +721,19 @@ impl SharedI2C {
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
                 if success {
                     return Ok(());
-                } else {
-                    if num_attempts == 100 {
-                        return Err("Failed to set wakeup alarm");
-                    }
-                    num_attempts += 1;
-                    delay.delay_us(500);
                 }
+                if num_attempts == 100 {
+                    return Err("Failed to set wakeup alarm");
+                }
+                num_attempts += 1;
+                delay.delay_us(500);
             } else {
                 num_attempts += 1;
                 self.unlocked_pin = Some(lock_pin);
                 if num_attempts == 100 {
                     return Err("Failed to access I2C to set wakeup alarm");
-                } else {
-                    delay.delay_us(500);
                 }
+                delay.delay_us(500);
             }
         }
     }
@@ -775,8 +747,8 @@ impl SharedI2C {
                 let pin = lock_pin.into_pull_type::<PullUp>();
                 let result = self.rtc().get_alarm_flag();
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if result.is_ok() {
-                    return result.unwrap();
+                if let Ok(result) = result {
+                    return result;
                 }
             } else {
                 self.unlocked_pin = Some(lock_pin);
@@ -818,22 +790,19 @@ impl SharedI2C {
                 self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
                 if success {
                     return Ok(result.unwrap());
-                } else {
-                    attempts += 1;
-                    if attempts == 100 {
-                        return Err("Failed to enable alarm");
-                    } else {
-                        delay.delay_us(500);
-                    }
                 }
+                attempts += 1;
+                if attempts == 100 {
+                    return Err("Failed to enable alarm");
+                }
+                delay.delay_us(500);
             } else {
                 attempts += 1;
                 self.unlocked_pin = Some(lock_pin);
                 if attempts == 100 {
                     return Err("Failed to access I2C to enable alarm");
-                } else {
-                    delay.delay_us(500);
                 }
+                delay.delay_us(500);
             }
         }
     }
@@ -849,7 +818,7 @@ impl SharedI2C {
             let pin = lock_pin.into_pull_type::<PullUp>();
             let result = self.i2c().write_read(EEPROM_ADDRESS, &[command], payload);
             self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-            return result;
+            result
         } else {
             self.unlocked_pin = Some(lock_pin);
             Err(Error::Abort(1))
@@ -867,7 +836,7 @@ impl SharedI2C {
         let mut num_attempts = 0;
         loop {
             match self.read_eeprom_command(command, payload) {
-                Ok(_) => {
+                Ok(()) => {
                     return Ok(());
                 }
                 Err(e) => {
@@ -881,18 +850,19 @@ impl SharedI2C {
         }
     }
 
-    pub fn is_audio_device(&mut self, delay: &mut Delay) -> Result<bool, ()> {
+    pub fn check_if_is_audio_device(&mut self, delay: &mut Delay) -> Result<bool, ()> {
         let page_length: usize = 16;
 
         let mut read_length: usize;
+        assert!(EEPROM_LENGTH < usize::from(u8::MAX));
         let mut eeprom_data = [0u8; EEPROM_LENGTH];
-
         for i in (0..EEPROM_LENGTH).step_by(page_length) {
             read_length = if EEPROM_LENGTH - i < page_length {
                 EEPROM_LENGTH - i
             } else {
                 page_length
             };
+            #[allow(clippy::cast_possible_truncation)]
             if let Err(e) = self.try_read_eeprom_command(
                 i as u8,
                 delay,
@@ -902,12 +872,10 @@ impl SharedI2C {
                 warn!("Couldn't read eeprom data {}", e);
                 return Err(());
             }
-            if i == 0 {
-                if eeprom_data[1] == 1 {
-                    // don't think any need to parse as it has no audio info
-                    info!("Need eeprom version 2 ");
-                    return Err(());
-                }
+            if i == 0 && eeprom_data[1] == 1 {
+                // don't think any need to parse as it has no audio info
+                info!("Need eeprom version 2 ");
+                return Err(());
             }
         }
         let has_data = eeprom_data.iter().any(|&x| x != 0xff);
@@ -929,7 +897,7 @@ impl SharedI2C {
             return Ok(eeprom_data[14] > 0);
         }
         info!("CRC failed expected {} got {}", crc, gotcrc);
-        return Err(());
+        Err(())
     }
 }
 

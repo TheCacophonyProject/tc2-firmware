@@ -5,11 +5,11 @@ use cortex_m::prelude::*;
 use defmt::{info, warn};
 use fugit::HertzU32;
 use rp2040_hal::dma::Channel;
-use rp2040_hal::dma::{double_buffer, CH3, CH4};
+use rp2040_hal::dma::{CH3, CH4, double_buffer};
 use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
 use rp2040_hal::pio::{
-    PIOBuilder, Running, Rx, ShiftDirection, StateMachine, Tx, UninitStateMachine, PIO, SM1,
+    PIO, PIOBuilder, Running, Rx, SM1, ShiftDirection, StateMachine, Tx, UninitStateMachine,
 };
 
 const PDM_DECIMATION: usize = 64;
@@ -25,7 +25,7 @@ struct RecordingStatus {
 use crate::onboard_flash::OnboardFlash;
 use onboard_flash::extend_lifetime_generic_mut;
 
-use crc::{Crc, CRC_16_XMODEM};
+use crc::{CRC_16_XMODEM, Crc};
 
 impl RecordingStatus {
     pub fn is_complete(&self) -> bool {
@@ -36,12 +36,14 @@ impl RecordingStatus {
 use crate::pdm_filter::PDMFilter;
 use crate::synced_date_time::SyncedDateTime;
 
+type RunningStateMachine<P, S> = (StateMachine<(P, S), Running>, Tx<(P, S)>);
+
 pub struct PdmMicrophone {
     data_disabled: Option<Pin<Gpio0, FunctionNull, PullNone>>,
     clk_disabled: Option<Pin<Gpio1, FunctionNull, PullNone>>,
     data: Option<Pin<Gpio0, FunctionPio1, PullNone>>,
     clk: Option<Pin<Gpio1, FunctionPio1, PullNone>>,
-    state_machine_1_running: Option<(StateMachine<(PIO1, SM1), Running>, Tx<(PIO1, SM1)>)>,
+    state_machine_1_running: Option<RunningStateMachine<PIO1, SM1>>,
     state_machine_1_uninit: Option<UninitStateMachine<(PIO1, SM1)>>,
     pio_rx: Option<Rx<(PIO1, SM1)>>,
     system_clock_hz: HertzU32,
@@ -72,19 +74,12 @@ impl PdmMicrophone {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
     pub fn enable(&mut self) {
-        let data: Pin<Gpio0, FunctionPio1, PullNone> = self
-            .data_disabled
-            .take()
-            .unwrap()
-            .into_function()
-            .into_pull_type();
-        let clk: Pin<Gpio1, FunctionPio1, PullNone> = self
-            .clk_disabled
-            .take()
-            .unwrap()
-            .into_function()
-            .into_pull_type();
+        let data: Pin<Gpio0, FunctionPio1, PullNone> =
+            self.data_disabled.take().unwrap().into_function().into_pull_type();
+        let clk: Pin<Gpio1, FunctionPio1, PullNone> =
+            self.clk_disabled.take().unwrap().into_function().into_pull_type();
 
         let data_pin_id = data.id().num;
         let clk_pin_id = clk.id().num;
@@ -108,17 +103,19 @@ impl PdmMicrophone {
         let clock_divider =
             self.system_clock_hz.to_Hz() as f32 / (WARMUP_RATE * PDM_DECIMATION * 2) as f32;
 
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
-        info!(
-            " Mic CLock speed {}",
-            self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0
-        );
+        info!("Mic Clock speed {}", self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0);
         // data_pin is in
         // clk pin is out
         // let data_pin_id = 1;
         // let clk_pin_id = 0;
+
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
         let (mut sm, rx, tx) = PIOBuilder::from_installed_program(installed_program)
             .in_pin_base(data_pin_id)
             .side_set_pin_base(clk_pin_id)
@@ -140,8 +137,12 @@ impl PdmMicrophone {
         // will need to have access to the fs
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
     pub fn alter_samplerate(&mut self, sample_rate: usize) -> f32 {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
+
         let clock_divider =
             self.system_clock_hz.to_Hz() as f32 / (sample_rate * PDM_DECIMATION * 2) as f32;
         info!(
@@ -164,17 +165,17 @@ impl PdmMicrophone {
         self.system_clock_hz.to_Hz() as f32
             / (PDM_DECIMATION as f32
                 * 2.0
-                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)))
+                * (f32::from(clock_divider as u16) + (f32::from(clock_divider_fractional) / 255.0)))
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn alter_mic_clock(&mut self, clock_rate: f32) -> f32 {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
         let clock_divider = self.system_clock_hz.to_MHz() as f32 / (clock_rate * 2.0);
 
-        info!(
-            "Altering mic clock to {} divider {}",
-            clock_rate, clock_divider
-        );
+        info!("Altering mic clock to {} divider {}", clock_rate, clock_divider);
 
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
@@ -190,7 +191,7 @@ impl PdmMicrophone {
         self.system_clock_hz.to_Hz() as f32
             / (PDM_DECIMATION as f32
                 * 2.0
-                * ((clock_divider as u16) as f32 + (clock_divider_fractional as f32 / 255.0)))
+                * (f32::from(clock_divider as u16) + (f32::from(clock_divider_fractional) / 255.0)))
     }
 
     pub fn disable(&mut self) {
@@ -205,15 +206,16 @@ impl PdmMicrophone {
         // self.state_machine_1_uninit = Some(sm);
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn record_for_n_seconds(
         &mut self,
         num_seconds: usize,
         ch3: Channel<CH3>,
         ch4: Channel<CH4>,
         resets: &mut RESETS,
-        spi: SPI1,
+        spi: &SPI1,
         flash_storage: &mut OnboardFlash,
-        timestamp: u64,
+        timestamp: i64,
         watchdog: &mut bsp::hal::Watchdog,
         synced_date_time: &SyncedDateTime,
     ) -> bool {
@@ -225,20 +227,24 @@ impl PdmMicrophone {
         //how long to warm up??
         timer.delay_ms(2000);
 
-        //3.072 mhz is the minimum clock rate that the microphone supports for 48Khz SR according to the microphone data sheet
-        // think there were some weird noises when running slightly lower
-        //https://www.knowles.com/docs/default-source/model-downloads/sph0641lu4h-1-revb.pdf
-        let adjusted_sr = self.alter_mic_clock(3.072) as u32;
+        // 3.072 mhz is the minimum clock rate that the microphone supports for 48Khz SR according
+        // to the microphone data sheet, think there were some weird noises when running slightly lower
+        // https://www.knowles.com/docs/default-source/model-downloads/sph0641lu4h-1-revb.pdf
+        #[allow(clippy::cast_sign_loss)]
+        #[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_possible_truncation)]
+        let adjusted_sample_rate = self.alter_mic_clock(3.072) as u32;
         info!(
             "Adjusted sr becomes {} clock {}",
-            adjusted_sr,
+            adjusted_sample_rate,
             self.system_clock_hz.to_MHz()
         );
 
-        let mut filter = PDMFilter::new(adjusted_sr);
+        #[allow(clippy::cast_precision_loss)]
+        let mut filter = PDMFilter::new(adjusted_sample_rate as f32);
         filter.init();
         let mut current_recording = RecordingStatus {
-            total_samples: adjusted_sr as usize * PDM_DECIMATION * num_seconds,
+            total_samples: adjusted_sample_rate as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
         let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
@@ -246,7 +252,7 @@ impl PdmMicrophone {
         // Pull out more samples via dma double_buffering.
         if let Some(pio_rx) = self.pio_rx.take() {
             // Get timer in microseconds
-            let mut start: fugit::Instant<u64, 1, 1000000> = timer.get_counter();
+            let mut start: fugit::Instant<u64, 1, 1_000_000> = timer.get_counter();
             // Chain some buffers together for continuous transfers
             let mut b_0 = [0u32; 512];
             let mut b_1 = [0u32; 512];
@@ -257,7 +263,9 @@ impl PdmMicrophone {
             let mut rx_transfer = rx_transfer.write_next(b_1);
             let mut cycle = 0;
             let mut audio_buffer = AudioBuffer::new();
-            audio_buffer.init(timestamp, adjusted_sr as u16);
+
+            #[allow(clippy::cast_possible_truncation)]
+            audio_buffer.init(timestamp, adjusted_sample_rate as u16);
             flash_storage.start_file(0);
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
@@ -287,21 +295,21 @@ impl PdmMicrophone {
                     let payload = bytemuck::cast_slice(rx_buf);
                     let out = audio_buffer.slice_for(payload.len());
                     let (payload, leftover) = payload.split_at(out.len() * 8);
-                    filter.filter(&payload, VOLUME, Some(out));
+                    filter.filter(payload, VOLUME, Some(out));
                     if audio_buffer.is_full()
-                        && (!current_recording.is_complete() || leftover.len() > 0)
+                        && (!current_recording.is_complete() || !leftover.is_empty())
                     {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
                         if let Err(e) =
-                            flash_storage.append_file_bytes(data, data_size, false, None, None)
+                            flash_storage.append_recording_bytes(data, data_size, None, None)
                         {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
                         }
                         audio_buffer.reset();
-                        if leftover.len() > 0 {
+                        if !leftover.is_empty() {
                             let out = audio_buffer.slice_for(leftover.len());
 
                             filter.filter(leftover, VOLUME, Some(out));
@@ -317,15 +325,15 @@ impl PdmMicrophone {
                         let start = synced_date_time.get_date_time();
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
-                        if let Err(e) =
-                            flash_storage.append_file_bytes(payload, data_size, true, None, None)
+                        if let Err(e) = flash_storage
+                            .append_last_recording_bytes(payload, data_size, None, None)
                         {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
                         }
                         recorded_successfully = true;
                         break;
-                    };
+                    }
                 }
                 rx_transfer = next_rx_transfer.write_next(rx_buf);
             }
@@ -348,19 +356,18 @@ const PAGE_COMMAND_ADDRESS: usize = 2;
 const AUDIO_SHEBANG: u16 = 1;
 impl AudioBuffer {
     pub const fn new() -> AudioBuffer {
-        AudioBuffer {
-            data: [0xffffu16; 512 * 2 + 34],
-            index: PAGE_COMMAND_ADDRESS,
-        }
+        AudioBuffer { data: [0xffffu16; 512 * 2 + 34], index: PAGE_COMMAND_ADDRESS }
     }
-    pub fn init(&mut self, timestamp: u64, samplerate: u16) {
-        let time_data = bytemuck::cast_ref::<u64, [u16; 4]>(&timestamp);
+    pub fn init(&mut self, timestamp: i64, sample_rate: u16) {
+        let time_data = bytemuck::cast_ref::<i64, [u16; 4]>(&timestamp);
         let mut header: [u16; 4 + 1 + 1] = [0u16; 4 + 1 + 1];
 
         header[0] = AUDIO_SHEBANG;
+        #[allow(clippy::range_plus_one)]
         header[1..1 + time_data.len()].copy_from_slice(time_data);
 
-        header[time_data.len() + 1] = samplerate;
+        // NOTE: If we ever support ultrasonic sample rates, this will no longer fit safely in a u16
+        header[time_data.len() + 1] = sample_rate;
         self.data[PAGE_COMMAND_ADDRESS..header.len() + PAGE_COMMAND_ADDRESS]
             .copy_from_slice(&header);
         self.index += header.len();

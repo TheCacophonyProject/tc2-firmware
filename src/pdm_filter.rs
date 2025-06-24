@@ -1,6 +1,7 @@
-const PDM_DECIMATION: u8 = 64;
-const PI: f32 = 3.14159;
-const SINCN: u8 = 3;
+use num_traits::FloatConst;
+
+const PDM_DECIMATION: usize = 64;
+const SINCN: usize = 3;
 const FILTER_GAIN: u8 = 16;
 const MAX_VOLUME: u8 = 64;
 
@@ -8,8 +9,8 @@ const MAX_VOLUME: u8 = 64;
 //https://github.com/ArmDeveloperEcosystem/microphone-library-for-pico/blob/main/src/pdm_microphone.c
 
 pub struct PDMFilter {
-    lut: [u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
-    fs: u32,
+    lut: [u32; (SINCN * PDM_DECIMATION / 8) * 256],
+    fs: f32,
     coef: [u32; 2],
     sub_const: u32,
     old_out: i64,
@@ -20,9 +21,10 @@ pub struct PDMFilter {
     div_const: u32,
 }
 impl PDMFilter {
-    pub fn new(sample_rate: u32) -> PDMFilter {
+    #[allow(clippy::large_stack_arrays)]
+    pub fn new(sample_rate: f32) -> PDMFilter {
         PDMFilter {
-            lut: [0u32; (SINCN * PDM_DECIMATION / 8) as usize * 256],
+            lut: [0u32; (SINCN * PDM_DECIMATION / 8) * 256],
             fs: sample_rate,
             coef: [0, 0],
             sub_const: 0,
@@ -34,42 +36,35 @@ impl PDMFilter {
             div_const: 0,
         }
     }
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
     pub fn init(&mut self) {
-        let lp_hz: f32 = self.fs as f32 / 2.0;
+        let lp_hz: f32 = self.fs / 2.0;
         let hp_hz: f32 = 40.0;
+
         if lp_hz != 0.0 {
-            self.lp_alpha = (lp_hz * 256.0 / (lp_hz + self.fs as f32 / (2.0 * PI))) as u32;
+            self.lp_alpha = (lp_hz * 256.0 / (lp_hz + self.fs / (2.0 * f32::PI()))) as u32;
         }
 
-        //high pass filter does not seem to be doing anything
+        // high pass filter does not seem to be doing anything
         if hp_hz != 0.0 {
-            self.hp_alpha = (self.fs as f32 * 256.0 / (2.0 * PI * hp_hz + self.fs as f32)) as u32;
+            self.hp_alpha = (self.fs * 256.0 / (2.0 * f32::PI() * hp_hz + self.fs)) as u32;
         }
 
-        let sinc = [1u16; PDM_DECIMATION as usize];
-        let mut sinc_out = [0u16; PDM_DECIMATION as usize * 2 - 1];
+        let sinc = [1u16; PDM_DECIMATION];
+        let mut sinc_out = [0u16; PDM_DECIMATION * 2 - 1];
 
-        let mut sinc2 = [0u16; PDM_DECIMATION as usize * 3];
-        let _ = convolve(
-            &sinc,
-            PDM_DECIMATION as usize,
-            &sinc,
-            PDM_DECIMATION as usize,
-            sinc_out.as_mut(),
-        );
+        let mut sinc2 = [0u16; PDM_DECIMATION * 3];
+        let _ = convolve(&sinc, PDM_DECIMATION, &sinc, PDM_DECIMATION, sinc_out.as_mut());
 
         // https://s3.amazonaws.com/embeddedrelated/user/114298/lti%20filters_3552.pdf
-        //adding 0x00008000 to sum, to undo filter noise bias
-        let sum = convolve(
-            &sinc_out,
-            PDM_DECIMATION as usize * 2 - 1,
-            &sinc,
-            PDM_DECIMATION as usize,
-            sinc2[1..].as_mut(),
-        ) + 0x00008000;
+        // adding 0x00008000 to sum, to undo filter noise bias
+        let sum =
+            convolve(&sinc_out, PDM_DECIMATION * 2 - 1, &sinc, PDM_DECIMATION, sinc2[1..].as_mut())
+                + 0x0000_8000;
 
         self.sub_const = sum >> 1;
-        self.div_const = self.sub_const * MAX_VOLUME as u32 / 32768 / FILTER_GAIN as u32;
+        self.div_const = self.sub_const * u32::from(MAX_VOLUME) / 32768 / u32::from(FILTER_GAIN);
         if self.div_const == 0 {
             self.div_const = 1;
         }
@@ -78,56 +73,56 @@ impl PDMFilter {
         //     self.lp_alpha, self.hp_alpha, self.sub_const, self.div_const, sum
         // );
         for s in 0..SINCN {
-            let offset: usize = (s * PDM_DECIMATION) as usize;
+            let offset = s * PDM_DECIMATION;
             for c in 0..256u32 {
                 for d in 0..8 {
                     let coef_offset = offset + d * 8;
-                    self.lut[((s as usize * 256 * 8) + c as usize * 8 + d) as usize] = (c >> 7)
-                        * sinc2[coef_offset] as u32
-                        + ((c >> 6) & 0x01) * sinc2[coef_offset + 1] as u32
-                        + ((c >> 5) & 0x01) * sinc2[coef_offset + 2] as u32
-                        + ((c >> 4) & 0x01) * sinc2[coef_offset + 3] as u32
-                        + ((c >> 3) & 0x01) * sinc2[coef_offset + 4] as u32
-                        + ((c >> 2) & 0x01) * sinc2[coef_offset + 5] as u32
-                        + ((c >> 1) & 0x01) * sinc2[coef_offset + 6] as u32
-                        + ((c) & 0x01) * sinc2[coef_offset + 7] as u32;
+                    self.lut[(s * 256 * 8) + c as usize * 8 + d] = (c >> 7)
+                        * u32::from(sinc2[coef_offset])
+                        + ((c >> 6) & 0x01) * u32::from(sinc2[coef_offset + 1])
+                        + ((c >> 5) & 0x01) * u32::from(sinc2[coef_offset + 2])
+                        + ((c >> 4) & 0x01) * u32::from(sinc2[coef_offset + 3])
+                        + ((c >> 3) & 0x01) * u32::from(sinc2[coef_offset + 4])
+                        + ((c >> 2) & 0x01) * u32::from(sinc2[coef_offset + 5])
+                        + ((c >> 1) & 0x01) * u32::from(sinc2[coef_offset + 6])
+                        + ((c) & 0x01) * u32::from(sinc2[coef_offset + 7]);
                 }
             }
         }
     }
 
-    pub fn filter(&mut self, data: &[u8], volume: u8, mut dataout: Option<&mut [u16]>) {
-        let mut old_out: i64 = self.old_out;
-        let mut old_in: i64 = self.old_in;
-        let mut oldz: i64 = self.oldz;
-        let mut out_index = 0;
+    pub fn filter(&mut self, data: &[u8], volume: u8, mut data_out: Option<&mut [u16]>) {
+        let mut old_out = self.old_out;
+        let mut old_in = self.old_in;
+        let mut oldz = self.oldz;
 
-        for i in (0..=data.len() - 8).step_by(PDM_DECIMATION as usize >> 3) {
-            let index = i;
+        for (out_index, data_slice) in data.chunks_exact(PDM_DECIMATION >> 3).enumerate() {
             // 3 polyphase FIR?
-            let z0 = filter_table_mono_64(&self.lut, &data[index..index + 8], 0);
-            let z1 = filter_table_mono_64(&self.lut, &data[index..index + 8], 1);
-            let z2 = filter_table_mono_64(&self.lut, &data[index..index + 8], 2);
-            let mut z: i64 = self.coef[1] as i64 + z2 as i64 - self.sub_const as i64;
+            let z0 = filter_table_mono_64(&self.lut, data_slice, 0);
+            let z1 = filter_table_mono_64(&self.lut, data_slice, 1);
+            let z2 = filter_table_mono_64(&self.lut, data_slice, 2);
+            let mut z = i64::from(self.coef[1]) + i64::from(z2) - i64::from(self.sub_const);
 
             self.coef[1] = self.coef[0] + z1;
-
             self.coef[0] = z0;
 
-            old_out = (self.hp_alpha as i64 * (old_out + z - old_in)) >> 8;
+            old_out = (i64::from(self.hp_alpha) * (old_out + z - old_in)) >> 8;
             old_in = z;
 
-            oldz = ((256 - self.lp_alpha as i64) * oldz + self.lp_alpha as i64 * old_out) >> 8;
-            z = oldz * volume as i64;
+            oldz =
+                ((256 - i64::from(self.lp_alpha)) * oldz + i64::from(self.lp_alpha) * old_out) >> 8;
+            z = oldz * i64::from(volume);
+            z = round_div(z, i64::from(self.div_const));
+            // FIXME: Any reason why this isn't i16::MIN/i16::MAX?
+            z = z.clamp(-32700, 32700);
 
-            z = round_div(z, self.div_const as i64);
-            z = satural_lh(z, -32700_i64, 32700_i64);
-
-            if let Some(ref mut dataout) = dataout {
-                dataout[out_index] = z as u16;
-                out_index += 1;
+            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_sign_loss)]
+            if let Some(ref mut data_out) = data_out {
+                *unsafe { data_out.get_unchecked_mut(out_index) } = z as u16;
             }
         }
+
         self.old_out = old_out;
         self.old_in = old_in;
         self.oldz = oldz;
@@ -141,28 +136,17 @@ fn round_div(a: i64, b: i64) -> i64 {
     }
     (a - b / 2) / b
 }
-// clip???
-fn satural_lh(n: i64, l: i64, h: i64) -> i64 {
-    if n < l {
-        return l;
-    } else if n > h {
-        return h;
-    }
-    n
-}
 
 // apply weights on each bit of input data
-fn filter_table_mono_64(lut: &[u32], data: &[u8], s: u8) -> u32 {
-    let s_offset: usize = s as usize * 256 * 8;
-    // because of endiness the first byte of a 32 bit is at index 3, 2, 1 .. 0
-    lut[s_offset + (data[3] as usize * PDM_DECIMATION as usize / 8)]
-        + lut[s_offset + (data[2] as usize * PDM_DECIMATION as usize / 8 + 1)]
-        + lut[s_offset + (data[1] as usize * PDM_DECIMATION as usize / 8 + 2)]
-        + lut[s_offset + (data[0] as usize * PDM_DECIMATION as usize / 8 + 3)]
-        + lut[s_offset + (data[7] as usize * PDM_DECIMATION as usize / 8 + 4)]
-        + lut[s_offset + (data[6] as usize * PDM_DECIMATION as usize / 8 + 5)]
-        + lut[s_offset + (data[5] as usize * PDM_DECIMATION as usize / 8 + 6)]
-        + lut[s_offset + (data[4] as usize * PDM_DECIMATION as usize / 8 + 7)]
+fn filter_table_mono_64(lut: &[u32], data: &[u8], s: usize) -> u32 {
+    let s_offset = s * 256 * 8;
+    let lut = &lut[s_offset..];
+    let mut out = 0;
+    let dec = PDM_DECIMATION / 8;
+    for (index, byte) in data.iter().enumerate() {
+        out += unsafe { lut.get_unchecked(*byte as usize * dec + index) }
+    }
+    out
 }
 fn convolve(
     signal: &[u16],
@@ -176,21 +160,21 @@ fn convolve(
     for n in 0..outlen {
         let mut kmin: usize = 0;
         if n >= kernel_len - 1 {
-            kmin = n - (kernel_len - 1)
+            kmin = n - (kernel_len - 1);
         }
 
         let mut kmax: usize = signal_len - 1;
         if n < signal_len - 1 {
-            kmax = n
+            kmax = n;
         }
         let mut acc: u16 = 0;
 
         for k in kmin..=kmax {
-            acc += signal[k] * kernel[n - k]
+            acc += signal[k] * kernel[n - k];
         }
 
         out[n] = acc;
-        sum += acc as u32;
+        sum += u32::from(acc);
     }
     sum
 }
