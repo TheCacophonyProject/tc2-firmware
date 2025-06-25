@@ -675,9 +675,13 @@ impl OnboardFlash {
         }
     }
 
-    pub fn is_too_full_to_start_new_thermal_recordings(&self) -> bool {
+    pub fn is_too_full_to_start_new_cptv_recordings(&self) -> bool {
         // Whether or not we should start any new recordings, or should offload.
         self.current_block_index > (NUM_RECORDING_BLOCKS - 256)
+    }
+
+    pub fn can_begin_new_cptv_recordings(&self) -> bool {
+        !self.is_too_full_to_start_new_cptv_recordings()
     }
 
     #[allow(clippy::cast_possible_truncation)]

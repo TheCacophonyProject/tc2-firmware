@@ -224,7 +224,7 @@ pub fn maybe_offload_files_and_events_on_startup(
 
     let should_offload = (has_files_to_offload
         && !config.time_is_in_recording_window(&time.get_date_time(), None))
-        || fs.is_too_full_to_start_new_thermal_recordings()
+        || fs.is_too_full_to_start_new_cptv_recordings()
         || (has_files_to_offload && fs.file_start_block_index.is_none());
     // means old file system offload once
 
