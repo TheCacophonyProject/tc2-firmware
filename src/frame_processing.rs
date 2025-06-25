@@ -160,7 +160,7 @@ pub fn thermal_motion_task(
     mut delay: Delay,
     mut sio: Sio,
     mut dma: DMA,
-    mut shared_i2c: SharedI2C,
+    mut i2c: SharedI2C,
     mut pi_spi: ExtSpiTransfers,
     mut fs: OnboardFlash,
     static_frame_buffer_a: StaticFrameBuffer,
@@ -180,13 +180,13 @@ pub fn thermal_motion_task(
     let timer = time.get_timer();
 
     events.log(Event::ThermalMode, &time, &mut fs);
-    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+    if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
         if is_recording {
             events.log(Event::RecordingNotFinished, &time, &mut fs);
         }
     }
     // Unset the is_recording flag on attiny on startup
-    let _ = shared_i2c
+    let _ = i2c
         .set_recording_flag(&mut delay, false)
         .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
     let startup_date_time_utc: DateTime<Utc> = time.get_date_time();
@@ -374,7 +374,7 @@ pub fn thermal_motion_task(
         if needs_ffc && device_config.use_high_power_mode() {
             // only check status every 20 seconds
             if bk.twenty_seconds_elapsed_since_last_check(&frame_telemetry) {
-                if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+                if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
                     bk.is_recording_on_rpi = is_recording;
                     bk.frame_checkpoint = frame_telemetry.frame_num;
                     if bk.is_recording_on_rpi {
@@ -611,7 +611,7 @@ pub fn thermal_motion_task(
                         prev_frame_2.fill(0);
 
                         ended_recording = true;
-                        let _ = shared_i2c
+                        let _ = i2c
                             .set_recording_flag(&mut delay, false)
                             .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
 
@@ -665,7 +665,7 @@ pub fn thermal_motion_task(
             // TODO: Do we actually want to do this?  It's really there so the RPi/Attiny doesn't shut us down while
             //  we're writing to the flash.  Needs implementation on Attiny side.  But actually, nobody but the rp2040 should
             //  be shutting down the rp2040, so maybe we *don't* need this?  Still nice to have for UI concerns (show recording indicator)
-            let _ = shared_i2c
+            let _ = i2c
                 .set_recording_flag(&mut delay, true)
                 .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
 
@@ -770,7 +770,7 @@ pub fn thermal_motion_task(
             if device_config.use_low_power_mode() {
                 // Once per minute, if we're not currently recording, tell the RPi it can shut down, as it's not
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
-                advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay);
                 if bk.logged_told_rpi_to_sleep.take().is_some() {
                     events.log(Event::ToldRpiToSleep, &time, &mut fs);
                 }
@@ -781,7 +781,7 @@ pub fn thermal_motion_task(
             }
             let sync_rtc_start_real = timer.get_counter();
 
-            match shared_i2c.get_datetime(&mut delay) {
+            match i2c.get_datetime(&mut delay) {
                 Ok(now) => time.set(get_datetime_utc(now)),
                 Err(err_str) => {
                     events.log(Event::RtcCommError, &time, &mut fs);
@@ -824,14 +824,14 @@ pub fn thermal_motion_task(
 
                 if bk.use_high_power_mode() {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
-                    advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+                    advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay);
                     if bk.logged_told_rpi_to_sleep.take().is_some() {
                         events.log(Event::ToldRpiToSleep, &time, &mut fs);
                     }
                 }
 
                 let check_power_down_state_start = timer.get_counter();
-                if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
+                if let Ok(pi_is_powered_down) = i2c.pi_is_powered_down(&mut delay, true) {
                     if pi_is_powered_down {
                         if bk.logged_pi_powered_down.take().is_some() {
                             info!("Pi is now powered down: {}", pi_is_powered_down);
@@ -858,18 +858,17 @@ pub fn thermal_motion_task(
                         } else {
                             device_config.next_recording_window_start(&time.get_date_time())
                         };
-                        let enabled_alarm = shared_i2c.enable_alarm(&mut delay);
+                        let enabled_alarm = i2c.enable_alarm(&mut delay);
                         if enabled_alarm.is_err() {
                             error!("Failed enabling alarm");
                             events.log(Event::RtcCommError, &time, &mut fs);
                         }
-                        if shared_i2c
+                        if i2c
                             .set_wakeup_alarm(&next_recording_window_start, &mut delay)
                             .is_ok()
                         {
-                            let alarm_enabled = shared_i2c
-                                .alarm_interrupt_enabled(&mut delay)
-                                .unwrap_or(false);
+                            let alarm_enabled =
+                                i2c.alarm_interrupt_enabled(&mut delay).unwrap_or(false);
                             info!("Wake up alarm interrupt enabled {}", alarm_enabled);
                             if alarm_enabled {
                                 events.log(
@@ -892,10 +891,7 @@ pub fn thermal_motion_task(
                                 }
                                 info!("Ask Attiny to power down rp2040");
                                 events.log(Event::Rp2040Sleep, &time, &mut fs);
-                                if shared_i2c
-                                    .tell_attiny_to_power_down_rp2040(&mut delay)
-                                    .is_ok()
-                                {
+                                if i2c.tell_attiny_to_power_down_rp2040(&mut delay).is_ok() {
                                     info!("Sleeping");
                                 } else {
                                     error!("Failed sending sleep request to attiny");
@@ -921,7 +917,7 @@ pub fn thermal_motion_task(
                     (timer.get_counter() - check_power_down_state_start).to_micros()
                 );
             } else if !is_outside_recording_window && !device_config.use_low_power_mode() {
-                if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+                if wake_raspberry_pi(&mut i2c, &mut delay) {
                     events.log(
                         Event::ToldRpiToWake(WakeReason::ThermalHighPower),
                         &time,
@@ -978,12 +974,12 @@ pub fn thermal_motion_task(
             &time,
             &current_recording_window.1,
             &frame_telemetry,
-            &mut shared_i2c,
+            &mut i2c,
             &mut delay,
         ) {
             info!("Taking audio recording");
             // make audio rec now
-            if shared_i2c.tc2_agent_take_audio_rec(&mut delay).is_ok() {
+            if i2c.tc2_agent_take_audio_rec(&mut delay).is_ok() {
                 restart(&mut sio);
             }
         }
@@ -1001,7 +997,7 @@ fn should_restart_to_make_an_audio_recording(
     time: &SyncedDateTime,
     window_end: &DateTime<Utc>,
     telemetry: &Telemetry,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
 ) -> bool {
     if let Some(next_audio_alarm) = bk.next_audio_alarm {
@@ -1034,7 +1030,7 @@ fn should_restart_to_make_an_audio_recording(
             } else {
                 // handles case where thermal recorder on the rPi is doing recording
                 bk.is_recording_on_rpi = bk.use_high_power_mode()
-                    && shared_i2c
+                    && i2c
                         .get_is_recording(delay)
                         .is_ok_and(|is_recording| is_recording);
                 if !bk.is_recording_on_rpi {

@@ -172,19 +172,19 @@ pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
 };
 impl SharedI2C {
     pub fn new(
-        i2c: I2CConfig,
+        i2c_config: I2CConfig,
         unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
         delay: &mut Delay,
     ) -> SharedI2C {
-        let mut shared_i2c = SharedI2C {
+        let mut i2c = SharedI2C {
             unlocked_pin: Some(unlocked_pin),
-            i2c: Some(i2c),
+            i2c: Some(i2c_config),
             rtc: None,
         };
 
         let mut attempts = 0;
         loop {
-            match shared_i2c.get_attiny_firmware_version(delay) {
+            match i2c.get_attiny_firmware_version(delay) {
                 Ok(version) => match version {
                     EXPECTED_ATTINY_FIRMWARE_VERSION => {
                         break;
@@ -208,7 +208,7 @@ impl SharedI2C {
                 }
             }
         }
-        shared_i2c
+        i2c
     }
 
     pub fn free(&mut self) -> (I2CConfig, Pin<Gpio3, FunctionSio<SioInput>, PullDown>) {

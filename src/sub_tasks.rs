@@ -87,14 +87,14 @@ pub fn offload_latest_recording(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
     events: &mut EventLogger,
     time: &SyncedDateTime,
     watchdog: &mut Watchdog,
 ) -> bool {
     offload_recordings_and_events(
-        fs, pi_spi, resets, dma, shared_i2c, delay, events, time, watchdog, true,
+        fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog, true,
     )
 }
 
@@ -103,14 +103,14 @@ pub fn offload_all_recordings_and_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
     events: &mut EventLogger,
     time: &SyncedDateTime,
     watchdog: &mut Watchdog,
 ) -> bool {
     offload_recordings_and_events(
-        fs, pi_spi, resets, dma, shared_i2c, delay, events, time, watchdog, false,
+        fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog, false,
     )
 }
 
@@ -120,7 +120,7 @@ pub fn offload_recordings_and_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
     events: &mut EventLogger,
     time: &SyncedDateTime,
@@ -130,7 +130,7 @@ pub fn offload_recordings_and_events(
     warn!("There are files to offload!");
     watchdog.disable();
 
-    if wake_raspberry_pi(shared_i2c, delay) {
+    if wake_raspberry_pi(i2c, delay) {
         events.log(Event::GotRpiPoweredOn, time, fs);
     }
     watchdog.start(8_388_607.micros());

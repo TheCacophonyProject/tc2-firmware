@@ -62,8 +62,8 @@ fn maybe_reschedule_audio_recording(
     alarm_triggered: &bool,
 ) {
     // this isn't reliable so use alarm stored in flash
-    // let mut alarm_hours = shared_i2c.get_alarm_hours();
-    // let mut alarm_minutes = shared_i2c.get_alarm_minutes();
+    // let mut alarm_hours = i2c.get_alarm_hours();
+    // let mut alarm_minutes = i2c.get_alarm_minutes();
     let mut scheduled: bool = false;
 
     // GP 30th Jan TODO if alarm is set we always need to check alarm against current time if the alarm wasnt triggered
@@ -120,7 +120,7 @@ fn maybe_reschedule_audio_recording(
 
 #[allow(clippy::too_many_lines)]
 pub fn audio_task(
-    mut shared_i2c: SharedI2C,
+    mut i2c: SharedI2C,
     system_clock_freq: HertzU32,
     gpio0: gpio::Pin<Gpio0, FunctionNull, PullDown>,
     gpio1: gpio::Pin<Gpio1, FunctionNull, PullDown>,
@@ -140,7 +140,7 @@ pub fn audio_task(
     let thermal_requested_audio = false;
     if alarm_triggered {
         recording_type = Some(AudioRecordingType::scheduled_recording());
-    } else if let Ok(audio_rec) = shared_i2c.tc2_agent_requested_audio_recording(&mut delay) {
+    } else if let Ok(audio_rec) = i2c.tc2_agent_requested_audio_recording(&mut delay) {
         recording_type = audio_rec;
     }
 
@@ -168,7 +168,7 @@ pub fn audio_task(
         // should have already offloaded but extra safety check
         // FIXME Actually, lets not
         if !fs.is_too_full_for_to_start_new_audio_recordings(&recording_type) {
-            let _ = shared_i2c
+            let _ = i2c
                 .set_recording_flag(&mut delay, true)
                 .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
             let timestamp = time.get_timestamp_micros();
@@ -196,7 +196,7 @@ pub fn audio_task(
                 &mut watchdog,
                 time,
             );
-            let _ = shared_i2c
+            let _ = i2c
                 .set_recording_flag(&mut delay, false)
                 .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
             if recording_failed {
@@ -210,7 +210,7 @@ pub fn audio_task(
                         info!("taken test recording clearing status");
                         watchdog.feed();
                         // FIXME: Make the intent of this much clearer
-                        let _ = shared_i2c.tc2_agent_clear_and_set_flag(
+                        let _ = i2c.tc2_agent_clear_and_set_flag(
                             &mut delay,
                             match recording_type {
                                 AudioRecordingType::Long(_) => {
@@ -235,7 +235,7 @@ pub fn audio_task(
                             &mut pi_spi,
                             &mut peripherals.RESETS,
                             &mut peripherals.DMA,
-                            &mut shared_i2c,
+                            &mut i2c,
                             &mut delay,
                             &mut events,
                             time,
@@ -245,12 +245,12 @@ pub fn audio_task(
                         restart(&mut watchdog);
                     }
                     _ => {
-                        shared_i2c.clear_alarm(&mut delay);
+                        i2c.clear_alarm(&mut delay);
                         reschedule = true;
                         clear_audio_alarm(&mut fs);
                         if thermal_requested_audio {
                             //if audio requested from thermal, the alarm will be re scheduled there
-                            let _ = shared_i2c.tc2_agent_clear_and_set_flag(
+                            let _ = i2c.tc2_agent_clear_and_set_flag(
                                 &mut delay,
                                 tc2_agent_state::TAKE_AUDIO,
                                 Some(tc2_agent_state::THERMAL_MODE),
@@ -268,14 +268,9 @@ pub fn audio_task(
     if reschedule {
         watchdog.feed();
         info!("Scheduling new recording");
-        if let Ok(scheduled_time) = schedule_audio_rec(
-            &mut delay,
-            time,
-            &mut shared_i2c,
-            &mut fs,
-            &mut events,
-            config,
-        ) {
+        if let Ok(scheduled_time) =
+            schedule_audio_rec(&mut delay, time, &mut i2c, &mut fs, &mut events, config)
+        {
             alarm_date_time = Some(scheduled_time);
         } else {
             error!("Couldn't schedule alarm will restart");
@@ -303,7 +298,7 @@ pub fn audio_task(
         && config.time_is_in_recording_window(&time.get_date_time(), None);
 
     loop {
-        advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
+        advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay);
         if !logged_power_down {
             events.log(Event::ToldRpiToSleep, time, &mut fs);
             logged_power_down = true;
@@ -311,7 +306,7 @@ pub fn audio_task(
 
         watchdog.feed();
         if should_sleep {
-            if let Ok(pi_is_powered_down) = shared_i2c.pi_is_powered_down(&mut delay, true) {
+            if let Ok(pi_is_powered_down) = i2c.pi_is_powered_down(&mut delay, true) {
                 if pi_is_powered_down {
                     if let Some(alarm_time) = alarm_date_time {
                         let until_alarm = (alarm_time - time.get_date_time()).num_minutes();
@@ -331,10 +326,7 @@ pub fn audio_task(
                         info!("Ask Attiny to power down rp2040");
                         events.log(Event::Rp2040Sleep, time, &mut fs);
 
-                        if shared_i2c
-                            .tell_attiny_to_power_down_rp2040(&mut delay)
-                            .is_ok()
-                        {
+                        if i2c.tell_attiny_to_power_down_rp2040(&mut delay).is_ok() {
                             info!("Sleeping");
                         } else {
                             error!("Failed sending sleep request to attiny");
@@ -346,7 +338,7 @@ pub fn audio_task(
                 if !pi_is_powered_down
                     && fs.has_files_to_offload()
                     && offload(
-                        &mut shared_i2c,
+                        &mut i2c,
                         &mut fs,
                         &mut pi_spi,
                         &mut events,
@@ -364,13 +356,13 @@ pub fn audio_task(
         }
         if boot_thermal && should_sleep {
             //if we have done everything and PI is still on go into thermal for preview
-            if let Ok(()) = shared_i2c.tc2_agent_request_thermal_mode(&mut delay) {
+            if let Ok(()) = i2c.tc2_agent_request_thermal_mode(&mut delay) {
                 info!("Going into thermal mode");
                 restart(&mut watchdog);
             }
         }
 
-        let alarm_triggered: bool = shared_i2c.alarm_triggered(&mut delay);
+        let alarm_triggered: bool = i2c.alarm_triggered(&mut delay);
         if alarm_triggered {
             info!("Alarm triggered after taking a recording resetting rp2040");
             restart(&mut watchdog);

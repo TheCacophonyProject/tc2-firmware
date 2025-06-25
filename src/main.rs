@@ -190,7 +190,7 @@ fn main() -> ! {
     // attiny-provided i2c interface at the same time as we wanted to.  The hacky?/ingenious?
     // solution was to allocate a gpio pin that would determine who has the 'lock' on the i2c bus.
     // This is handled by this `SharedI2C` abstraction which mediates comms with the attiny.
-    let mut shared_i2c = SharedI2C::new(
+    let mut i2c = SharedI2C::new(
         I2C::i2c1(
             peripherals.I2C1,
             pins.gpio6.reconfigure(),
@@ -208,16 +208,16 @@ fn main() -> ! {
 
     info!("Enabled watchdog timer");
     let mut events = EventLogger::new(&mut fs);
-    let time = get_synced_time(&mut shared_i2c, &mut delay, &mut events, &mut fs, timer);
+    let time = get_synced_time(&mut i2c, &mut delay, &mut events, &mut fs, timer);
 
-    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+    if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
         // Unset the is_recording flag on attiny on startup if still enabled.
         // If it was still set, that suggests a previous recording was interrupted.
         // TODO: We can check if that is true by checking the is_last flag on the last page
         //  written.
         if is_recording {
             events.log(Event::RecordingNotFinished, &time, &mut fs);
-            let _ = shared_i2c
+            let _ = i2c
                 .set_recording_flag(&mut delay, false)
                 .map_err(|e| error!("Error unsetting recording flag on attiny: {}", e));
         }
@@ -225,7 +225,7 @@ fn main() -> ! {
 
     let (device_config, prefer_not_to_offload_files_now) = get_device_config(
         &mut fs,
-        &mut shared_i2c,
+        &mut i2c,
         &mut delay,
         &mut pi_spi,
         system_clock_freq,
@@ -233,11 +233,11 @@ fn main() -> ! {
         &mut peripherals.DMA,
     );
 
-    let woken_by_alarm = shared_i2c.alarm_triggered(&mut delay);
+    let woken_by_alarm = i2c.alarm_triggered(&mut delay);
     if woken_by_alarm {
         info!("Woken by RTC alarm? {}", woken_by_alarm);
         events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
-        shared_i2c.clear_alarm(&mut delay);
+        i2c.clear_alarm(&mut delay);
     }
 
     let next_audio_alarm = get_next_audio_alarm(
@@ -245,12 +245,12 @@ fn main() -> ! {
         &mut fs,
         &time,
         &mut delay,
-        &mut shared_i2c,
+        &mut i2c,
         &mut events,
     );
     // Check if next_audio_alarm < now?
 
-    let record_audio_now = should_record_audio(&device_config, &mut shared_i2c, &mut delay, &time);
+    let record_audio_now = should_record_audio(&device_config, &mut i2c, &mut delay, &time);
 
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
     //  log if we can't get one
@@ -275,7 +275,7 @@ fn main() -> ! {
         &mut events,
         &mut peripherals.RESETS,
         &mut peripherals.DMA,
-        &mut shared_i2c,
+        &mut i2c,
         &mut pi_spi,
         &mut delay,
         &mut watchdog,
@@ -285,7 +285,7 @@ fn main() -> ! {
     if record_audio_now {
         let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
         audio_task(
-            shared_i2c,
+            i2c,
             system_clock_freq,
             pins.gpio0,
             pins.gpio1,
@@ -301,7 +301,7 @@ fn main() -> ! {
             delay,
         );
     } else {
-        let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
+        let disabled_alarm = i2c.disable_alarm(&mut delay);
         if disabled_alarm.is_err() {
             error!("{}", disabled_alarm.unwrap());
         }
@@ -321,7 +321,7 @@ fn main() -> ! {
             master_clk: pins.gpio26.into_floating_input(),
         };
         thermal_code(
-            shared_i2c,
+            i2c,
             pi_spi,
             fs,
             lepton_pins,
@@ -342,7 +342,7 @@ fn main() -> ! {
 ///
 /// TODO
 pub fn thermal_code(
-    shared_i2c: SharedI2C,
+    i2c: SharedI2C,
     pi_spi: ExtSpiTransfers,
     onboard_flash: OnboardFlash,
     lepton_pins: LeptonPins,
@@ -397,7 +397,7 @@ pub fn thermal_code(
         delay,
         sio,
         peripherals.DMA,
-        shared_i2c,
+        i2c,
         pi_spi,
         onboard_flash,
         static_frame_buffer_a,

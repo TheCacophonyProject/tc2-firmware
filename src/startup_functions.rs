@@ -26,22 +26,22 @@ use rp2040_hal::{Timer, Watchdog};
 
 pub fn should_record_audio(
     config: &DeviceConfig,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
     time: &SyncedDateTime,
 ) -> bool {
     let mut is_audio: bool = config.config().is_audio_device();
 
-    if let Ok(audio_only) = shared_i2c.check_if_is_audio_device(delay) {
+    if let Ok(audio_only) = i2c.check_if_is_audio_device(delay) {
         info!("EEPROM audio device: {}", audio_only);
         is_audio = is_audio || audio_only;
     }
     if is_audio {
         match config.config().audio_mode {
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                if let Ok(state) = shared_i2c.tc2_agent_state(delay) {
+                if let Ok(state) = i2c.tc2_agent_state(delay) {
                     if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
-                        let _ = shared_i2c.tc2_agent_clear_thermal_mode(delay);
+                        let _ = i2c.tc2_agent_clear_thermal_mode(delay);
                         info!("Audio request thermal mode");
                         // audio mode wants to go in thermal mode
                         is_audio = false;
@@ -69,7 +69,7 @@ pub fn should_record_audio(
 
 pub fn get_device_config(
     fs: &mut OnboardFlash,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
     pi_spi: &mut ExtSpiTransfers,
     system_clock_freq_hz: HertzU32,
@@ -82,7 +82,7 @@ pub fn get_device_config(
     } else {
         info!("Waking pi to get config");
         // We need to wake up the rpi and get a config
-        wake_raspberry_pi(shared_i2c, delay);
+        wake_raspberry_pi(i2c, delay);
     }
 
     // FIXME: This should become "config startup handshake", and we have another
@@ -105,7 +105,7 @@ pub fn get_device_config(
 }
 
 pub fn get_synced_time(
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     delay: &mut Delay,
     events: &mut EventLogger,
     fs: &mut OnboardFlash,
@@ -113,7 +113,7 @@ pub fn get_synced_time(
 ) -> SyncedDateTime {
     loop {
         // NOTE: Keep retrying until we get a datetime from RTC.
-        match shared_i2c.get_datetime(delay) {
+        match i2c.get_datetime(delay) {
             Ok(now) => {
                 info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
                 return SyncedDateTime::new(get_datetime_utc(now), timer);
@@ -134,7 +134,7 @@ pub fn get_next_audio_alarm(
     fs: &mut OnboardFlash,
     time: &SyncedDateTime,
     delay: &mut Delay,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     events: &mut EventLogger,
 ) -> Option<DateTime<Utc>> {
     // FIXME: Shouldn't this have already happened on startup?
@@ -178,9 +178,7 @@ pub fn get_next_audio_alarm(
                 }
             }
             if schedule_alarm {
-                if let Ok(next_alarm) =
-                    schedule_audio_rec(delay, time, shared_i2c, fs, events, config)
-                {
+                if let Ok(next_alarm) = schedule_audio_rec(delay, time, i2c, fs, events, config) {
                     next_audio_alarm = Some(next_alarm);
                     info!("Setting a pending audio alarm");
                 } else {
@@ -205,7 +203,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     events: &mut EventLogger,
     resets: &mut RESETS,
     dma: &mut DMA,
-    shared_i2c: &mut SharedI2C,
+    i2c: &mut SharedI2C,
     pi_spi: &mut ExtSpiTransfers,
     delay: &mut Delay,
     watchdog: &mut Watchdog,
@@ -243,7 +241,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     // Happened in thermal branch
     if !config.use_low_power_mode() {
         // TODO: Do we want to do this in both branches, assuming the pi is awake?
-        if wake_raspberry_pi(shared_i2c, delay) {
+        if wake_raspberry_pi(i2c, delay) {
             events.log(Event::ToldRpiToWake(WakeReason::ThermalHighPower), time, fs);
         }
         maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
@@ -254,7 +252,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     // FIXME: This should all happen in main startup
     let did_offload_files = if should_offload {
         offload_recordings_and_events(
-            fs, pi_spi, resets, dma, shared_i2c, delay, events, time, watchdog, false,
+            fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog, false,
         )
     } else {
         false
@@ -294,18 +292,7 @@ pub fn maybe_offload_files_and_events_on_startup(
         }
     }
 
-    if offload(
-        shared_i2c,
-        fs,
-        pi_spi,
-        events,
-        should_wake,
-        delay,
-        time,
-        watchdog,
-    )
-    .is_err()
-    {
+    if offload(i2c, fs, pi_spi, events, should_wake, delay, time, watchdog).is_err() {
         warn!("Restarting as could not offload");
         restart(watchdog);
     }
