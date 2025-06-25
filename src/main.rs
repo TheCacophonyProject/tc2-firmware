@@ -15,10 +15,12 @@ mod ext_spi_transfers;
 mod frame_processing;
 mod lepton;
 mod lepton_task;
+mod lepton_telemetry;
 mod motion_detector;
 mod onboard_flash;
 mod pdm_filter;
 mod pdm_microphone;
+mod rpi_power;
 mod startup_functions;
 mod sub_tasks;
 mod sun_times;
@@ -26,28 +28,23 @@ mod synced_date_time;
 mod utils;
 
 use crate::attiny_rtc_i2c::SharedI2C;
-use crate::audio_task::{
-    AlarmMode, MAX_GAP_MIN, audio_task, check_alarm_still_valid_with_thermal_window,
-    schedule_audio_rec,
-};
-use crate::device_config::AudioMode;
-use crate::event_logger::{
-    EventLogger, LoggerEvent, LoggerEventKind, WakeReason, clear_audio_alarm, get_audio_alarm,
-};
+use crate::audio_task::audio_task;
+use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{
     ExtSpiTransfers, RPI_PAYLOAD_LENGTH, RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH,
 };
-use crate::frame_processing::{
-    Core0Task, FrameBuffer, StaticFrameBuffer, thermal_motion_task, wake_raspberry_pi,
-};
+use crate::frame_processing::{Core0Task, FrameBuffer, StaticFrameBuffer, thermal_motion_task};
 use crate::lepton::{LeptonFirmwareInfo, LeptonPins, init_lepton_module};
 pub use crate::lepton_task::frame_acquisition_loop;
 use crate::onboard_flash::OnboardFlash;
 use crate::onboard_flash::extend_lifetime_generic_mut;
 use crate::onboard_flash::{FLASH_SPI_TOTAL_PAYLOAD_SIZE, extend_lifetime_generic};
-use crate::startup_functions::{get_device_config, get_synced_time, should_record_audio};
-use crate::sub_tasks::{maybe_offload_events, offload_flash_storage_and_events};
+use crate::startup_functions::{
+    get_device_config, get_next_audio_alarm, get_synced_time,
+    maybe_offload_files_and_events_on_startup, should_record_audio,
+};
 use crate::synced_date_time::SyncedDateTime;
+use crate::utils::restart;
 use bsp::hal::Timer;
 use bsp::hal::watchdog::Watchdog;
 use bsp::{
@@ -61,9 +58,8 @@ use bsp::{
     pac::Peripherals,
 };
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use core::cell::RefCell;
-use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
 use defmt::{assert, assert_eq, error, info, panic};
@@ -88,78 +84,6 @@ pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the atti
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
 
-fn get_next_audio_alarm(
-    device_config: &DeviceConfig,
-    flash_storage: &mut OnboardFlash,
-    synced_date_time: &SyncedDateTime,
-    delay: &mut Delay,
-    shared_i2c: &mut SharedI2C,
-    event_logger: &mut EventLogger,
-) -> Option<DateTime<Utc>> {
-    // FIXME: Shouldn't this have already happened on startup?
-    let mut next_audio_alarm = None;
-    match device_config.config().audio_mode {
-        AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
-            let (audio_mode, audio_alarm) = get_audio_alarm(flash_storage);
-            let mut schedule_alarm = true;
-            // if audio alarm is set check it's within 60 minutes and before or on thermal window start
-            if let Some(audio_alarm) = audio_alarm {
-                if let Ok(audio_mode) = audio_mode {
-                    // FIXME: Document what the AlarmModes mean
-                    if audio_mode == AlarmMode::Audio {
-                        let synced = synced_date_time.get_date_time();
-                        let until_alarm = (audio_alarm - synced).num_minutes();
-                        if until_alarm <= i64::from(MAX_GAP_MIN) {
-                            info!(
-                                "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                                audio_alarm.year(),
-                                audio_alarm.month(),
-                                audio_alarm.day(),
-                                audio_alarm.hour(),
-                                audio_alarm.minute()
-                            );
-                            if check_alarm_still_valid_with_thermal_window(
-                                &audio_alarm,
-                                &synced,
-                                device_config,
-                            ) {
-                                next_audio_alarm = Some(audio_alarm);
-                                schedule_alarm = false;
-                            } else {
-                                schedule_alarm = true;
-                                // if window time changed and alarm is after rec window start
-                                info!("Rescheduling as alarm is after window start");
-                            }
-                        } else {
-                            info!("Alarm is missed");
-                        }
-                    }
-                }
-            }
-            if schedule_alarm {
-                if let Ok(next_alarm) = schedule_audio_rec(
-                    delay,
-                    synced_date_time,
-                    shared_i2c,
-                    flash_storage,
-                    event_logger,
-                    device_config,
-                ) {
-                    next_audio_alarm = Some(next_alarm);
-                    info!("Setting a pending audio alarm");
-                } else {
-                    error!("Couldn't schedule alarm");
-                }
-            }
-        }
-        _ => {
-            info!("Clearing audio alarm");
-            clear_audio_alarm(flash_storage);
-        }
-    }
-    next_audio_alarm
-}
-
 #[entry]
 #[allow(clippy::too_many_lines)]
 fn main() -> ! {
@@ -179,7 +103,10 @@ fn main() -> ! {
     );
     let system_clock_freq = clocks.system_clock.freq();
 
-    info!("System clock speed {}MHz", clocks.system_clock.freq().to_MHz());
+    info!(
+        "System clock speed {}MHz",
+        clocks.system_clock.freq().to_MHz()
+    );
 
     // Watchdog ticks are required to run the timer peripheral, since they're shared between both.
     let mut watchdog = Watchdog::new(peripherals.WATCHDOG);
@@ -204,7 +131,7 @@ fn main() -> ! {
     let mut flash_page_buf_2 = [0xffu8; FLASH_SPI_TOTAL_PAYLOAD_SIZE];
     let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
     let flash_page_buf_2 = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf_2) };
-    let mut flash_storage = {
+    let mut fs = {
         let fs_cs = pins.gpio9.into_push_pull_output();
         let fs_miso = pins.gpio8.into_pull_down_disabled().into_pull_type();
         let fs_mosi = pins.gpio11.into_pull_down_disabled().into_pull_type();
@@ -249,11 +176,13 @@ fn main() -> ! {
         )
     };
 
-    flash_storage.take_spi(peripherals.SPI1, &mut peripherals.RESETS);
-    flash_storage.init();
+    fs.take_spi(peripherals.SPI1, &mut peripherals.RESETS);
+    fs.init();
 
-    let mut delay =
-        Delay::new(pac::CorePeripherals::take().unwrap().SYST, system_clock_freq.to_Hz());
+    let mut delay = Delay::new(
+        pac::CorePeripherals::take().unwrap().SYST,
+        system_clock_freq.to_Hz(),
+    );
 
     // Attiny + RTC comms
     info!("Initing shared i2c");
@@ -276,12 +205,26 @@ fn main() -> ! {
 
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
+
     info!("Enabled watchdog timer");
-    let mut event_logger = EventLogger::new(&mut flash_storage);
-    let synced_date_time =
-        get_synced_time(&mut shared_i2c, &mut delay, &mut event_logger, &mut flash_storage, timer);
-    let device_config = get_device_config(
-        &mut flash_storage,
+    let mut events = EventLogger::new(&mut fs);
+    let time = get_synced_time(&mut shared_i2c, &mut delay, &mut events, &mut fs, timer);
+
+    if let Ok(is_recording) = shared_i2c.get_is_recording(&mut delay) {
+        // Unset the is_recording flag on attiny on startup if still enabled.
+        // If it was still set, that suggests a previous recording was interrupted.
+        // TODO: We can check if that is true by checking the is_last flag on the last page
+        //  written.
+        if is_recording {
+            events.log(Event::RecordingNotFinished, &time, &mut fs);
+            let _ = shared_i2c
+                .set_recording_flag(&mut delay, false)
+                .map_err(|e| error!("Error unsetting recording flag on attiny: {}", e));
+        }
+    }
+
+    let (device_config, prefer_not_to_offload_files_now) = get_device_config(
+        &mut fs,
         &mut shared_i2c,
         &mut delay,
         &mut pi_spi,
@@ -293,91 +236,50 @@ fn main() -> ! {
     let woken_by_alarm = shared_i2c.alarm_triggered(&mut delay);
     if woken_by_alarm {
         info!("Woken by RTC alarm? {}", woken_by_alarm);
-        event_logger.log_event(
-            LoggerEvent::new(LoggerEventKind::Rp2040WokenByAlarm, &synced_date_time),
-            &mut flash_storage,
-        );
+        events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
         shared_i2c.clear_alarm(&mut delay);
     }
 
-    // Do we want to offload files?
-
     let next_audio_alarm = get_next_audio_alarm(
         &device_config,
-        &mut flash_storage,
-        &synced_date_time,
+        &mut fs,
+        &time,
         &mut delay,
         &mut shared_i2c,
-        &mut event_logger,
+        &mut events,
     );
     // Check if next_audio_alarm < now?
 
-    let record_audio_now =
-        should_record_audio(&device_config, &mut shared_i2c, &mut delay, &synced_date_time);
+    let record_audio_now = should_record_audio(&device_config, &mut shared_i2c, &mut delay, &time);
+
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
     //  log if we can't get one
 
-    // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
-    //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
-    //  Otherwise, if the rp2040 happens to restart, we'll pretty much
-    //  always start the pi up, which we don't want.
-    let has_files_to_offload = flash_storage.has_files_to_offload();
-    let should_offload = (has_files_to_offload
-        && !device_config.time_is_in_recording_window(&synced_date_time.get_date_time(), None))
-        || flash_storage.is_too_full_to_start_new_recordings()
-        || (has_files_to_offload && flash_storage.file_start_block_index.is_none());
-    // means old file system offload once
+    // There are a number of reasons we may or may not want to offload files and events on startup.
 
-    if should_offload {
-        event_logger.log_event(
-            LoggerEvent::new(
-                LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffload),
-                &synced_date_time,
-            ),
-            &mut flash_storage,
-        );
-    }
-    let should_offload = if !should_offload && has_files_to_offload {
-        let duration_since_prev_offload = event_logger
-            .latest_event_of_kind(LoggerEventKind::OffloadedRecording, &mut flash_storage)
-            .map_or(Duration::minutes(0), |prev_event| {
-                prev_event.timestamp().map_or(Duration::minutes(0), |date_time_utc| {
-                    synced_date_time.get_date_time() - date_time_utc
-                })
-            });
-        if duration_since_prev_offload > Duration::hours(24) {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToWake(WakeReason::ThermalOffloadAfter24Hours),
-                    &synced_date_time,
-                ),
-                &mut flash_storage,
-            );
-            true
-        } else {
-            false
-        }
-    } else {
-        should_offload
-    };
+    // If the rPi is already awake, we want to offload
+    // - if the flash is full
+    // - if we're not in a recording window, or it has been more than 24hrs since the previous offload.
+    // - if an audio recording is not scheduled imminently?
+    // - AND the user is not interacting with the device via sidekick.
 
-    // FIXME: This should all happen in main startup
-    let did_offload_files = if should_offload {
-        offload_flash_storage_and_events(
-            &mut flash_storage,
-            &mut pi_spi,
-            &mut peripherals.RESETS,
-            &mut peripherals.DMA,
-            &mut shared_i2c,
-            &mut delay,
-            &mut event_logger,
-            &synced_date_time,
-            &mut watchdog,
-            false,
-        )
-    } else {
-        false
-    };
+    // Maybe offload files
+    // TODO: We might defer this if the user is using sidekick etc?
+    // TODO: Make offloads interruptable?
+    let recording_mode = if record_audio_now { "audio" } else { "thermal" };
+    let did_offload = maybe_offload_files_and_events_on_startup(
+        recording_mode,
+        &mut fs,
+        &device_config,
+        &time,
+        &mut events,
+        &mut peripherals.RESETS,
+        &mut peripherals.DMA,
+        &mut shared_i2c,
+        &mut pi_spi,
+        &mut delay,
+        &mut watchdog,
+    );
 
     // TODO: We might defer this if the user is using sidekick etc?
     if record_audio_now {
@@ -390,40 +292,18 @@ fn main() -> ! {
             watchdog,
             woken_by_alarm,
             &device_config,
-            flash_storage,
+            fs,
             pi_spi,
-            event_logger,
-            &synced_date_time,
+            events,
+            &time,
             pio1,
             sm1,
+            delay,
         );
     } else {
         let disabled_alarm = shared_i2c.disable_alarm(&mut delay);
         if disabled_alarm.is_err() {
             error!("{}", disabled_alarm.unwrap());
-        }
-
-        if !device_config.use_low_power_mode() {
-            // TODO: Do we want to do this in both branches, assuming the pi is awake?
-            if wake_raspberry_pi(&mut shared_i2c, &mut delay) {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
-                        &synced_date_time,
-                    ),
-                    &mut flash_storage,
-                );
-            }
-            maybe_offload_events(
-                &mut pi_spi,
-                &mut peripherals.RESETS,
-                &mut peripherals.DMA,
-                &mut delay,
-                &mut event_logger,
-                &mut flash_storage,
-                &synced_date_time,
-                &mut watchdog,
-            );
         }
 
         let lepton_pins = LeptonPins {
@@ -443,7 +323,7 @@ fn main() -> ! {
         thermal_code(
             shared_i2c,
             pi_spi,
-            flash_storage,
+            fs,
             lepton_pins,
             watchdog,
             system_clock_freq,
@@ -451,8 +331,8 @@ fn main() -> ! {
             &clocks,
             rosc,
             &device_config,
-            event_logger,
-            synced_date_time,
+            events,
+            time,
             next_audio_alarm,
         );
     }
@@ -472,8 +352,8 @@ pub fn thermal_code(
     clocks: &ClocksManager,
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     device_config: &DeviceConfig,
-    event_logger: EventLogger,
-    synced_date_time: SyncedDateTime,
+    events: EventLogger,
+    time: SyncedDateTime,
     next_audio_alarm: Option<DateTime<Utc>>,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
@@ -488,10 +368,12 @@ pub fn thermal_code(
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
 
-    let frame_buffer_a =
-        Mutex::new(RefCell::new(Some(unsafe { extend_lifetime_generic_mut(&mut fb0) })));
-    let frame_buffer_b =
-        Mutex::new(RefCell::new(Some(unsafe { extend_lifetime_generic_mut(&mut fb1) })));
+    let frame_buffer_a = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb0)
+    })));
+    let frame_buffer_b = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb1)
+    })));
     let static_frame_buffer_a = unsafe { extend_lifetime_generic(&frame_buffer_a) };
     let static_frame_buffer_b = unsafe { extend_lifetime_generic(&frame_buffer_b) };
     let peripheral_clock_freq = clocks.peripheral_clock.freq();
@@ -521,8 +403,8 @@ pub fn thermal_code(
         static_frame_buffer_a,
         static_frame_buffer_b,
         device_config,
-        event_logger,
-        synced_date_time,
+        events,
+        time,
         next_audio_alarm,
     );
 }
@@ -543,8 +425,10 @@ pub fn lepton_core1_task(
     let mut peripherals = unsafe { Peripherals::steal() };
     let sio = Sio::new(peripherals.SIO);
     let mut fifo = sio.fifo;
-    let mut delay =
-        Delay::new(unsafe { pac::CorePeripherals::steal().SYST }, system_clock_freq.to_Hz());
+    let mut delay = Delay::new(
+        unsafe { pac::CorePeripherals::steal().SYST },
+        system_clock_freq.to_Hz(),
+    );
 
     let mut lepton = init_lepton_module(
         peripherals.SPI0,
@@ -557,10 +441,17 @@ pub fn lepton_core1_task(
 
     let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
     let lepton_serial = lepton.get_camera_serial().map_or(0, |x| x);
-    let lepton_firmware_version =
-        lepton.get_firmware_version().map_or(LeptonFirmwareInfo::default(), |x| x);
-    let LeptonFirmwareInfo { gpp_major, gpp_minor, gpp_build, dsp_major, dsp_minor, dsp_build } =
-        lepton_firmware_version;
+    let lepton_firmware_version = lepton
+        .get_firmware_version()
+        .map_or(LeptonFirmwareInfo::default(), |x| x);
+    let LeptonFirmwareInfo {
+        gpp_major,
+        gpp_minor,
+        gpp_build,
+        dsp_major,
+        dsp_minor,
+        dsp_build,
+    } = lepton_firmware_version;
     info!(
         "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}",
         gpp_major, gpp_minor, gpp_build, dsp_major, dsp_minor, dsp_build
@@ -581,10 +472,7 @@ pub fn lepton_core1_task(
 
     let result = fifo.read_blocking();
     if result == Core0Task::RequestReset.into() {
-        watchdog.start(100.micros());
-        loop {
-            nop();
-        }
+        restart(&mut watchdog);
     }
     // FIXME: Can we receive `Core0Task::HighPowerMode` here instead?
     assert_eq!(result, Core0Task::Ready.into());

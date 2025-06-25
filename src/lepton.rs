@@ -1025,13 +1025,19 @@ impl LeptonModule {
         let mut failures = 0;
         loop {
             readbuf = [0; 2];
-            if match self.cci.write_read(LEPTON_ADDRESS, &LEPTON_STATUS_REGISTER, &mut readbuf) {
+            if match self
+                .cci
+                .write_read(LEPTON_ADDRESS, &LEPTON_STATUS_REGISTER, &mut readbuf)
+            {
                 Ok(()) => {
                     camera_status = BigEndian::read_u16(&readbuf);
                     if print {
                         info!("Booted {}", camera_status & LEPTON_BOOTED == LEPTON_BOOTED);
                         info!("Busy {}", camera_status & LEPTON_BUSY == LEPTON_BUSY);
-                        info!("Boot mode {}", camera_status & LEPTON_BOOT_MODE == LEPTON_BOOT_MODE);
+                        info!(
+                            "Boot mode {}",
+                            camera_status & LEPTON_BOOT_MODE == LEPTON_BOOT_MODE
+                        );
                         info!("Camera status {:#018b}", camera_status);
                     }
                     camera_status & (LEPTON_BOOTED | LEPTON_BOOT_MODE | LEPTON_BUSY)
@@ -1077,7 +1083,11 @@ impl LeptonModule {
         }
 
         let success = self.wait_for_ready(false);
-        if success == LeptonError::Ok { Ok(true) } else { Err(success) }
+        if success == LeptonError::Ok {
+            Ok(true)
+        } else {
+            Err(success)
+        }
     }
 
     fn execute_command_non_blocking(
@@ -1176,7 +1186,10 @@ impl LeptonModule {
         val: i32,
     ) -> Result<bool, LeptonError> {
         #[allow(clippy::cast_sign_loss)]
-        self.set_attribute(command, &[(val & 0xffff) as u16, (val >> 16 & 0xffff) as u16])
+        self.set_attribute(
+            command,
+            &[(val & 0xffff) as u16, (val >> 16 & 0xffff) as u16],
+        )
     }
 
     fn set_attribute(
@@ -1281,46 +1294,8 @@ pub enum TelemetryLocation {
     Footer,
 }
 
-#[derive(Debug, Format)]
-pub struct Telemetry {
-    pub revision: [u8; 2],
-    pub frame_num: u32,
-    pub msec_on: u32,
-    pub msec_since_last_ffc: u32,
-    pub time_at_last_ffc: u32,
-    pub fpa_temp_c: f32,
-    pub fpa_temp_c_at_last_ffc: f32,
-    pub ffc_status: FFCStatus,
-}
-
 struct CentiK {
     inner: u16,
-}
-
-pub fn read_telemetry(buf: &[u8]) -> Telemetry {
-    let telemetry_revision = LittleEndian::read_u16(&buf[0..2]);
-    let frame_num = LittleEndian::read_u32(&buf[40..44]);
-    let msec_on = LittleEndian::read_u32(&buf[2..6]);
-    let time_at_last_ffc = LittleEndian::read_u32(&buf[60..64]);
-    let msec_since_last_ffc = msec_on.saturating_sub(time_at_last_ffc);
-    let status_bits = LittleEndian::read_u32(&buf[6..10]);
-    let ffc_state = (((status_bits >> 4) & 0b11) as u8).into();
-    let fpa_temp_kelvin_x_100 = LittleEndian::read_u16(&buf[48..=49]);
-    let fpa_temp_kelvin_x_100_at_last_ffc = LittleEndian::read_u16(&buf[58..=59]);
-
-    let fpa_temp_c = (f32::from(fpa_temp_kelvin_x_100) / 100.0) - 273.15;
-    let fpa_temp_c_at_last_ffc = (f32::from(fpa_temp_kelvin_x_100_at_last_ffc) / 100.0) - 273.15;
-    #[allow(clippy::cast_possible_truncation)]
-    Telemetry {
-        revision: [(telemetry_revision << 8) as u8, (telemetry_revision & 0x0f) as u8],
-        frame_num,
-        msec_on,
-        time_at_last_ffc,
-        msec_since_last_ffc,
-        fpa_temp_c,
-        fpa_temp_c_at_last_ffc,
-        ffc_status: ffc_state,
-    }
 }
 
 pub struct LeptonPins {
@@ -1375,12 +1350,16 @@ pub fn init_lepton_module(
     );
 
     // TODO: When going dormant, can we make sure we don't have any gpio pins in a pullup/down mode.
-    lepton.vsync.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
+    lepton
+        .vsync
+        .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     info!("Lepton startup sequence");
     lepton.power_down_sequence(delay);
     lepton.power_on_sequence(delay);
     // Set wake from dormant on vsync
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
-    lepton.vsync.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
+    lepton
+        .vsync
+        .set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
     lepton
 }

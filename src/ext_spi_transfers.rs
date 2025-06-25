@@ -161,7 +161,11 @@ impl ExtSpiTransfers {
         self.disable_pio_spi();
         if self.spi.is_none() {
             self.cs_enabled = Some(
-                self.cs_disabled.take().unwrap().into_function::<FunctionSpi>().into_pull_type(),
+                self.cs_disabled
+                    .take()
+                    .unwrap()
+                    .into_function::<FunctionSpi>()
+                    .into_pull_type(),
             );
             let spi = Spi::<_, _, _, 8>::new(
                 spi,
@@ -199,7 +203,9 @@ impl ExtSpiTransfers {
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
         let alarm_timeout = timeout.unwrap_or(300);
-        alarm.schedule(MicrosDurationU32::micros(alarm_timeout)).expect("Alarm schedule failed");
+        alarm
+            .schedule(MicrosDurationU32::micros(alarm_timeout))
+            .expect("Alarm schedule failed");
         alarm.enable_interrupt();
         critical_section::with(|cs| {
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
@@ -220,7 +226,10 @@ impl ExtSpiTransfers {
 
         let ping_time = (timer.get_counter() - start).to_micros();
         let (ping_pin, mut alarm) = critical_section::with(|cs| {
-            (GLOBAL_PING_PIN.borrow(cs).take().unwrap(), GLOBAL_ALARM.borrow(cs).take().unwrap())
+            (
+                GLOBAL_PING_PIN.borrow(cs).take().unwrap(),
+                GLOBAL_ALARM.borrow(cs).take().unwrap(),
+            )
         });
         let finished = alarm.finished();
         alarm.clear_interrupt();
@@ -268,7 +277,13 @@ impl ExtSpiTransfers {
             payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
-                if !dma_peripheral.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {
+                if !dma_peripheral
+                    .ch(DMA_CHANNEL_NUM)
+                    .ch_ctrl_trig()
+                    .read()
+                    .busy()
+                    .bit_is_set()
+                {
                     break;
                 }
             }
@@ -282,8 +297,11 @@ impl ExtSpiTransfers {
                 );
                 config.bswap(true); // DMA peripheral does our swizzling for us.
                 let transfer = config.start();
-                let start_read_address =
-                    dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
+                let start_read_address = dma_peripheral
+                    .ch(DMA_CHANNEL_NUM)
+                    .ch_read_addr()
+                    .read()
+                    .bits();
 
                 Some((transfer, start_read_address + length, start_read_address))
             } else {
@@ -303,10 +321,19 @@ impl ExtSpiTransfers {
     ) -> bool {
         // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
-        maybe_abort_dma_transfer(dma_peripheral, transfer_end_address, transfer_start_address, 0);
+        maybe_abort_dma_transfer(
+            dma_peripheral,
+            transfer_end_address,
+            transfer_start_address,
+            0,
+        );
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
-        let end_read_addr = dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
+        let end_read_addr = dma_peripheral
+            .ch(DMA_CHANNEL_NUM)
+            .ch_read_addr()
+            .read()
+            .bits();
         let did_abort = end_read_addr + 20 < transfer_end_address;
         self.dma_channel_0 = Some(r_ch0);
         self.pio_tx = Some(tx);
@@ -319,10 +346,27 @@ impl ExtSpiTransfers {
             && self.cs_disabled.is_some()
             && self.clk_disabled.is_some()
         {
-            self.miso_pio =
-                Some(self.miso_disabled.take().unwrap().into_function().into_pull_type());
-            self.cs_pio = Some(self.cs_disabled.take().unwrap().into_function().into_pull_type());
-            self.clk_pio = Some(self.clk_disabled.take().unwrap().into_function().into_pull_type());
+            self.miso_pio = Some(
+                self.miso_disabled
+                    .take()
+                    .unwrap()
+                    .into_function()
+                    .into_pull_type(),
+            );
+            self.cs_pio = Some(
+                self.cs_disabled
+                    .take()
+                    .unwrap()
+                    .into_function()
+                    .into_pull_type(),
+            );
+            self.clk_pio = Some(
+                self.clk_disabled
+                    .take()
+                    .unwrap()
+                    .into_function()
+                    .into_pull_type(),
+            );
             let spi_cs_pin_id = 13;
             let miso_id = 15;
             // Setup a PIO-based SPI slave interface to send bytes to the raspberry pi
@@ -352,10 +396,21 @@ impl ExtSpiTransfers {
             let (sm, program) = sm.uninit(rx, tx);
             self.pio.uninstall(program);
 
-            self.miso_disabled =
-                Some(self.miso_pio.take().unwrap().into_function().into_pull_type());
+            self.miso_disabled = Some(
+                self.miso_pio
+                    .take()
+                    .unwrap()
+                    .into_function()
+                    .into_pull_type(),
+            );
             self.cs_disabled = Some(self.cs_pio.take().unwrap().into_function().into_pull_type());
-            self.clk_disabled = Some(self.clk_pio.take().unwrap().into_function().into_pull_type());
+            self.clk_disabled = Some(
+                self.clk_pio
+                    .take()
+                    .unwrap()
+                    .into_function()
+                    .into_pull_type(),
+            );
 
             self.state_machine_0_uninit = Some(sm);
         }
@@ -416,8 +471,11 @@ impl ExtSpiTransfers {
                     self.spi.take().unwrap(),
                 );
                 let transfer = transfer.start();
-                let transfer_read_address =
-                    dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
+                let transfer_read_address = dma_peripheral
+                    .ch(DMA_CHANNEL_NUM)
+                    .ch_read_addr()
+                    .read()
+                    .bits();
                 maybe_abort_dma_transfer(
                     dma_peripheral,
                     transfer_read_address + actual_length,
@@ -439,8 +497,11 @@ impl ExtSpiTransfers {
                         self.return_payload_buffer.take().unwrap(),
                     )
                     .start();
-                    let transfer_read_address =
-                        dma_peripheral.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
+                    let transfer_read_address = dma_peripheral
+                        .ch(DMA_CHANNEL_NUM)
+                        .ch_read_addr()
+                        .read()
+                        .bits();
 
                     let aborted = maybe_abort_dma_transfer(
                         dma_peripheral,
@@ -499,7 +560,11 @@ impl ExtSpiTransfers {
             let (spi_free, (miso, mosi, clk)) = spi_disabled.free();
             self.mosi_disabled = Some(mosi.into_function::<FunctionNull>().into_pull_type());
             self.cs_disabled = Some(
-                self.cs_enabled.take().unwrap().into_function::<FunctionNull>().into_pull_type(),
+                self.cs_enabled
+                    .take()
+                    .unwrap()
+                    .into_function::<FunctionNull>()
+                    .into_pull_type(),
             );
 
             self.clk_disabled = Some(clk.into_function::<FunctionNull>().into_pull_type());
@@ -538,14 +603,20 @@ fn maybe_abort_dma_transfer(
     // Check that the FIFOs are empty too.
 
     loop {
-        if dma.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {
+        if dma
+            .ch(DMA_CHANNEL_NUM)
+            .ch_ctrl_trig()
+            .read()
+            .busy()
+            .bit_is_set()
+        {
             let current_transfer_read_address =
                 dma.ch(DMA_CHANNEL_NUM).ch_read_addr().read().bits();
             if some_progress && prev_read_address == current_transfer_read_address {
                 same_address += 1;
             }
             if same_address == 1_000_000 {
-                //info!("Set needs abort with same address for 1million cycles");
+                // info!("Set needs abort with same address for 1 million cycles");
                 // We went 10,000 iterations without the crc changing, surely that means the transfer has stalled?
                 needs_abort = true;
                 break;
@@ -560,7 +631,14 @@ fn maybe_abort_dma_transfer(
         }
     }
 
-    if needs_abort && dma.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {
+    if needs_abort
+        && dma
+            .ch(DMA_CHANNEL_NUM)
+            .ch_ctrl_trig()
+            .read()
+            .busy()
+            .bit_is_set()
+    {
         info!(
             "Aborting dma transfer at {}/{}, #{}",
             prev_read_address - transfer_start_address,
@@ -575,9 +653,16 @@ fn maybe_abort_dma_transfer(
         dma.inte0().write(|w| unsafe { w.bits(inte0 & mask) });
         dma.inte1().write(|w| unsafe { w.bits(inte1 & mask) });
         // Abort all dma transfers
-        dma.chan_abort().write(|w| unsafe { w.bits(1 << DMA_CHANNEL_NUM) });
+        dma.chan_abort()
+            .write(|w| unsafe { w.bits(1 << DMA_CHANNEL_NUM) });
 
-        while dma.ch(DMA_CHANNEL_NUM).ch_ctrl_trig().read().busy().bit_is_set() {}
+        while dma
+            .ch(DMA_CHANNEL_NUM)
+            .ch_ctrl_trig()
+            .read()
+            .busy()
+            .bit_is_set()
+        {}
 
         dma.inte0().write(|w| unsafe { w.bits(inte0) });
         dma.inte1().write(|w| unsafe { w.bits(inte1) });

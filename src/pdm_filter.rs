@@ -55,13 +55,23 @@ impl PDMFilter {
         let mut sinc_out = [0u16; PDM_DECIMATION * 2 - 1];
 
         let mut sinc2 = [0u16; PDM_DECIMATION * 3];
-        let _ = convolve(&sinc, PDM_DECIMATION, &sinc, PDM_DECIMATION, sinc_out.as_mut());
+        let _ = convolve(
+            &sinc,
+            PDM_DECIMATION,
+            &sinc,
+            PDM_DECIMATION,
+            sinc_out.as_mut(),
+        );
 
         // https://s3.amazonaws.com/embeddedrelated/user/114298/lti%20filters_3552.pdf
         // adding 0x00008000 to sum, to undo filter noise bias
-        let sum =
-            convolve(&sinc_out, PDM_DECIMATION * 2 - 1, &sinc, PDM_DECIMATION, sinc2[1..].as_mut())
-                + 0x0000_8000;
+        let sum = convolve(
+            &sinc_out,
+            PDM_DECIMATION * 2 - 1,
+            &sinc,
+            PDM_DECIMATION,
+            sinc2[1..].as_mut(),
+        ) + 0x0000_8000;
 
         self.sub_const = sum >> 1;
         self.div_const = self.sub_const * u32::from(MAX_VOLUME) / 32768 / u32::from(FILTER_GAIN);

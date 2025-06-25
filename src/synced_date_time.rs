@@ -32,6 +32,10 @@ impl SyncedDateTime {
     }
 
     pub fn new(date_time: DateTime<Utc>, timer: Timer) -> SyncedDateTime {
-        SyncedDateTime { date_time_utc: date_time, timer_offset: timer.get_counter(), timer }
+        SyncedDateTime {
+            date_time_utc: date_time,
+            timer_offset: timer.get_counter(),
+            timer,
+        }
     }
 }

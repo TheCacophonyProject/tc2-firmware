@@ -18,8 +18,11 @@ impl JulianDate {
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_precision_loss)]
     fn to_datetime(self) -> Option<DateTime<Utc>> {
-        Utc.timestamp_opt(((self - UNIX_EPOCH).0 * SECONDS_PER_DAY as f64).round() as i64, 0)
-            .single()
+        Utc.timestamp_opt(
+            ((self - UNIX_EPOCH).0 * SECONDS_PER_DAY as f64).round() as i64,
+            0,
+        )
+        .single()
     }
 }
 
@@ -99,8 +102,10 @@ pub fn sun_times(
     let center = 1.9148 * solar_mean_anomaly.to_radians().sin()
         + 0.0200 * (2.0 * solar_mean_anomaly).to_radians().sin()
         + 0.0003 * (3.0 * solar_mean_anomaly).to_radians().sin();
-    let ecliptic_longitude =
-        rem_euclid(solar_mean_anomaly + center + 180.0 + ARGUMENT_OF_PERIHELION, 360.0);
+    let ecliptic_longitude = rem_euclid(
+        solar_mean_anomaly + center + 180.0 + ARGUMENT_OF_PERIHELION,
+        360.0,
+    );
 
     let declination = (ecliptic_longitude.to_radians().sin()
         * OBLIQUITY_OF_THE_ECLIPTIC.to_radians().sin())
@@ -124,5 +129,9 @@ pub fn sun_times(
     let julian_set = JulianDate(solar_transit_julian.0 + event_hour_angle / 360.0);
     let rise = julian_rise.to_datetime();
     let set = julian_set.to_datetime();
-    if let (Some(rise), Some(set)) = (rise, set) { Some((rise, set)) } else { None }
+    if let (Some(rise), Some(set)) = (rise, set) {
+        Some((rise, set))
+    } else {
+        None
+    }
 }

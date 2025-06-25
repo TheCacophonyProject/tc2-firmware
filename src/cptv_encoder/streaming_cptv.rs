@@ -4,7 +4,7 @@ use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_HEIGHT_U32, FRAME_WIDTH, FRAME_WIDTH_U32};
 use crate::device_config::DeviceConfig;
-use crate::lepton::Telemetry;
+use crate::lepton_telemetry::Telemetry;
 use crate::onboard_flash::{BlockIndex, OnboardFlash};
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
@@ -76,7 +76,10 @@ impl<const LENGTH: usize> MaybeZeroTerminatedString<LENGTH> {
     }
 
     pub fn len(&self) -> usize {
-        self.data.iter().position(|&x| x == 0).unwrap_or(self.data.len())
+        self.data
+            .iter()
+            .position(|&x| x == 0)
+            .unwrap_or(self.data.len())
     }
     pub fn as_mut(&mut self) -> &mut [u8] {
         &mut self.data
@@ -177,7 +180,11 @@ impl CptvFrameHeader {
 impl FrameData {
     pub fn new() -> FrameData {
         #[allow(clippy::large_stack_arrays)]
-        FrameData { data: [0; FRAME_WIDTH * FRAME_HEIGHT], min: u16::MAX, max: u16::MIN }
+        FrameData {
+            data: [0; FRAME_WIDTH * FRAME_HEIGHT],
+            min: u16::MAX,
+            max: u16::MIN,
+        }
     }
 
     pub fn view(&self, x: usize, y: usize, w: usize, h: usize) -> impl Iterator<Item = &u16> {
@@ -331,7 +338,12 @@ fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
 
     // FIXME: Longer device names are truncated, so why allow longer device names elsewhere at all?
     //assert!(size <= 30);
-    let mut iter_state = FieldIterator { state: [0u8; 30], size, code: code as u8, cursor: 0 };
+    let mut iter_state = FieldIterator {
+        state: [0u8; 30],
+        size,
+        code: code as u8,
+        cursor: 0,
+    };
 
     iter_state.state[0..size as usize].copy_from_slice(unsafe {
         core::slice::from_raw_parts(core::ptr::from_ref::<T>(value).cast::<u8>(), size as usize)
@@ -388,12 +400,12 @@ impl<'a> CptvStream<'a> {
         lepton_serial: u32,
         lepton_firmware_version: ((u8, u8, u8), (u8, u8, u8)),
         device_config: &DeviceConfig,
-        flash_storage: &mut OnboardFlash,
+        fs: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
         crc_table: &'a [u32; 256],
         is_status_recording: bool,
     ) -> CptvStream<'a> {
-        let starting_block_index = flash_storage.start_file(1);
+        let starting_block_index = fs.start_file(1);
 
         // Camera serial, camera firmware, location_altitude, location_timestamp, location_accuracy
         let cptv_header = Cptv2Header::new(
@@ -418,18 +430,19 @@ impl<'a> CptvStream<'a> {
 
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn push_byte(&mut self, byte: u8, flash_storage: &mut OnboardFlash) {
+    pub fn push_byte(&mut self, byte: u8, fs: &mut OnboardFlash) {
         self.total_uncompressed += 1;
         self.crc_val ^= 0xffff_ffff;
         self.crc_val = self.crc_table[((self.crc_val ^ u32::from(byte)) & 0xff) as usize]
             ^ (self.crc_val >> 8);
         self.crc_val ^= 0xffff_ffff;
         let entry = &self.huffman_table[usize::from(byte)];
-        self.cursor.write_bits(u32::from(entry.code), u32::from(entry.bits));
+        self.cursor
+            .write_bits(u32::from(entry.code), u32::from(entry.bits));
 
         // FIXME: Are we inlining the call to append_file_bytes?
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = flash_storage.append_recording_bytes(to_flush, num_bytes, None, None);
+            _ = fs.append_recording_bytes(to_flush, num_bytes, None, None);
             self.cursor.flush_residual_bits();
         }
     }
@@ -439,7 +452,7 @@ impl<'a> CptvStream<'a> {
     /// of a 'dynamic' gzip block, with pre-calculated huffman tables describing only literals
     /// (not match lengths or distances).  This will always be smaller than our page size of 2048 bytes
     /// so there's no need to check if we need to flush out to flash memory.
-    pub fn init_gzip_stream(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
+    pub fn init_gzip_stream(&mut self, fs: &mut OnboardFlash, at_header_location: bool) {
         self.crc_val = 0;
         self.total_uncompressed = 0;
 
@@ -456,12 +469,7 @@ impl<'a> CptvStream<'a> {
         {
             self.cursor.write_byte(*byte);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                _ = flash_storage.append_recording_bytes(
-                    to_flush,
-                    num_bytes,
-                    block_index,
-                    page_index,
-                );
+                _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
                 self.cursor.flush_residual_bits();
             }
         }
@@ -470,7 +478,7 @@ impl<'a> CptvStream<'a> {
             5,
         );
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = flash_storage.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
             self.cursor.flush_residual_bits();
         }
     }
@@ -485,7 +493,7 @@ impl<'a> CptvStream<'a> {
         current_frame: &[u16],
         prev_frame: &mut [u16],
         frame_telemetry: &Telemetry,
-        flash_storage: &mut OnboardFlash,
+        fs: &mut OnboardFlash,
     ) {
         let (min_value, max_value, initial_px) = delta_encode_frame_data(prev_frame, current_frame);
         let delta_encoded_frame = prev_frame;
@@ -508,13 +516,15 @@ impl<'a> CptvStream<'a> {
         // ... etc
         let i8_min = i16::from(i8::MIN);
         let i8_max = i16::from(i8::MAX);
-        let bits_per_pixel =
-            if delta_encoded_frame[1..].iter().map(|&x| x as i16).any(|x| x < i8_min || x > i8_max)
-            {
-                16
-            } else {
-                8
-            };
+        let bits_per_pixel = if delta_encoded_frame[1..]
+            .iter()
+            .map(|&x| x as i16)
+            .any(|x| x < i8_min || x > i8_max)
+        {
+            16
+        } else {
+            8
+        };
         let frame_size_bytes =
             4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (u32::from(bits_per_pixel) / 8);
         let frame_header = CptvFrameHeader {
@@ -539,28 +549,33 @@ impl<'a> CptvStream<'a> {
         let snake_iter = delta_encoded_frame
             .chunks_exact(FRAME_WIDTH)
             .step_by(2)
-            .zip(delta_encoded_frame.chunks_exact(FRAME_WIDTH).skip(1).step_by(2))
+            .zip(
+                delta_encoded_frame
+                    .chunks_exact(FRAME_WIDTH)
+                    .skip(1)
+                    .step_by(2),
+            )
             .flat_map(|(even_row, odd_row)| even_row.iter().chain(odd_row.iter().rev()))
             .skip(1);
         // NOTE: Here we can insert the i32 start pixel at the beginning of each frame.
         for byte in frame_header_iter.chain(initial_px.to_le_bytes()) {
-            self.push_byte(byte, flash_storage);
+            self.push_byte(byte, fs);
         }
         if bits_per_pixel == 16 {
             for px in snake_iter {
                 for byte in px.to_be_bytes() {
-                    self.push_byte(byte, flash_storage);
+                    self.push_byte(byte, fs);
                 }
             }
         } else {
             for &px in snake_iter {
-                self.push_byte(px as u8, flash_storage);
+                self.push_byte(px as u8, fs);
             }
         }
         self.num_frames += 1;
     }
 
-    fn write_gzip_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
+    fn write_gzip_trailer(&mut self, fs: &mut OnboardFlash, at_header_location: bool) {
         let (block_index, page_index) = if at_header_location {
             (Some(self.starting_block_index), Some(0))
         } else {
@@ -569,9 +584,10 @@ impl<'a> CptvStream<'a> {
 
         // End the actual data stream by writing out the end of stream literal.
         let entry = &self.huffman_table[256];
-        self.cursor.write_bits(u32::from(entry.code), u32::from(entry.bits));
+        self.cursor
+            .write_bits(u32::from(entry.code), u32::from(entry.bits));
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = flash_storage.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
             self.cursor.flush_residual_bits();
         }
 
@@ -579,7 +595,7 @@ impl<'a> CptvStream<'a> {
         let needs_flush = self.cursor.end_aligned();
         if needs_flush {
             let (to_flush, num_bytes) = self.cursor.flush();
-            _ = flash_storage.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
             self.cursor.flush_residual_bits();
         }
 
@@ -589,12 +605,7 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                let _ = flash_storage.append_recording_bytes(
-                    to_flush,
-                    num_bytes,
-                    block_index,
-                    page_index,
-                );
+                let _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
                 self.cursor.flush_residual_bits();
             }
         }
@@ -603,12 +614,7 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                let _ = flash_storage.append_recording_bytes(
-                    to_flush,
-                    num_bytes,
-                    block_index,
-                    page_index,
-                );
+                let _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
                 self.cursor.flush_residual_bits();
             }
         }
@@ -617,16 +623,10 @@ impl<'a> CptvStream<'a> {
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
         if at_header_location {
-            let _ =
-                flash_storage.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            let _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
         } else {
             // Write the last part of the file
-            let _ = flash_storage.append_last_recording_bytes(
-                to_flush,
-                num_bytes,
-                block_index,
-                page_index,
-            );
+            let _ = fs.append_last_recording_bytes(to_flush, num_bytes, block_index, page_index);
         }
     }
 
@@ -634,17 +634,17 @@ impl<'a> CptvStream<'a> {
     /// will be prepended to the main data stream when transferred out to the raspberry pi.  These
     /// two gzip 'members' or self-contained gip streams when concatenated are themselves a valid
     /// gzip stream, and therefore make up a valid CPTV file.
-    pub fn finalise(&mut self, flash_storage: &mut OnboardFlash) {
+    pub fn finalise(&mut self, fs: &mut OnboardFlash) {
         // Write out the gzip trailer for the main data - the CPTV frames.
-        self.write_gzip_trailer(flash_storage, false);
+        self.write_gzip_trailer(fs, false);
 
         // Now write the CPTV header into the first page of the starting block as a separate gzip member,
         // now that we know the total frame count for the recording, and the min/max pixel values.
-        self.init_gzip_stream(flash_storage, true);
+        self.init_gzip_stream(fs, true);
         for byte in push_header_iterator(&self.cptv_header.clone()) {
-            self.push_byte(byte, flash_storage);
+            self.push_byte(byte, fs);
         }
-        self.write_gzip_trailer(flash_storage, true);
+        self.write_gzip_trailer(fs, true);
     }
 }
 
@@ -655,7 +655,10 @@ struct HeaderIterator {
 
 impl HeaderIterator {
     pub fn new(num_fields: u8) -> HeaderIterator {
-        HeaderIterator { state: [b'C', b'P', b'T', b'V', 2, b'H', num_fields], cursor: 0 }
+        HeaderIterator {
+            state: [b'C', b'P', b'T', b'V', 2, b'H', num_fields],
+            cursor: 0,
+        }
     }
 }
 
@@ -665,12 +668,30 @@ pub fn frame_header_iter(frame_header: &CptvFrameHeader) -> impl Iterator<Item =
     [b'F', 6]
         .iter()
         .copied()
-        .chain(push_field_iterator(&frame_header.frame_size, FieldType::FrameSize))
-        .chain(push_field_iterator(&frame_header.bit_width, FieldType::BitsPerPixel))
-        .chain(push_field_iterator(&frame_header.time_on, FieldType::TimeOn))
-        .chain(push_field_iterator(&frame_header.last_ffc_time, FieldType::LastFfcTime))
-        .chain(push_field_iterator(&frame_header.last_ffc_temp_c, FieldType::LastFfcTempC))
-        .chain(push_field_iterator(&frame_header.frame_temp_c, FieldType::FrameTempC))
+        .chain(push_field_iterator(
+            &frame_header.frame_size,
+            FieldType::FrameSize,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.bit_width,
+            FieldType::BitsPerPixel,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.time_on,
+            FieldType::TimeOn,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.last_ffc_time,
+            FieldType::LastFfcTime,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.last_ffc_temp_c,
+            FieldType::LastFfcTempC,
+        ))
+        .chain(push_field_iterator(
+            &frame_header.frame_temp_c,
+            FieldType::FrameTempC,
+        ))
 }
 
 #[allow(clippy::ref_option)]
@@ -678,7 +699,12 @@ fn push_optional_field_iterator<T: Sized>(value: &Option<T>, code: FieldType) ->
     if let Some(value) = value {
         push_field_iterator(value, code)
     } else {
-        FieldIterator { state: [0u8; 30], size: 0, code: 0, cursor: 0 }
+        FieldIterator {
+            state: [0u8; 30],
+            size: 0,
+            code: 0,
+            cursor: 0,
+        }
     }
 }
 
@@ -712,24 +738,54 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
     HeaderIterator::new(num_header_fields + num_optional_header_fields)
         .chain(push_field_iterator(&header.min_value, FieldType::MinValue))
         .chain(push_field_iterator(&header.max_value, FieldType::MaxValue))
-        .chain(push_field_iterator(&header.total_frame_count, FieldType::NumFrames))
+        .chain(push_field_iterator(
+            &header.total_frame_count,
+            FieldType::NumFrames,
+        ))
         .chain(push_field_iterator(&header.timestamp, FieldType::Timestamp))
         .chain(push_field_iterator(&FRAME_WIDTH_U32, FieldType::Width))
         .chain(push_field_iterator(&FRAME_HEIGHT_U32, FieldType::Height))
         .chain(push_field_iterator(&1u8, FieldType::Compression))
         .chain(push_field_iterator(&9u8, FieldType::FrameRate))
-        .chain(push_field_iterator(&header.device_name, FieldType::DeviceName))
+        .chain(push_field_iterator(
+            &header.device_name,
+            FieldType::DeviceName,
+        ))
         .chain(push_field_iterator(&[b"flir"], FieldType::Brand))
         .chain(push_field_iterator(&header.model, FieldType::Model))
         .chain(push_field_iterator(&header.device_id, FieldType::DeviceID))
-        .chain(push_field_iterator(&header.serial_number, FieldType::CameraSerial))
-        .chain(push_field_iterator(&header.firmware_version, FieldType::FirmwareVersion))
-        .chain(push_optional_field_iterator(&header.latitude, FieldType::Latitude))
-        .chain(push_optional_field_iterator(&header.longitude, FieldType::Longitude))
-        .chain(push_optional_field_iterator(&header.loc_timestamp, FieldType::LocTimestamp))
-        .chain(push_optional_field_iterator(&header.altitude, FieldType::Altitude))
-        .chain(push_optional_field_iterator(&header.accuracy, FieldType::Accuracy))
-        .chain(push_optional_field_iterator(&header.status_recording, FieldType::MotionConfig))
+        .chain(push_field_iterator(
+            &header.serial_number,
+            FieldType::CameraSerial,
+        ))
+        .chain(push_field_iterator(
+            &header.firmware_version,
+            FieldType::FirmwareVersion,
+        ))
+        .chain(push_optional_field_iterator(
+            &header.latitude,
+            FieldType::Latitude,
+        ))
+        .chain(push_optional_field_iterator(
+            &header.longitude,
+            FieldType::Longitude,
+        ))
+        .chain(push_optional_field_iterator(
+            &header.loc_timestamp,
+            FieldType::LocTimestamp,
+        ))
+        .chain(push_optional_field_iterator(
+            &header.altitude,
+            FieldType::Altitude,
+        ))
+        .chain(push_optional_field_iterator(
+            &header.accuracy,
+            FieldType::Accuracy,
+        ))
+        .chain(push_optional_field_iterator(
+            &header.status_recording,
+            FieldType::MotionConfig,
+        ))
 }
 
 // "flir"
@@ -761,7 +817,7 @@ impl Cptv2Header {
         lepton_version: u8,
         lepton_serial: u32,
         lepton_firmware_version: ((u8, u8, u8), (u8, u8, u8)),
-        device_config: &DeviceConfig,
+        config: &DeviceConfig,
         is_status_recording: bool,
     ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
@@ -784,26 +840,24 @@ impl Cptv2Header {
             None
         };
 
-        let (lat, lng) = device_config.config().location;
+        let (lat, lng) = config.config().location;
         Cptv2Header {
             status_recording,
             timestamp,
-            device_name: MaybeZeroTerminatedString::new_with_bytes(
-                device_config.device_name_bytes(),
-            ),
+            device_name: MaybeZeroTerminatedString::new_with_bytes(config.device_name_bytes()),
             model: MaybeZeroTerminatedString::new_with_bytes(if lepton_version == 35 {
                 &b"lepton3.5"[..]
             } else {
                 &b"lepton3"[..]
             }),
-            device_id: device_config.config().device_id,
+            device_id: config.config().device_id,
             serial_number: lepton_serial,
             firmware_version: firmware,
             latitude: Some(lat),
             longitude: Some(lng),
-            loc_timestamp: device_config.config().location_timestamp,
-            altitude: device_config.config().location_altitude,
-            accuracy: device_config.config().location_accuracy,
+            loc_timestamp: config.config().location_timestamp,
+            altitude: config.config().location_altitude,
+            accuracy: config.config().location_accuracy,
             total_frame_count: 0,
             min_value: u16::MAX,
             max_value: u16::MIN,

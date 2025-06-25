@@ -2,7 +2,9 @@ use crate::cptv_encoder::FRAME_WIDTH;
 use crate::frame_processing::{
     Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT,
 };
-use crate::lepton::{FFCStatus, LeptonModule, read_telemetry};
+use crate::lepton::{FFCStatus, LeptonModule};
+use crate::lepton_telemetry::Telemetry;
+use crate::utils::restart;
 use crate::{FFC_INTERVAL_MS, bsp};
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
@@ -10,7 +12,6 @@ use bsp::hal::rosc::RingOscillator;
 use bsp::hal::sio::SioFifo;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
-use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
@@ -45,7 +46,9 @@ fn go_dormant_until_woken<T: PinId>(
     lepton: &mut LeptonModule,
     rosc_freq: HertzU32,
 ) -> RingOscillator<bsp::hal::rosc::Enabled> {
-    lepton.vsync.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
+    lepton
+        .vsync
+        .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
     unsafe { rosc.dormant() };
     // Woken by pin
@@ -176,7 +179,8 @@ pub fn frame_acquisition_loop(
                     if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
                         valid_frame_current_segment_num = 1;
                     }
-                    let telemetry = read_telemetry(bytemuck::cast_slice(&scanline_buffer[2..]));
+                    let telemetry =
+                        Telemetry::from_bytes(bytemuck::cast_slice(&scanline_buffer[2..]));
                     unverified_frame_counter = telemetry.frame_num;
 
                     if got_sync && valid_frame_current_segment_num == 1 {
@@ -488,11 +492,7 @@ pub fn frame_acquisition_loop(
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
                         } else if message == Core0Task::RequestReset.into() {
-                            watchdog.start(100.micros());
-                            loop {
-                                // Wait until the watchdog timer kills us.
-                                nop();
-                            }
+                            restart(&mut watchdog);
                         } else if message == Core0Task::HighPowerMode.into() {
                             high_power_mode = true;
                         }
@@ -501,11 +501,7 @@ pub fn frame_acquisition_loop(
                                 transferring_prev_frame = false;
                                 prev_frame_needs_transfer = false;
                             } else if message == Core0Task::RequestReset.into() {
-                                watchdog.start(100.micros());
-                                loop {
-                                    // Wait until the watchdog timer kills us.
-                                    nop();
-                                }
+                                restart(&mut watchdog);
                             }
                         }
                     }

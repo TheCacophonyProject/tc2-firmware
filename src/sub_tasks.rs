@@ -3,10 +3,10 @@ use crate::attiny_rtc_i2c::SharedI2C;
 use crate::bsp;
 use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
-use crate::event_logger::{EventLogger, LoggerEvent, LoggerEventKind};
+use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-use crate::frame_processing::wake_raspberry_pi;
 use crate::onboard_flash::{FilePartReturn, OnboardFlash};
+use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
@@ -20,21 +20,21 @@ pub fn maybe_offload_events(
     resets: &mut RESETS,
     dma: &mut DMA,
     delay: &mut Delay,
-    event_logger: &mut EventLogger,
-    flash_storage: &mut OnboardFlash,
-    synced_date_time: &SyncedDateTime,
+    events: &mut EventLogger,
+    fs: &mut OnboardFlash,
+    time: &SyncedDateTime,
     watchdog: &mut Watchdog,
 ) -> bool {
     let mut success = true;
-    if event_logger.has_events_to_offload() {
-        let event_indices = event_logger.event_range();
+    if events.has_events_to_offload() {
+        let event_indices = events.event_range();
         let total_events = event_indices.end;
         warn!("Transferring {} events", total_events);
         'transfer_all_events: for event_index in event_indices {
             watchdog.feed();
-            let event_bytes = EventLogger::get_event_at_index(event_index, flash_storage);
+            let event_bytes = EventLogger::get_event_at_index(event_index, fs);
             if let Some(event_bytes) = event_bytes {
-                if let Some(spi) = flash_storage.free_spi() {
+                if let Some(spi) = fs.free_spi() {
                     pi_spi.enable(spi, resets);
                     let transfer_type = ExtTransferMessage::SendLoggerEvent;
                     let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
@@ -63,7 +63,7 @@ pub fn maybe_offload_events(
                         }
                     }
                     if let Some(spi) = pi_spi.disable() {
-                        flash_storage.take_spi(spi, resets);
+                        fs.take_spi(spi, resets);
                     }
                     if !success {
                         break 'transfer_all_events;
@@ -73,31 +73,57 @@ pub fn maybe_offload_events(
         }
         info!("Offloaded {} event(s)", total_events);
         if success {
-            event_logger.clear(flash_storage);
-            event_logger.log_event(
-                LoggerEvent::new(LoggerEventKind::OffloadedLogs, synced_date_time),
-                flash_storage,
-            );
+            events.clear(fs);
+            events.log(Event::OffloadedLogs, time, fs);
         } else {
-            event_logger.log_event(
-                LoggerEvent::new(LoggerEventKind::LogOffloadFailed, synced_date_time),
-                flash_storage,
-            );
+            events.log(Event::LogOffloadFailed, time, fs);
         }
     }
     success
 }
 
-#[allow(clippy::too_many_lines)]
-pub fn offload_flash_storage_and_events(
-    flash_storage: &mut OnboardFlash,
+pub fn offload_latest_recording(
+    fs: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
     shared_i2c: &mut SharedI2C,
     delay: &mut Delay,
-    event_logger: &mut EventLogger,
-    synced_date_time: &SyncedDateTime,
+    events: &mut EventLogger,
+    time: &SyncedDateTime,
+    watchdog: &mut Watchdog,
+) -> bool {
+    offload_recordings_and_events(
+        fs, pi_spi, resets, dma, shared_i2c, delay, events, time, watchdog, true,
+    )
+}
+
+pub fn offload_all_recordings_and_events(
+    fs: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    resets: &mut RESETS,
+    dma: &mut DMA,
+    shared_i2c: &mut SharedI2C,
+    delay: &mut Delay,
+    events: &mut EventLogger,
+    time: &SyncedDateTime,
+    watchdog: &mut Watchdog,
+) -> bool {
+    offload_recordings_and_events(
+        fs, pi_spi, resets, dma, shared_i2c, delay, events, time, watchdog, false,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn offload_recordings_and_events(
+    fs: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    resets: &mut RESETS,
+    dma: &mut DMA,
+    shared_i2c: &mut SharedI2C,
+    delay: &mut Delay,
+    events: &mut EventLogger,
+    time: &SyncedDateTime,
     watchdog: &mut Watchdog,
     only_last_file: bool,
 ) -> bool {
@@ -105,26 +131,14 @@ pub fn offload_flash_storage_and_events(
     watchdog.disable();
 
     if wake_raspberry_pi(shared_i2c, delay) {
-        event_logger.log_event(
-            LoggerEvent::new(LoggerEventKind::GotRpiPoweredOn, synced_date_time),
-            flash_storage,
-        );
+        events.log(Event::GotRpiPoweredOn, time, fs);
     }
     watchdog.start(8_388_607.micros());
 
     if !only_last_file {
-        maybe_offload_events(
-            pi_spi,
-            resets,
-            dma,
-            delay,
-            event_logger,
-            flash_storage,
-            synced_date_time,
-            watchdog,
-        );
+        maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
     }
-    let mut has_file = flash_storage.begin_offload_reverse();
+    let mut has_file = fs.begin_offload_reverse();
 
     // do some offloading.
     let mut file_count = 0;
@@ -136,7 +150,7 @@ pub fn offload_flash_storage_and_events(
         let mut file_start = true;
         let mut part_count = 0;
         let mut file_ended = false;
-        let last_used_block_index = flash_storage.last_used_block_index.unwrap_or(0);
+        let last_used_block_index = fs.last_used_block_index.unwrap_or(0);
 
         // For speed of offloading, we read from flash cache into a one of the page buffers
         // held by the flash_storage.  Then we swap buffers and return the just read page,
@@ -144,8 +158,15 @@ pub fn offload_flash_storage_and_events(
         // Only, we're sharing the same SPI peripheral to do this, so while the transfer is happening
         // we can't be transferring more to the back buffer from the flash.  So what's the point
         // of having a complex double buffering system?
-        'outer: while let Some(file_part) = flash_storage.get_file_part() {
-            let FilePartReturn { part, crc16, block, page, is_last_page_for_file, spi } = file_part;
+        'outer: while let Some(file_part) = fs.get_file_part() {
+            let FilePartReturn {
+                part,
+                crc16,
+                block,
+                page,
+                is_last_page_for_file,
+                spi,
+            } = file_part;
             watchdog.feed();
             pi_spi.enable(spi, resets);
             let transfer_type = if file_start && !is_last_page_for_file {
@@ -209,12 +230,9 @@ pub fn offload_flash_storage_and_events(
 
             // Give spi peripheral back to flash storage.
             if let Some(spi) = pi_spi.disable() {
-                flash_storage.take_spi(spi, resets);
+                fs.take_spi(spi, resets);
                 if is_last_page_for_file && success {
-                    event_logger.log_event(
-                        LoggerEvent::new(LoggerEventKind::OffloadedRecording, synced_date_time),
-                        flash_storage,
-                    );
+                    events.log(Event::OffloadedRecording, time, fs);
                 }
             }
             if !success {
@@ -226,7 +244,7 @@ pub fn offload_flash_storage_and_events(
                 file_count += 1;
                 info!("Offloaded {} file(s)", file_count);
                 watchdog.feed();
-                let _ = flash_storage.erase_last_file();
+                let _ = fs.erase_last_file();
                 file_ended = true;
                 break;
             }
@@ -234,38 +252,31 @@ pub fn offload_flash_storage_and_events(
         }
 
         if !file_ended {
-            info!("Incomplete file at block {} erasing", flash_storage.file_start_block_index);
+            info!(
+                "Incomplete file at block {} erasing",
+                fs.file_start_block_index
+            );
             watchdog.feed();
-            if let Err(e) = flash_storage.erase_last_file() {
-                event_logger.log_event(
-                    LoggerEvent::new(
-                        LoggerEventKind::ErasePartialOrCorruptRecording,
-                        synced_date_time,
-                    ),
-                    flash_storage,
-                );
+            if let Err(e) = fs.erase_last_file() {
+                events.log(Event::ErasePartialOrCorruptRecording, time, fs);
             }
         }
         if only_last_file {
             break;
         }
-        has_file = flash_storage.begin_offload_reverse();
+        has_file = fs.begin_offload_reverse();
     }
 
     if success {
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
-            file_count,
-            flash_storage.file_start_block_index,
-            flash_storage.previous_file_start_block_index
+            file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
+        // FIXME: If only offloading latest file we return false
         file_count != 0
     } else {
-        event_logger.log_event(
-            LoggerEvent::new(LoggerEventKind::FileOffloadFailed, synced_date_time),
-            flash_storage,
-        );
-        flash_storage.scan();
+        events.log(Event::FileOffloadFailed, time, fs);
+        fs.scan();
         warn!("File transfer to pi failed");
         false
     }
@@ -274,7 +285,7 @@ pub fn offload_flash_storage_and_events(
 /// Returns `(Option<DeviceConfig>, true)` when config was updated
 #[allow(clippy::too_many_lines)]
 pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
-    flash_storage: &mut OnboardFlash,
+    fs: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
@@ -284,7 +295,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
     let mut prefer_not_to_offload_files = false;
-    if let Some(free_spi) = flash_storage.free_spi() {
+    if let Some(free_spi) = fs.free_spi() {
         pi_spi.enable(free_spi, resets);
         LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
@@ -360,9 +371,9 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                             .copy_from_slice(&new_config.motion_detection_mask.inner);
                         let slice_to_write = &mut new_config_bytes[0..length_used + 2400];
                         if let Some(spi_free) = pi_spi.disable() {
-                            flash_storage.take_spi(spi_free, resets);
+                            fs.take_spi(spi_free, resets);
                         }
-                        flash_storage.write_device_config(slice_to_write);
+                        fs.write_device_config(slice_to_write);
                         new_config.cursor_position += 2400;
                         config_was_updated = true;
                     }
@@ -370,23 +381,39 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 (new_config, config_was_updated, prefer_not_to_offload_files)
             } else {
                 warn!("Pi did not respond");
-                (existing_config, config_was_updated, prefer_not_to_offload_files)
+                (
+                    existing_config,
+                    config_was_updated,
+                    prefer_not_to_offload_files,
+                )
             };
             if let Some(spi_free) = pi_spi.disable() {
-                flash_storage.take_spi(spi_free, resets);
+                fs.take_spi(spi_free, resets);
             }
             new_config
         } else {
             if let Some(spi_free) = pi_spi.disable() {
-                flash_storage.take_spi(spi_free, resets);
+                fs.take_spi(spi_free, resets);
             }
-            (existing_config, config_was_updated, prefer_not_to_offload_files)
+            (
+                existing_config,
+                config_was_updated,
+                prefer_not_to_offload_files,
+            )
         }
     } else {
         warn!("Flash spi not enabled");
         if let Some(existing_config) = &existing_config {
-            info!("Got device config {:?}, {}", existing_config, existing_config.device_name());
+            info!(
+                "Got device config {:?}, {}",
+                existing_config,
+                existing_config.device_name()
+            );
         }
-        (existing_config, config_was_updated, prefer_not_to_offload_files)
+        (
+            existing_config,
+            config_was_updated,
+            prefer_not_to_offload_files,
+        )
     }
 }

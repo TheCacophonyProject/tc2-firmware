@@ -9,7 +9,11 @@ const ATTENUATION_OFFSET: u16 = 60;
 const NIGHTTIME_TRIGGER_THRESHOLD: u16 = 30; //50; //30
 const DAYTIME_TRIGGER_THRESHOLD: u16 = 35; //49;
 fn trigger_threshold(is_daytime: bool) -> u16 {
-    if is_daytime { DAYTIME_TRIGGER_THRESHOLD } else { NIGHTTIME_TRIGGER_THRESHOLD }
+    if is_daytime {
+        DAYTIME_TRIGGER_THRESHOLD
+    } else {
+        NIGHTTIME_TRIGGER_THRESHOLD
+    }
 }
 type HotMap = [(bool, u16); 64];
 pub struct MotionTracking {
@@ -259,7 +263,10 @@ impl DetectionMask {
     #[allow(clippy::large_types_passed_by_value)]
     pub fn new(mask: Option<[u8; 2400]>) -> DetectionMask {
         let length = if mask.is_some() { 2400 } else { 0 };
-        DetectionMask { inner: mask.unwrap_or([0u8; 2400]), length }
+        DetectionMask {
+            inner: mask.unwrap_or([0u8; 2400]),
+            length,
+        }
     }
     pub fn is_masked_at_pos(&self, x: usize, y: usize) -> bool {
         let index = (y * 160) + x;

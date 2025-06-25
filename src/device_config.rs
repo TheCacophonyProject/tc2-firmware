@@ -44,8 +44,7 @@ impl SmallString {
     }
 }
 
-#[derive(Format, PartialEq)]
-
+#[derive(Format, PartialEq, Copy, Clone)]
 pub enum AudioMode {
     Disabled = 0,
     AudioOnly = 1,
@@ -297,10 +296,8 @@ impl Default for DeviceConfig {
 }
 
 impl DeviceConfig {
-    pub fn load_existing_config_from_flash(
-        flash_storage: &mut OnboardFlash,
-    ) -> Option<DeviceConfig> {
-        let slice = flash_storage.read_device_config();
+    pub fn load_existing_config_from_flash(fs: &mut OnboardFlash) -> Option<DeviceConfig> {
+        let slice = fs.read_device_config();
         if let Ok(slice) = slice {
             DeviceConfig::from_bytes(&slice)
         } else {
@@ -392,6 +389,14 @@ impl DeviceConfig {
         &self.config_inner
     }
 
+    pub fn audio_seed(&self) -> u32 {
+        self.config_inner.audio_seed
+    }
+
+    pub fn audio_mode(&self) -> AudioMode {
+        self.config_inner.audio_mode
+    }
+
     pub fn device_name(&self) -> &str {
         self.config_inner.device_name.as_str()
     }
@@ -409,6 +414,10 @@ impl DeviceConfig {
 
     pub fn use_low_power_mode(&self) -> bool {
         self.config_inner.use_low_power_mode
+    }
+
+    pub fn use_high_power_mode(&self) -> bool {
+        !self.config_inner.use_low_power_mode
     }
 
     pub fn next_or_current_recording_window(

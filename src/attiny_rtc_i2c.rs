@@ -65,14 +65,83 @@ impl From<u8> for CameraState {
     }
 }
 
-#[repr(u8)]
 #[derive(Format)]
+pub struct RecordingTypeDetail {
+    user_requested: bool,
+    thermal_requested: bool,
+    duration_seconds: usize,
+}
 
-pub enum RecordingType {
-    Test = 0,
-    Long = 1,
-    Scheduled = 2,
-    ThermalRequestedScheduled = 3,
+#[derive(Format)]
+pub enum AudioRecordingType {
+    Test(RecordingTypeDetail),
+    Long(RecordingTypeDetail),
+    Scheduled(RecordingTypeDetail),
+    ThermalRequestedScheduled(RecordingTypeDetail),
+}
+
+impl AudioRecordingType {
+    pub fn test_recording() -> Self {
+        AudioRecordingType::Test(RecordingTypeDetail {
+            user_requested: true,
+            thermal_requested: false,
+            duration_seconds: 10,
+        })
+    }
+
+    pub fn long_recording() -> Self {
+        AudioRecordingType::Long(RecordingTypeDetail {
+            user_requested: true,
+            thermal_requested: false,
+            duration_seconds: 60 * 5,
+        })
+    }
+
+    pub fn scheduled_recording() -> Self {
+        AudioRecordingType::Scheduled(RecordingTypeDetail {
+            user_requested: false,
+            thermal_requested: false,
+            duration_seconds: 60,
+        })
+    }
+
+    pub fn thermal_scheduled_recording() -> Self {
+        AudioRecordingType::ThermalRequestedScheduled(RecordingTypeDetail {
+            user_requested: false,
+            thermal_requested: true,
+            duration_seconds: 60,
+        })
+    }
+
+    pub fn is_user_requested(&self) -> bool {
+        match self {
+            AudioRecordingType::Test(RecordingTypeDetail { user_requested, .. })
+            | AudioRecordingType::Long(RecordingTypeDetail { user_requested, .. })
+            | AudioRecordingType::Scheduled(RecordingTypeDetail { user_requested, .. })
+            | AudioRecordingType::ThermalRequestedScheduled(RecordingTypeDetail {
+                user_requested,
+                ..
+            }) => *user_requested,
+        }
+    }
+
+    pub fn duration_seconds(&self) -> usize {
+        match self {
+            AudioRecordingType::Test(RecordingTypeDetail {
+                duration_seconds, ..
+            })
+            | AudioRecordingType::Long(RecordingTypeDetail {
+                duration_seconds, ..
+            })
+            | AudioRecordingType::Scheduled(RecordingTypeDetail {
+                duration_seconds, ..
+            })
+            | AudioRecordingType::ThermalRequestedScheduled(RecordingTypeDetail {
+                duration_seconds,
+                ..
+            }) => *duration_seconds,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -194,25 +263,6 @@ impl SharedI2C {
         }
     }
 
-    // fn attiny_read_command(&mut self, command: u8, payload: &mut [u8; 3]) -> Result<(), Error> {
-    //     match self.i2c().write(ATTINY_ADDRESS, &[command]) {
-    //         Ok(_) => self.i2c().read(ATTINY_ADDRESS, payload),
-    //         Err(e) => Err(e),
-    //     }
-    //
-    //     let mut response = [0u8; 3];
-    //     let mut payload = [command, 0x00, 0x00];
-    //     let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&payload[0..1]);
-    //     BigEndian::write_u16(&mut payload[1..=2], crc);
-    //     match self.i2c()
-    //         .write_read(ATTINY_ADDRESS, &payload, &mut response) {
-    //         Ok(_) => {
-    //
-    //         },
-    //         Err(e) => Err(e),
-    //     }
-    // }
-
     fn attiny_write_read_command(
         &mut self,
         command: u8,
@@ -241,30 +291,6 @@ impl SharedI2C {
             Err(Error::Abort(1))
         }
     }
-
-    // fn try_attiny_write_read_command(
-    //     &mut self,
-    //     command: u8,
-    //     value: Option<u8>,
-    //     delay: &mut Delay,
-    // ) -> Result<u8, Error> {
-    //     let mut payload = [0u8; 3];
-    //     let mut num_attempts = 0;
-    //     loop {
-    //         match self.attiny_write_read_command(command, value, &mut payload) {
-    //             Ok(_) => {
-    //                 return Ok(payload[0]);
-    //             }
-    //             Err(e) => {
-    //                 if num_attempts == 100 {
-    //                     return Err(e);
-    //                 }
-    //                 num_attempts += 1;
-    //                 delay.delay_us(500);
-    //             }
-    //         }
-    //     }
-    // }
 
     fn try_attiny_read_command(
         &mut self,
@@ -394,13 +420,6 @@ impl SharedI2C {
         }
     }
 
-    pub fn tc2_agent_is_recording(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok((state & 0x04) == 0x04),
-            Err(e) => Err(e),
-        }
-    }
-
     pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {
         match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
             Ok(state) => {
@@ -482,27 +501,23 @@ impl SharedI2C {
     pub fn tc2_agent_requested_audio_recording(
         &mut self,
         delay: &mut Delay,
-    ) -> Result<Option<RecordingType>, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                let rec_state: bool = state & tc2_agent_state::READY == tc2_agent_state::READY;
-                if rec_state {
-                    if state & tc2_agent_state::TEST_AUDIO_RECORDING
-                        == tc2_agent_state::TEST_AUDIO_RECORDING
-                    {
-                        return Ok(Some(RecordingType::Test));
-                    } else if state & tc2_agent_state::LONG_AUDIO_RECORDING
-                        == tc2_agent_state::LONG_AUDIO_RECORDING
-                    {
-                        return Ok(Some(RecordingType::Long));
-                    } else if state & tc2_agent_state::TAKE_AUDIO == tc2_agent_state::TAKE_AUDIO {
-                        return Ok(Some(RecordingType::ThermalRequestedScheduled));
-                    }
-                }
-                Ok(None)
+    ) -> Result<Option<AudioRecordingType>, Error> {
+        let state = self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)?;
+        let rec_state: bool = state & tc2_agent_state::READY == tc2_agent_state::READY;
+        if rec_state {
+            if state & tc2_agent_state::TEST_AUDIO_RECORDING
+                == tc2_agent_state::TEST_AUDIO_RECORDING
+            {
+                return Ok(Some(AudioRecordingType::test_recording()));
+            } else if state & tc2_agent_state::LONG_AUDIO_RECORDING
+                == tc2_agent_state::LONG_AUDIO_RECORDING
+            {
+                return Ok(Some(AudioRecordingType::long_recording()));
+            } else if state & tc2_agent_state::TAKE_AUDIO == tc2_agent_state::TAKE_AUDIO {
+                return Ok(Some(AudioRecordingType::thermal_scheduled_recording()));
             }
-            Err(e) => Err(e),
         }
+        Ok(None)
     }
 
     pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
@@ -539,11 +554,7 @@ impl SharedI2C {
                 if let Some(flag) = set_flag {
                     val |= flag;
                 }
-
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
-                    Ok(()) => Ok(()),
-                    Err(x) => Err(x),
-                }
+                self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay)
             }
             Err(e) => Err(e),
         }

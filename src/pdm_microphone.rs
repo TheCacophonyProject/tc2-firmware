@@ -76,10 +76,18 @@ impl PdmMicrophone {
 
     #[allow(clippy::cast_precision_loss)]
     pub fn enable(&mut self) {
-        let data: Pin<Gpio0, FunctionPio1, PullNone> =
-            self.data_disabled.take().unwrap().into_function().into_pull_type();
-        let clk: Pin<Gpio1, FunctionPio1, PullNone> =
-            self.clk_disabled.take().unwrap().into_function().into_pull_type();
+        let data: Pin<Gpio0, FunctionPio1, PullNone> = self
+            .data_disabled
+            .take()
+            .unwrap()
+            .into_function()
+            .into_pull_type();
+        let clk: Pin<Gpio1, FunctionPio1, PullNone> = self
+            .clk_disabled
+            .take()
+            .unwrap()
+            .into_function()
+            .into_pull_type();
 
         let data_pin_id = data.id().num;
         let clk_pin_id = clk.id().num;
@@ -108,7 +116,10 @@ impl PdmMicrophone {
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
-        info!("Mic Clock speed {}", self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0);
+        info!(
+            "Mic Clock speed {}",
+            self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0
+        );
         // data_pin is in
         // clk pin is out
         // let data_pin_id = 1;
@@ -175,7 +186,10 @@ impl PdmMicrophone {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
         let clock_divider = self.system_clock_hz.to_MHz() as f32 / (clock_rate * 2.0);
 
-        info!("Altering mic clock to {} divider {}", clock_rate, clock_divider);
+        info!(
+            "Altering mic clock to {} divider {}",
+            clock_rate, clock_divider
+        );
 
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
@@ -214,15 +228,15 @@ impl PdmMicrophone {
         ch4: Channel<CH4>,
         resets: &mut RESETS,
         spi: &SPI1,
-        flash_storage: &mut OnboardFlash,
+        fs: &mut OnboardFlash,
         timestamp: i64,
         watchdog: &mut bsp::hal::Watchdog,
-        synced_date_time: &SyncedDateTime,
+        time: &SyncedDateTime,
     ) -> bool {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
 
-        let mut timer = synced_date_time.get_timer();
+        let mut timer = time.get_timer();
         watchdog.feed();
         //how long to warm up??
         timer.delay_ms(2000);
@@ -266,12 +280,12 @@ impl PdmMicrophone {
 
             #[allow(clippy::cast_possible_truncation)]
             audio_buffer.init(timestamp, adjusted_sample_rate as u16);
-            flash_storage.start_file(0);
+            fs.start_file(0);
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
                     warn!("Couldn't keep up with data {}", cycle);
-                    let _ = flash_storage.erase_last_file();
+                    let _ = fs.erase_last_file();
 
                     break;
                 }
@@ -302,9 +316,7 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
-                        if let Err(e) =
-                            flash_storage.append_recording_bytes(data, data_size, None, None)
-                        {
+                        if let Err(e) = fs.append_recording_bytes(data, data_size, None, None) {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
                         }
@@ -322,11 +334,11 @@ impl PdmMicrophone {
                             "Recording done took {} ms",
                             (timer.get_counter() - start).to_millis(),
                         );
-                        let start = synced_date_time.get_date_time();
+                        let start = time.get_date_time();
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
-                        if let Err(e) = flash_storage
-                            .append_last_recording_bytes(payload, data_size, None, None)
+                        if let Err(e) =
+                            fs.append_last_recording_bytes(payload, data_size, None, None)
                         {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
@@ -356,7 +368,10 @@ const PAGE_COMMAND_ADDRESS: usize = 2;
 const AUDIO_SHEBANG: u16 = 1;
 impl AudioBuffer {
     pub const fn new() -> AudioBuffer {
-        AudioBuffer { data: [0xffffu16; 512 * 2 + 34], index: PAGE_COMMAND_ADDRESS }
+        AudioBuffer {
+            data: [0xffffu16; 512 * 2 + 34],
+            index: PAGE_COMMAND_ADDRESS,
+        }
     }
     pub fn init(&mut self, timestamp: i64, sample_rate: u16) {
         let time_data = bytemuck::cast_ref::<i64, [u16; 4]>(&timestamp);

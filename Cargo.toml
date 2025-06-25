@@ -66,9 +66,6 @@ disable-intrinsics = ["rp2040-hal/disable-intrinsics"]
 # This enables ROM functions for f64 math that were not present in the earliest RP2040s
 rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
 
-#defmt = ["rp2040-hal/defmt"]
-#eh1_0_alpha = ["rp2040-hal/eh1_0_alpha"]
-
 # cargo build/run
 [profile.dev]
 codegen-units = 1

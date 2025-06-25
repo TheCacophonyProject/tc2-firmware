@@ -19,6 +19,7 @@ use core::mem;
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Format, error, info, println, warn};
 
+use crate::attiny_rtc_i2c::AudioRecordingType;
 use cortex_m::prelude::*;
 use embedded_hal::digital::OutputPin;
 use fugit::{HertzU32, RateExtU32};
@@ -79,22 +80,37 @@ impl OnboardFlashStatus {
         // TODO: return relocation info?
         let ecc_bits = (self.inner >> 4) & 0b0000_0111;
         match ecc_bits {
-            0 => EccStatus { okay: true, should_relocate: false },
+            0 => EccStatus {
+                okay: true,
+                should_relocate: false,
+            },
             1 => {
                 warn!("ECC error - 1-3 bits corrected");
-                EccStatus { okay: true, should_relocate: false }
+                EccStatus {
+                    okay: true,
+                    should_relocate: false,
+                }
             }
             2 => {
                 error!("ECC error - uncorrectable error, data corrupted!");
-                EccStatus { okay: false, should_relocate: true }
+                EccStatus {
+                    okay: false,
+                    should_relocate: true,
+                }
             }
             3 => {
                 warn!("ECC error - 4-6 bits corrected, should re-locate data");
-                EccStatus { okay: true, should_relocate: true }
+                EccStatus {
+                    okay: true,
+                    should_relocate: true,
+                }
             }
             5 => {
                 warn!("ECC error - 7-8 bits corrected, MUST re-locate data");
-                EccStatus { okay: true, should_relocate: true }
+                EccStatus {
+                    okay: true,
+                    should_relocate: true,
+                }
             }
             _ => unreachable!("Unknown ECC status"),
         }
@@ -159,7 +175,9 @@ impl Page {
         blank_page[1] = 0;
         blank_page[2] = 0;
         blank_page[3] = 0;
-        Page { inner: Some(blank_page) }
+        Page {
+            inner: Some(blank_page),
+        }
     }
 
     fn cache_data(&self) -> &[u8] {
@@ -391,7 +409,7 @@ impl OnboardFlash {
     pub fn write_device_config(&mut self, device_bytes: &mut [u8]) {
         assert!(
             self.config_block.is_some(),
-            "Config block has not been initialized, call flash_storage.init()"
+            "Config block has not been initialized, call fs.init()"
         );
         let config_block = self.config_block.unwrap();
         let _ = self.erase_block(config_block);
@@ -420,7 +438,10 @@ impl OnboardFlash {
             );
             page += 1;
             //shouldn't ever happen unless config becomes unreasonably large
-            assert!(page < 64, "Trying to write more pages of config than we have allocated");
+            assert!(
+                page < 64,
+                "Trying to write more pages of config than we have allocated"
+            );
         }
     }
 
@@ -446,7 +467,7 @@ impl OnboardFlash {
     pub fn read_device_config(&mut self) -> Result<[u8; 2505], &str> {
         assert!(
             self.config_block.is_some(),
-            "Config block has not been initialized, call flash_storage.init()"
+            "Config block has not been initialized, call fs.init()"
         );
         info!("Reading config from {}", self.config_block);
         //guess this is the size of the config at the moment
@@ -486,7 +507,19 @@ impl OnboardFlash {
         self.wait_for_ready();
     }
 
-    pub fn has_cptv_files(&mut self, only_last: bool) -> bool {
+    pub fn last_recorded_file_is_cptv(&mut self) -> bool {
+        self.has_cptv_files_internal(true)
+    }
+
+    pub fn last_recorded_file_is_audio(&mut self) -> bool {
+        !self.has_cptv_files_internal(true)
+    }
+
+    pub fn has_cptv_files(&mut self) -> bool {
+        self.has_cptv_files_internal(false)
+    }
+
+    pub fn has_cptv_files_internal(&mut self, only_last: bool) -> bool {
         if !self.has_files_to_offload() {
             return false;
         }
@@ -505,6 +538,7 @@ impl OnboardFlash {
                 continue;
             }
 
+            // If the first byte of a file is 1, it was an audio file.
             let is_cptv = self.current_page.user_data()[0] != 1;
             if only_last || is_cptv {
                 return is_cptv;
@@ -605,7 +639,12 @@ impl OnboardFlash {
                 clk.into_function().into_pull_type(),
             ),
         )
-        .init(resets, self.system_clock_hz, 40_000_000.Hz(), embedded_hal::spi::MODE_3);
+        .init(
+            resets,
+            self.system_clock_hz,
+            40_000_000.Hz(),
+            embedded_hal::spi::MODE_3,
+        );
         self.spi = Some(spi);
     }
 
@@ -636,22 +675,35 @@ impl OnboardFlash {
         }
     }
 
-    pub fn is_too_full_to_start_new_recordings(&self) -> bool {
+    pub fn is_too_full_to_start_new_thermal_recordings(&self) -> bool {
         // Whether or not we should start any new recordings, or should offload.
         self.current_block_index > (NUM_RECORDING_BLOCKS - 256)
     }
-    pub fn is_too_full_for_audio(&self) -> bool {
+
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_sign_loss)]
+    pub fn is_too_full_for_to_start_new_audio_recordings(
+        &self,
+        recording_type: &AudioRecordingType,
+    ) -> bool {
         // Lets us know when we should end the current recording.
         // Need about 43 blocks for a 60 seconds recording at 48khz
-        self.current_block_index > (NUM_RECORDING_BLOCKS - 44)
+        let blocks_per_second = 44.0 / 60.0;
+
+        let num_needed_blocks =
+            (recording_type.duration_seconds() as f32 * blocks_per_second) as u16 + 1;
+        self.current_block_index > (NUM_RECORDING_BLOCKS - num_needed_blocks)
     }
+
     pub fn is_full(&self) -> bool {
         // check for page 62 incase it has to write one more page worth of data when finalising
         self.current_block_index >= NUM_RECORDING_BLOCKS
             || (self.current_block_index == (NUM_RECORDING_BLOCKS - 1)
                 && self.current_page_index >= 62)
     }
-    pub fn is_nearly_full(&self) -> bool {
+
+    pub fn is_nearly_full_for_thermal_recordings(&self) -> bool {
         // Lets us know when we should end the current recording.
         // We only need to allow a single frames worth – 2–3 blocks should be more than enough!
         self.current_block_index > (NUM_RECORDING_BLOCKS - 3)
@@ -708,7 +760,11 @@ impl OnboardFlash {
         let address = OnboardFlash::get_address(block_index, 0);
         self.spi_write(&[BLOCK_ERASE, address[0], address[1], address[2]]);
         let status = self.wait_for_ready();
-        if status.erase_failed() { Err("Block erase failed") } else { Ok(()) }
+        if status.erase_failed() {
+            Err("Block erase failed")
+        } else {
+            Ok(())
+        }
     }
 
     pub fn erase_last_file(&mut self) -> Result<(), &str> {
@@ -729,7 +785,10 @@ impl OnboardFlash {
             return Err("File hasn't been written too");
         }
         let start_block_index = self.file_start_block_index.unwrap();
-        info!("Erasing last file {}:0 to {}", start_block_index, self.last_used_block_index);
+        info!(
+            "Erasing last file {}:0 to {}",
+            start_block_index, self.last_used_block_index
+        );
 
         for block_index in start_block_index..=self.last_used_block_index.unwrap() {
             if self.bad_blocks.contains(&block_index) {
@@ -771,7 +830,10 @@ impl OnboardFlash {
     pub fn get_file_part(&mut self) -> Option<FilePartReturn> {
         // TODO: Could interleave using cache_random_read, might improve throughput slightly?
         // FIXME: Try doing this
-        if self.read_page(self.current_block_index, self.current_page_index).is_ok() {
+        if self
+            .read_page(self.current_block_index, self.current_page_index)
+            .is_ok()
+        {
             self.read_page_from_cache(self.current_block_index);
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
@@ -857,7 +919,10 @@ impl OnboardFlash {
 
         // TODO: Now we need to check the ECC status bits, and return okay if it is ok
         info!("Status after read into cache {:#010b}", status.inner);
-        let EccStatus { okay, should_relocate } = status.ecc_status();
+        let EccStatus {
+            okay,
+            should_relocate,
+        } = status.ecc_status();
         if !okay {
             // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
             // that the file spans as temporarily corrupt, so this file doesn't get read and
@@ -991,7 +1056,10 @@ impl OnboardFlash {
             // FIXME: Why is this a bidirectional transfer again?
             //  That seems to be the main reason we need these Page abstractions.
             let transfer = bidirectional::Config::new(
-                (self.dma_channel_1.take().unwrap(), self.dma_channel_2.take().unwrap()),
+                (
+                    self.dma_channel_1.take().unwrap(),
+                    self.dma_channel_2.take().unwrap(),
+                ),
                 unsafe { extend_lifetime(&current_page[src_range]) },
                 self.spi.take().unwrap(),
                 // TO ensure the data is placed in the correct place on the page, offset by -4
@@ -1094,7 +1162,14 @@ impl OnboardFlash {
         block_index: Option<BlockIndex>,
         page_index: Option<PageIndex>,
     ) -> Result<(), &str> {
-        self.append_file_bytes(bytes, user_bytes_length, false, block_index, page_index, false)
+        self.append_file_bytes(
+            bytes,
+            user_bytes_length,
+            false,
+            block_index,
+            page_index,
+            false,
+        )
     }
 
     pub fn append_last_recording_bytes(
@@ -1104,7 +1179,14 @@ impl OnboardFlash {
         block_index: Option<BlockIndex>,
         page_index: Option<PageIndex>,
     ) -> Result<(), &str> {
-        self.append_file_bytes(bytes, user_bytes_length, true, block_index, page_index, false)
+        self.append_file_bytes(
+            bytes,
+            user_bytes_length,
+            true,
+            block_index,
+            page_index,
+            false,
+        )
     }
 
     pub fn append_file_bytes(
