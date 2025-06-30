@@ -125,6 +125,14 @@ impl AudioRecordingType {
         }
     }
 
+    pub fn is_scheduled(&self) -> bool {
+        !self.is_user_requested()
+    }
+
+    pub fn is_thermal_requested(&self) -> bool {
+        matches!(self, AudioRecordingType::ThermalRequestedScheduled(_))
+    }
+
     pub fn duration_seconds(&self) -> usize {
         match self {
             AudioRecordingType::Test(RecordingTypeDetail {
@@ -399,11 +407,7 @@ impl SharedI2C {
         self.try_attiny_write_command(REG_KEEP_ALIVE, 0x01, delay)
     }
 
-    pub fn set_recording_flag(
-        &mut self,
-        delay: &mut Delay,
-        is_recording: bool,
-    ) -> Result<(), Error> {
+    fn set_recording_flag(&mut self, delay: &mut Delay, is_recording: bool) -> Result<(), Error> {
         match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(mut state) => {
                 if is_recording {
@@ -418,6 +422,14 @@ impl SharedI2C {
             }
             Err(x) => Err(x),
         }
+    }
+
+    pub fn started_recording(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.set_recording_flag(delay, true)
+    }
+
+    pub fn stopped_recording(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.set_recording_flag(delay, false)
     }
 
     pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {

@@ -217,9 +217,9 @@ fn main() -> ! {
         //  written.
         if is_recording {
             events.log(Event::RecordingNotFinished, &time, &mut fs);
-            let _ = i2c
-                .set_recording_flag(&mut delay, false)
-                .map_err(|e| error!("Error unsetting recording flag on attiny: {}", e));
+            if let Err(e) = i2c.stopped_recording(&mut delay) {
+                error!("Error unsetting recording flag on attiny: {}", e);
+            }
         }
     }
 
@@ -248,8 +248,6 @@ fn main() -> ! {
         &mut i2c,
         &mut events,
     );
-    // Check if next_audio_alarm < now?
-
     let record_audio_now = should_record_audio(&device_config, &mut i2c, &mut delay, &time);
 
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
@@ -267,8 +265,11 @@ fn main() -> ! {
     // TODO: We might defer this if the user is using sidekick etc?
     // TODO: Make offloads interruptable?
     let recording_mode = if record_audio_now { "audio" } else { "thermal" };
+
+    // TODO: If the latest file is a test recording, at least offload the latest immediately.
     let did_offload = maybe_offload_files_and_events_on_startup(
         recording_mode,
+        prefer_not_to_offload_files_now,
         &mut fs,
         &device_config,
         &time,
@@ -293,7 +294,6 @@ fn main() -> ! {
             woken_by_alarm,
             &device_config,
             fs,
-            pi_spi,
             events,
             &time,
             pio1,

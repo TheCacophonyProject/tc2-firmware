@@ -1,7 +1,6 @@
 use crate::attiny_rtc_i2c::{AudioRecordingType, SharedI2C, tc2_agent_state};
 use crate::audio_task::{
-    AlarmMode, MAX_GAP_MIN, check_alarm_still_valid_with_thermal_window, offload,
-    schedule_audio_rec,
+    AlarmMode, MAX_GAP_MIN, check_alarm_still_valid_with_thermal_window, schedule_audio_rec,
 };
 use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig, get_datetime_utc};
@@ -13,10 +12,9 @@ use crate::onboard_flash::OnboardFlash;
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    offload_recordings_and_events,
+    offload_all_recordings_and_events,
 };
 use crate::synced_date_time::SyncedDateTime;
-use crate::utils::restart;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use cortex_m::delay::Delay;
 use defmt::{error, info, panic, warn};
@@ -30,41 +28,39 @@ pub fn should_record_audio(
     delay: &mut Delay,
     time: &SyncedDateTime,
 ) -> bool {
-    let mut is_audio: bool = config.config().is_audio_device();
-
+    let mut wants_to_record_audio_now: bool = config.is_audio_device();
     if let Ok(audio_only) = i2c.check_if_is_audio_device(delay) {
         info!("EEPROM audio device: {}", audio_only);
-        is_audio = is_audio || audio_only;
+        wants_to_record_audio_now = wants_to_record_audio_now || audio_only;
     }
-    if is_audio {
-        match config.config().audio_mode {
-            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                if let Ok(state) = i2c.tc2_agent_state(delay) {
-                    if (state & (tc2_agent_state::THERMAL_MODE)) > 0 {
-                        let _ = i2c.tc2_agent_clear_thermal_mode(delay);
-                        info!("Audio request thermal mode");
-                        // audio mode wants to go in thermal mode
-                        is_audio = false;
-                    } else {
-                        let in_window =
-                            config.time_is_in_recording_window(&time.get_date_time(), None);
-                        if in_window {
-                            is_audio = (state
-                                & (tc2_agent_state::LONG_AUDIO_RECORDING
-                                    | tc2_agent_state::TAKE_AUDIO
-                                    | tc2_agent_state::TEST_AUDIO_RECORDING))
-                                > 0;
-                            if is_audio {
-                                info!("Is audio because thermal requested or test rec");
-                            }
+    if wants_to_record_audio_now {
+        // FIXME: If we have actual audio only devices as set by eeprom, it doesn't seem like the
+        //  device config should be able to override that.
+        if config.records_audio_and_thermal() {
+            if let Ok(state) = i2c.tc2_agent_state(delay) {
+                if (state & (tc2_agent_state::THERMAL_MODE)) != 0 {
+                    let _ = i2c.tc2_agent_clear_thermal_mode(delay);
+                    info!("Audio request thermal mode");
+                    // audio mode wants to go in thermal mode
+                    wants_to_record_audio_now = false;
+                } else {
+                    let in_window =
+                        config.time_is_in_configured_recording_window(&time.get_date_time());
+                    if in_window {
+                        wants_to_record_audio_now = (state
+                            & (tc2_agent_state::LONG_AUDIO_RECORDING
+                                | tc2_agent_state::TAKE_AUDIO
+                                | tc2_agent_state::TEST_AUDIO_RECORDING))
+                            != 0;
+                        if wants_to_record_audio_now {
+                            info!("Will record audio because thermal requested or test rec");
                         }
                     }
                 }
             }
-            _ => (),
         }
     }
-    is_audio
+    wants_to_record_audio_now
 }
 
 pub fn get_device_config(
@@ -139,45 +135,52 @@ pub fn get_next_audio_alarm(
 ) -> Option<DateTime<Utc>> {
     // FIXME: Shouldn't this have already happened on startup?
     let mut next_audio_alarm = None;
-    match config.config().audio_mode {
+    match config.audio_mode() {
         AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
-            let (audio_mode, audio_alarm) = get_audio_alarm(fs);
+            let (alarm_mode, audio_alarm) = get_audio_alarm(fs);
             let mut schedule_alarm = true;
             // if audio alarm is set check it's within 60 minutes and before or on thermal window start
             if let Some(audio_alarm) = audio_alarm {
-                if let Ok(audio_mode) = audio_mode {
-                    // FIXME: Document what the AlarmModes mean
-                    if audio_mode == AlarmMode::Audio {
-                        let synced = time.get_date_time();
-                        let until_alarm = (audio_alarm - synced).num_minutes();
-                        if until_alarm <= i64::from(MAX_GAP_MIN) {
-                            info!(
-                                "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                                audio_alarm.year(),
-                                audio_alarm.month(),
-                                audio_alarm.day(),
-                                audio_alarm.hour(),
-                                audio_alarm.minute()
-                            );
-                            if check_alarm_still_valid_with_thermal_window(
-                                &audio_alarm,
-                                &synced,
-                                config,
-                            ) {
-                                next_audio_alarm = Some(audio_alarm);
-                                schedule_alarm = false;
+                match alarm_mode {
+                    Ok(alarm_mode) => {
+                        // FIXME: Document what the AlarmModes mean
+                        if alarm_mode == AlarmMode::Audio {
+                            let synced = time.get_date_time();
+                            let until_alarm = (audio_alarm - synced).num_minutes();
+                            // FIXME: This doesn't seem to handle alarms in the past?
+                            if until_alarm <= i64::from(MAX_GAP_MIN) {
+                                info!(
+                                    "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                                    audio_alarm.year(),
+                                    audio_alarm.month(),
+                                    audio_alarm.day(),
+                                    audio_alarm.hour(),
+                                    audio_alarm.minute()
+                                );
+                                if check_alarm_still_valid_with_thermal_window(
+                                    &audio_alarm,
+                                    &synced,
+                                    config,
+                                ) {
+                                    next_audio_alarm = Some(audio_alarm);
+                                    schedule_alarm = false;
+                                } else {
+                                    schedule_alarm = true;
+                                    // if window time changed and alarm is after rec window start
+                                    info!("Rescheduling as alarm is after window start");
+                                }
                             } else {
-                                schedule_alarm = true;
-                                // if window time changed and alarm is after rec window start
-                                info!("Rescheduling as alarm is after window start");
+                                info!("Alarm is missed");
                             }
-                        } else {
-                            info!("Alarm is missed");
                         }
+                    }
+                    Err(reason) => {
+                        error!("{}", reason);
                     }
                 }
             }
             if schedule_alarm {
+                // Reschedule a new alarm
                 if let Ok(next_alarm) = schedule_audio_rec(delay, time, i2c, fs, events, config) {
                     next_audio_alarm = Some(next_alarm);
                     info!("Setting a pending audio alarm");
@@ -197,6 +200,7 @@ pub fn get_next_audio_alarm(
 #[allow(clippy::too_many_lines)]
 pub fn maybe_offload_files_and_events_on_startup(
     recording_mode: &str,
+    prefer_not_to_offload_files_now: bool,
     fs: &mut OnboardFlash,
     config: &DeviceConfig,
     time: &SyncedDateTime,
@@ -208,7 +212,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     delay: &mut Delay,
     watchdog: &mut Watchdog,
 ) -> bool {
-    let has_files_to_offload = fs.has_files_to_offload();
+    let has_files_to_offload = fs.has_recordings_to_offload();
     if has_files_to_offload {
         info!("Finished scan, has files to offload");
     }
@@ -223,7 +227,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     //  always start the pi up, which we don't want.
 
     let should_offload = (has_files_to_offload
-        && !config.time_is_in_recording_window(&time.get_date_time(), None))
+        && !config.time_is_in_configured_recording_window(&time.get_date_time()))
         || fs.is_too_full_to_start_new_cptv_recordings()
         || (has_files_to_offload && fs.file_start_block_index.is_none());
     // means old file system offload once
@@ -251,8 +255,8 @@ pub fn maybe_offload_files_and_events_on_startup(
 
     // FIXME: This should all happen in main startup
     let did_offload_files = if should_offload {
-        offload_recordings_and_events(
-            fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog, false,
+        offload_all_recordings_and_events(
+            fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
         )
     } else {
         false
@@ -261,25 +265,25 @@ pub fn maybe_offload_files_and_events_on_startup(
     //////
     // From audio startup
     // FIXME: Consolidate this logic in main
+
+    // Rather than deciding if we should wake, just decide if we should offload, and then of course
+    // we'll wake if needed.
+
     let mut should_wake = false;
-    match config.config().audio_mode {
-        AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-            let in_window = config.time_is_in_recording_window(&time.get_date_time(), None);
-            if !in_window {
-                let has_cptv_files = fs.last_recorded_file_is_cptv();
-                // this means end of thermal window so should offload recordings
-                if has_cptv_files {
-                    info!("Has cptv files {}", has_cptv_files);
-                    should_wake = true;
-                    events.log(
-                        Event::ToldRpiToWake(WakeReason::AudioThermalEnded),
-                        time,
-                        fs,
-                    );
-                }
-            }
+    if config.records_audio_and_thermal()
+        && config.time_is_in_configured_recording_window(&time.get_date_time())
+    {
+        let has_cptv_files = fs.last_recorded_file_is_cptv();
+        // this means end of thermal window so should offload recordings
+        if has_cptv_files {
+            info!("Has cptv files {}", has_cptv_files);
+            should_wake = true;
+            events.log(
+                Event::ToldRpiToWake(WakeReason::AudioThermalEnded),
+                time,
+                fs,
+            );
         }
-        _ => {}
     }
     if !should_wake {
         should_wake = should_offload_audio_recordings(fs, events);
@@ -291,11 +295,11 @@ pub fn maybe_offload_files_and_events_on_startup(
             );
         }
     }
-
-    if offload(i2c, fs, pi_spi, events, should_wake, delay, time, watchdog).is_err() {
-        warn!("Restarting as could not offload");
-        restart(watchdog);
-    }
+    //
+    // if offload(i2c, fs, pi_spi, events, should_wake, delay, time, watchdog).is_err() {
+    //     warn!("Restarting as could not offload");
+    //     restart(watchdog);
+    // }
 
     //////
 
@@ -303,12 +307,12 @@ pub fn maybe_offload_files_and_events_on_startup(
 }
 
 fn should_offload_audio_recordings(fs: &mut OnboardFlash, events: &mut EventLogger) -> bool {
-    let has_files = fs.has_files_to_offload() || events.is_nearly_full();
+    let has_files = fs.has_recordings_to_offload() || events.is_nearly_full();
     if !has_files {
         return false;
     }
     // flash getting full
-    if fs.is_too_full_for_to_start_new_audio_recordings(&AudioRecordingType::long_recording()) {
+    if fs.is_too_full_to_start_new_audio_recordings(&AudioRecordingType::long_recording()) {
         info!("Offloading as flash is nearly full");
         return true;
     }

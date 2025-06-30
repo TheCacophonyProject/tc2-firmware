@@ -22,7 +22,7 @@ struct RecordingStatus {
     total_samples: usize,
     samples_taken: usize,
 }
-use crate::onboard_flash::OnboardFlash;
+use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
 use onboard_flash::extend_lifetime_generic_mut;
 
 use crc::{CRC_16_XMODEM, Crc};
@@ -232,6 +232,7 @@ impl PdmMicrophone {
         timestamp: i64,
         watchdog: &mut bsp::hal::Watchdog,
         time: &SyncedDateTime,
+        user_requested_test_recording: bool,
     ) -> bool {
         info!("Recording for {} seconds ", num_seconds);
         self.enable();
@@ -316,7 +317,16 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
-                        if let Err(e) = fs.append_recording_bytes(data, data_size, None, None) {
+                        if let Err(e) = fs.append_recording_bytes(
+                            data,
+                            data_size,
+                            None,
+                            None,
+                            RecordingFileType::Audio(RecordingFileTypeDetails {
+                                user_requested: user_requested_test_recording,
+                                status: false,
+                            }),
+                        ) {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
                         }
@@ -337,9 +347,16 @@ impl PdmMicrophone {
                         let start = time.get_date_time();
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
-                        if let Err(e) =
-                            fs.append_last_recording_bytes(payload, data_size, None, None)
-                        {
+                        if let Err(e) = fs.append_last_recording_bytes(
+                            payload,
+                            data_size,
+                            None,
+                            None,
+                            RecordingFileType::Audio(RecordingFileTypeDetails {
+                                user_requested: user_requested_test_recording,
+                                status: false,
+                            }),
+                        ) {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
                         }

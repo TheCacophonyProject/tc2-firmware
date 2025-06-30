@@ -391,16 +391,17 @@ pub fn write_audio_alarm(fs: &mut OnboardFlash, alarm_dt: DateTime<Utc>, mode: A
     fs.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset);
 }
 
-pub fn get_audio_alarm(fs: &mut OnboardFlash) -> (Result<AlarmMode, ()>, Option<DateTime<Utc>>) {
+pub fn get_audio_alarm(fs: &mut OnboardFlash) -> (Result<AlarmMode, &str>, Option<DateTime<Utc>>) {
     let page_offset = 0u16;
+    // FIXME: Would be better for consistency to use the "page used" bits.
     if fs.read_page(AUDIO_BLOCK, AUDIO_PAGE).is_ok() {
         let event = fs.read_event_from_cache_at_column_offset_spi(AUDIO_BLOCK, page_offset);
         if event[0..9].iter().all(|x: &u8| *x == u8::MAX) {
-            return (Err(()), None);
+            return (Err("audio mode not set"), None);
         }
         let dt = DateTime::from_timestamp_millis(LittleEndian::read_i64(&event[1..9]));
         (AlarmMode::try_from(event[0]), dt)
     } else {
-        (Err(()), None)
+        (Err("audio mode page read failed"), None)
     }
 }

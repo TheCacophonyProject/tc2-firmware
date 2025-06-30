@@ -6,14 +6,14 @@ use crate::bsp::pac::DMA;
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::device_config::{AudioMode, DeviceConfig, get_datetime_utc};
+use crate::device_config::{DeviceConfig, get_datetime_utc};
 use crate::event_logger::{Event, EventLogger, WakeReason};
 use core::cell::RefCell;
 
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER_HEADER_LENGTH};
 use crate::lepton::FFCStatus;
 use crate::motion_detector::{MotionTracking, track_motion};
-use crate::onboard_flash::OnboardFlash;
+use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 
 use crate::lepton_telemetry::Telemetry;
@@ -193,9 +193,9 @@ pub fn thermal_motion_task(
         }
     }
     // Unset the is_recording flag on attiny on startup
-    let _ = i2c
-        .set_recording_flag(&mut delay, false)
-        .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+    if let Err(e) = i2c.stopped_recording(&mut delay) {
+        error!("Error setting recording flag on attiny: {}", e);
+    }
     let startup_date_time_utc: DateTime<Utc> = time.get_date_time();
 
     // This is the 'raw' frame buffer which can be sent to the rPi as is: it has 18 bytes
@@ -247,7 +247,7 @@ pub fn thermal_motion_task(
     info!(
         "Has cptv files? {} has files? {}",
         has_cptv_files_saved,
-        fs.has_files_to_offload()
+        fs.has_recordings_to_offload()
     );
 
     if let Some(audio_alarm) = next_audio_alarm {
@@ -261,7 +261,7 @@ pub fn thermal_motion_task(
 
     let mut bk = {
         let made_shutdown_status_recording = !config
-            .time_is_in_recording_window(&time.get_date_time(), Some(current_recording_window));
+            .time_is_in_supplied_recording_window(&time.get_date_time(), current_recording_window);
         let made_startup_status_recording = has_cptv_files_saved;
         BookkeepingState {
             audio_pending: false,
@@ -303,7 +303,7 @@ pub fn thermal_motion_task(
 
     info!(
         "Current time is in recording window? {}",
-        config.time_is_in_recording_window(&time.get_date_time(), None)
+        config.time_is_in_configured_recording_window(&time.get_date_time())
     );
 
     let mut motion_detection: Option<MotionTracking> = None;
@@ -504,9 +504,9 @@ pub fn thermal_motion_task(
                         // Recording window is 5 minutes from startup time in dev mode.
                         time.get_date_time() < startup_date_time_utc + Duration::minutes(5)
                     } else {
-                        config.time_is_in_recording_window(
+                        config.time_is_in_supplied_recording_window(
                             &time.get_date_time(),
-                            Some(current_recording_window),
+                            current_recording_window,
                         )
                     };
                     // start recording below so frame buffer is out of scope
@@ -542,6 +542,10 @@ pub fn thermal_motion_task(
                             &mut prev_frame,
                             &telemetry,
                             &mut fs,
+                            RecordingFileType::Cptv(RecordingFileTypeDetails {
+                                user_requested: false,
+                                status: bk.making_status_recording,
+                            }),
                         );
                         frames_written += 1;
                     }
@@ -561,7 +565,13 @@ pub fn thermal_motion_task(
                             let _ = fs.erase_last_file();
                             events.log(Event::WouldDiscardAsFalsePositive, &time, &mut fs);
                         } else {
-                            cptv_stream.finalise(&mut fs);
+                            cptv_stream.finalise(
+                                &mut fs,
+                                RecordingFileType::Cptv(RecordingFileTypeDetails {
+                                    user_requested: false,
+                                    status: bk.making_status_recording,
+                                }),
+                            );
                             error!(
                                 "Ending current recording start block {} end block{}",
                                 cptv_start_block_index, fs.last_used_block_index
@@ -581,9 +591,9 @@ pub fn thermal_motion_task(
                         prev_frame_2.fill(0);
 
                         ended_recording = true;
-                        let _ = i2c
-                            .set_recording_flag(&mut delay, false)
-                            .map_err(|e| error!("Error clearing recording flag on attiny: {}", e));
+                        if let Err(e) = i2c.stopped_recording(&mut delay) {
+                            error!("Error clearing recording flag on attiny: {}", e);
+                        }
 
                         if bk.making_status_recording {
                             bk.making_status_recording = false;
@@ -631,9 +641,9 @@ pub fn thermal_motion_task(
             // we drop a frame so cache the current frame and tell core1 to keep getting
             // lepton frames, this will spread the initial load over the first 2 frames.
             warn!("Setting recording flag on attiny");
-            let _ = i2c
-                .set_recording_flag(&mut delay, true)
-                .map_err(|e| error!("Error setting recording flag on attiny: {}", e));
+            if let Err(e) = i2c.started_recording(&mut delay) {
+                error!("Error setting recording flag on attiny: {}", e);
+            }
 
             error!("Starting new recording, {:?}", &telemetry);
             let mut cptv_streamer = CptvStream::new(
@@ -647,7 +657,14 @@ pub fn thermal_motion_task(
                 &crc_table,
                 bk.making_status_recording,
             );
-            cptv_streamer.init_gzip_stream(&mut fs, false);
+            cptv_streamer.init_gzip_stream(
+                &mut fs,
+                false,
+                RecordingFileType::Cptv(RecordingFileTypeDetails {
+                    user_requested: false,
+                    status: bk.making_status_recording,
+                }),
+            );
 
             // Write out the initial frame from *before* the time when the motion detection triggered.
             cptv_streamer.push_frame(
@@ -655,6 +672,10 @@ pub fn thermal_motion_task(
                 &mut prev_frame_2, // This should be zeroed out before starting a new clip.
                 prev_telemetry.as_ref().unwrap(),
                 &mut fs,
+                RecordingFileType::Cptv(RecordingFileTypeDetails {
+                    user_requested: false,
+                    status: bk.making_status_recording,
+                }),
             );
             frames_written += 1;
 
@@ -677,7 +698,16 @@ pub fn thermal_motion_task(
 
             warn_on_duplicate_frames(&prev_telemetry, &telemetry);
             // now write the second/current frame
-            cptv_streamer.push_frame(&prev_frame_2, &mut prev_frame, &telemetry, &mut fs);
+            cptv_streamer.push_frame(
+                &prev_frame_2,
+                &mut prev_frame,
+                &telemetry,
+                &mut fs,
+                RecordingFileType::Cptv(RecordingFileTypeDetails {
+                    user_requested: false,
+                    status: bk.making_status_recording,
+                }),
+            );
             frames_written += 1;
             prev_frame.copy_from_slice(&prev_frame_2);
             cptv_stream = Some(cptv_streamer);
@@ -727,17 +757,12 @@ pub fn thermal_motion_task(
             if config.use_low_power_mode() {
                 // Once per minute, if we're not currently recording, tell the RPi it can shut down, as it's not
                 // needed in low-power mode unless it's offloading/uploading CPTV data.
-                advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay);
-                if bk.logged_told_rpi_to_sleep.take().is_some() {
+                if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
+                    && bk.logged_told_rpi_to_sleep.take().is_some()
+                {
                     events.log(Event::ToldRpiToSleep, &time, &mut fs);
                 }
-                info!(
-                    "Advise pi to shutdown took {}µs",
-                    (timer.get_counter() - sync_rtc_start).to_micros()
-                );
             }
-            let sync_rtc_start_real = timer.get_counter();
-
             match i2c.get_datetime(&mut delay) {
                 Ok(now) => time.set(get_datetime_utc(now)),
                 Err(err_str) => {
@@ -745,11 +770,6 @@ pub fn thermal_motion_task(
                     error!("Unable to get DateTime from RTC: {}", err_str);
                 }
             }
-
-            info!(
-                "RTC Sync time took {}µs",
-                (timer.get_counter() - sync_rtc_start_real).to_micros()
-            );
 
             // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
             //  is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
@@ -759,7 +779,7 @@ pub fn thermal_motion_task(
                     time.get_date_time() < startup_date_time_utc + Duration::minutes(5);
                 !is_inside_recording_window
             } else {
-                !config.time_is_in_recording_window(&time.get_date_time(), None)
+                !config.time_is_in_configured_recording_window(&time.get_date_time())
             };
             let is_inside_recording_window = !is_outside_recording_window;
 
@@ -775,7 +795,7 @@ pub fn thermal_motion_task(
             if is_outside_recording_window
                 && (bk.use_high_power_mode() || bk.made_shutdown_status_recording)
             {
-                if fs.has_files_to_offload() {
+                if fs.has_recordings_to_offload() {
                     // If flash storage is nearly full, or we're now outside the recording window,
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
@@ -785,8 +805,9 @@ pub fn thermal_motion_task(
 
                 if bk.use_high_power_mode() {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
-                    advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay);
-                    if bk.logged_told_rpi_to_sleep.take().is_some() {
+                    if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
+                        && bk.logged_told_rpi_to_sleep.take().is_some()
+                    {
                         events.log(Event::ToldRpiToSleep, &time, &mut fs);
                     }
                 }
@@ -882,6 +903,7 @@ fn advance_time_by_n_frames(
     }
 }
 
+// FIXME: This has similarities with the audio shutdown function, can we share logic?
 fn shutdown_if_possible(
     timer: &Timer,
     i2c: &mut SharedI2C,
@@ -904,13 +926,10 @@ fn shutdown_if_possible(
             // FIXME: I don't understand this logic
             // only reboot into audio mode if pi is powered down and rp2040 is asleep
             // so we can keep the thermal preview up as long as the PI is on.
-            match config.audio_mode() {
-                AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-                    // just reboot and it will go into audio branch
-                    info!("Reset as thermal finished and time for audio");
-                    restart(sio);
-                }
-                _ => (),
+            if config.records_audio_and_thermal() {
+                // just reboot and it will go into audio branch
+                info!("Reset as thermal finished and time for audio");
+                restart(sio);
             }
 
             // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,

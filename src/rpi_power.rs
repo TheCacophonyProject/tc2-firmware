@@ -1,6 +1,7 @@
 use crate::attiny_rtc_i2c::SharedI2C;
 use cortex_m::delay::Delay;
 use defmt::{error, info, warn};
+use rp2040_hal::i2c::Error;
 
 /// Returns `true` if it did wake the rPI
 pub fn wake_raspberry_pi(i2c: &mut SharedI2C, delay: &mut Delay) -> bool {
@@ -39,10 +40,15 @@ pub fn wake_raspberry_pi(i2c: &mut SharedI2C, delay: &mut Delay) -> bool {
     }
 }
 
-pub fn advise_raspberry_pi_it_may_shutdown(i2c: &mut SharedI2C, delay: &mut Delay) {
-    if i2c.tell_pi_to_shutdown(delay).is_err() {
+pub fn advise_raspberry_pi_it_may_shutdown(
+    i2c: &mut SharedI2C,
+    delay: &mut Delay,
+) -> Result<(), Error> {
+    let result = i2c.tell_pi_to_shutdown(delay);
+    if result.is_err() {
         error!("Error sending power-down advice to raspberry pi");
     } else {
         info!("Sent power-down advice to raspberry pi");
     }
+    result
 }

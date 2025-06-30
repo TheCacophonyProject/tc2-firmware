@@ -115,7 +115,7 @@ pub fn offload_all_recordings_and_events(
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn offload_recordings_and_events(
+fn offload_recordings_and_events(
     fs: &mut OnboardFlash,
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,

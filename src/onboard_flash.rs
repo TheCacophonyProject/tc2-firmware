@@ -71,6 +71,19 @@ pub struct EccStatus {
 pub type BlockIndex = u16;
 pub type PageIndex = u8;
 
+#[derive(Copy, Clone)]
+pub struct RecordingFileTypeDetails {
+    pub user_requested: bool,
+    pub status: bool,
+}
+
+#[derive(Copy, Clone)]
+pub enum RecordingFileType {
+    Cptv(RecordingFileTypeDetails),
+    Audio(RecordingFileTypeDetails),
+    Other,
+}
+
 impl OnboardFlashStatus {
     pub fn cache_read_busy(&self) -> bool {
         self.inner & 0b1000_0000 != 0
@@ -214,6 +227,22 @@ impl Page {
     // [2, 3] = length of page used as little-endian u16
     pub fn page_is_used(&self) -> bool {
         self.user_metadata_1()[0] == 0
+    }
+
+    pub fn is_user_requested_test_recording(&self) -> bool {
+        self.user_metadata_1()[4] >> 1 & 0x1 == 1
+    }
+
+    pub fn is_status_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0x1 == 1
+    }
+
+    pub fn is_cptv_recording(&self) -> bool {
+        self.user_metadata_1()[4] >> 2 == 1
+    }
+
+    pub fn is_audio_recording(&self) -> bool {
+        self.user_metadata_1()[4] >> 2 == 0
     }
 
     pub fn file_start_block_index(&self) -> Option<u16> {
@@ -460,6 +489,7 @@ impl OnboardFlash {
             Some(block_index),
             Some(page_index),
             true,
+            RecordingFileType::Other,
         )
     }
 
@@ -520,7 +550,7 @@ impl OnboardFlash {
     }
 
     pub fn has_cptv_files_internal(&mut self, only_last: bool) -> bool {
-        if !self.has_files_to_offload() {
+        if !self.has_recordings_to_offload() {
             return false;
         }
         let mut file_start = self.file_start_block_index;
@@ -539,7 +569,12 @@ impl OnboardFlash {
             }
 
             // If the first byte of a file is 1, it was an audio file.
-            let is_cptv = self.current_page.user_data()[0] != 1;
+            // FIXME: Let's do better and write the type into the user-metadata too - remove the shebang
+            //  check in the next revision.
+            let is_cptv =
+                self.current_page.user_data()[0] != 1 || self.current_page.is_cptv_recording();
+            let is_status = self.current_page.is_status_recording();
+            let is_user_requested = self.current_page.is_user_requested_test_recording();
             if only_last || is_cptv {
                 return is_cptv;
             }
@@ -648,7 +683,7 @@ impl OnboardFlash {
         self.spi = Some(spi);
     }
 
-    pub fn has_files_to_offload(&self) -> bool {
+    pub fn has_recordings_to_offload(&self) -> bool {
         // When we did our initial scan, did we encounter any used blocks?
         let has_files = self.first_used_block_index.is_some();
         if has_files {
@@ -687,7 +722,7 @@ impl OnboardFlash {
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::cast_sign_loss)]
-    pub fn is_too_full_for_to_start_new_audio_recordings(
+    pub fn is_too_full_to_start_new_audio_recordings(
         &self,
         recording_type: &AudioRecordingType,
     ) -> bool {
@@ -1165,6 +1200,7 @@ impl OnboardFlash {
         user_bytes_length: usize,
         block_index: Option<BlockIndex>,
         page_index: Option<PageIndex>,
+        recording_file_type: RecordingFileType,
     ) -> Result<(), &str> {
         self.append_file_bytes(
             bytes,
@@ -1173,6 +1209,7 @@ impl OnboardFlash {
             block_index,
             page_index,
             false,
+            recording_file_type,
         )
     }
 
@@ -1182,6 +1219,7 @@ impl OnboardFlash {
         user_bytes_length: usize,
         block_index: Option<BlockIndex>,
         page_index: Option<PageIndex>,
+        recording_file_type: RecordingFileType,
     ) -> Result<(), &str> {
         self.append_file_bytes(
             bytes,
@@ -1190,9 +1228,11 @@ impl OnboardFlash {
             block_index,
             page_index,
             false,
+            recording_file_type,
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn append_file_bytes(
         &mut self,
         bytes: &mut [u8],
@@ -1201,6 +1241,7 @@ impl OnboardFlash {
         block_index: Option<BlockIndex>,
         page_index: Option<PageIndex>,
         extended_write: bool,
+        recording_file_type: RecordingFileType,
     ) -> Result<(), &str> {
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
@@ -1241,6 +1282,42 @@ impl OnboardFlash {
                 LittleEndian::write_u16(space, user_bytes_length as u16);
             }
             // TODO Write user detected bad blocks into user-metadata section?
+            let recording_type_bits = match recording_file_type {
+                RecordingFileType::Cptv(RecordingFileTypeDetails {
+                    user_requested,
+                    status,
+                }) => {
+                    if user_requested {
+                        0b110
+                    } else if status {
+                        0b101
+                    } else {
+                        0b100
+                    }
+                }
+                RecordingFileType::Audio(RecordingFileTypeDetails {
+                    user_requested,
+                    status,
+                }) =>
+                {
+                    #[allow(clippy::bool_to_int_with_if)]
+                    if user_requested {
+                        0b010
+                    } else if status {
+                        0b001
+                    } else {
+                        0b000
+                    }
+                }
+                RecordingFileType::Other => {
+                    // Do nothing for regular config or whatever files.
+                    0xff
+                }
+            };
+            // Write this twice.
+            user_metadata_bytes[4] = recording_type_bits;
+            user_metadata_bytes[5] = recording_type_bits;
+
             {
                 let space = &mut user_metadata_bytes[6..=7];
                 #[allow(clippy::cast_possible_truncation)]

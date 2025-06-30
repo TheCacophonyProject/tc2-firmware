@@ -389,12 +389,23 @@ impl DeviceConfig {
         &self.config_inner
     }
 
+    pub fn is_audio_device(&self) -> bool {
+        self.config_inner.is_audio_device()
+    }
+
     pub fn audio_seed(&self) -> u32 {
         self.config_inner.audio_seed
     }
 
     pub fn audio_mode(&self) -> AudioMode {
         self.config_inner.audio_mode
+    }
+
+    pub fn records_audio_and_thermal(&self) -> bool {
+        matches!(
+            self.audio_mode(),
+            AudioMode::AudioAndThermal | AudioMode::AudioOrThermal
+        )
     }
 
     pub fn device_name(&self) -> &str {
@@ -440,13 +451,28 @@ impl DeviceConfig {
         date_time_utc.hour() > sunrise.hour() && date_time_utc.hour() < sunset.hour()
     }
 
-    pub fn time_is_in_recording_window(
+    fn time_is_in_recording_window(
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
         window: Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
     ) -> bool {
         self.config_inner
             .time_is_in_recording_window(date_time_utc, window)
+    }
+
+    pub fn time_is_in_configured_recording_window(
+        &self,
+        date_time_utc: &chrono::DateTime<Utc>,
+    ) -> bool {
+        self.time_is_in_recording_window(date_time_utc, None)
+    }
+
+    pub fn time_is_in_supplied_recording_window(
+        &self,
+        date_time_utc: &chrono::DateTime<Utc>,
+        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+    ) -> bool {
+        self.time_is_in_recording_window(date_time_utc, Some(window))
     }
 }
 

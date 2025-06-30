@@ -5,7 +5,7 @@ use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_HEIGHT_U32, FRAME_WIDTH, FRAME_WIDTH_U32};
 use crate::device_config::DeviceConfig;
 use crate::lepton_telemetry::Telemetry;
-use crate::onboard_flash::{BlockIndex, OnboardFlash};
+use crate::onboard_flash::{BlockIndex, OnboardFlash, RecordingFileType};
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
 use core::ops::{Index, IndexMut};
@@ -430,7 +430,12 @@ impl<'a> CptvStream<'a> {
 
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub fn push_byte(&mut self, byte: u8, fs: &mut OnboardFlash) {
+    pub fn push_byte(
+        &mut self,
+        byte: u8,
+        fs: &mut OnboardFlash,
+        recording_file_type: RecordingFileType,
+    ) {
         self.total_uncompressed += 1;
         self.crc_val ^= 0xffff_ffff;
         self.crc_val = self.crc_table[((self.crc_val ^ u32::from(byte)) & 0xff) as usize]
@@ -440,9 +445,8 @@ impl<'a> CptvStream<'a> {
         self.cursor
             .write_bits(u32::from(entry.code), u32::from(entry.bits));
 
-        // FIXME: Are we inlining the call to append_file_bytes?
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = fs.append_recording_bytes(to_flush, num_bytes, None, None);
+            _ = fs.append_recording_bytes(to_flush, num_bytes, None, None, recording_file_type);
             self.cursor.flush_residual_bits();
         }
     }
@@ -452,7 +456,12 @@ impl<'a> CptvStream<'a> {
     /// of a 'dynamic' gzip block, with pre-calculated huffman tables describing only literals
     /// (not match lengths or distances).  This will always be smaller than our page size of 2048 bytes
     /// so there's no need to check if we need to flush out to flash memory.
-    pub fn init_gzip_stream(&mut self, fs: &mut OnboardFlash, at_header_location: bool) {
+    pub fn init_gzip_stream(
+        &mut self,
+        fs: &mut OnboardFlash,
+        at_header_location: bool,
+        recording_file_type: RecordingFileType,
+    ) {
         self.crc_val = 0;
         self.total_uncompressed = 0;
 
@@ -469,7 +478,13 @@ impl<'a> CptvStream<'a> {
         {
             self.cursor.write_byte(*byte);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+                _ = fs.append_recording_bytes(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    recording_file_type,
+                );
                 self.cursor.flush_residual_bits();
             }
         }
@@ -478,7 +493,13 @@ impl<'a> CptvStream<'a> {
             5,
         );
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            _ = fs.append_recording_bytes(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                recording_file_type,
+            );
             self.cursor.flush_residual_bits();
         }
     }
@@ -494,6 +515,7 @@ impl<'a> CptvStream<'a> {
         prev_frame: &mut [u16],
         frame_telemetry: &Telemetry,
         fs: &mut OnboardFlash,
+        recording_file_type: RecordingFileType,
     ) {
         let (min_value, max_value, initial_px) = delta_encode_frame_data(prev_frame, current_frame);
         let delta_encoded_frame = prev_frame;
@@ -559,23 +581,28 @@ impl<'a> CptvStream<'a> {
             .skip(1);
         // NOTE: Here we can insert the i32 start pixel at the beginning of each frame.
         for byte in frame_header_iter.chain(initial_px.to_le_bytes()) {
-            self.push_byte(byte, fs);
+            self.push_byte(byte, fs, recording_file_type);
         }
         if bits_per_pixel == 16 {
             for px in snake_iter {
                 for byte in px.to_be_bytes() {
-                    self.push_byte(byte, fs);
+                    self.push_byte(byte, fs, recording_file_type);
                 }
             }
         } else {
             for &px in snake_iter {
-                self.push_byte(px as u8, fs);
+                self.push_byte(px as u8, fs, recording_file_type);
             }
         }
         self.num_frames += 1;
     }
 
-    fn write_gzip_trailer(&mut self, fs: &mut OnboardFlash, at_header_location: bool) {
+    fn write_gzip_trailer(
+        &mut self,
+        fs: &mut OnboardFlash,
+        at_header_location: bool,
+        recording_file_type: RecordingFileType,
+    ) {
         let (block_index, page_index) = if at_header_location {
             (Some(self.starting_block_index), Some(0))
         } else {
@@ -587,7 +614,13 @@ impl<'a> CptvStream<'a> {
         self.cursor
             .write_bits(u32::from(entry.code), u32::from(entry.bits));
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            _ = fs.append_recording_bytes(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                recording_file_type,
+            );
             self.cursor.flush_residual_bits();
         }
 
@@ -595,7 +628,13 @@ impl<'a> CptvStream<'a> {
         let needs_flush = self.cursor.end_aligned();
         if needs_flush {
             let (to_flush, num_bytes) = self.cursor.flush();
-            _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            _ = fs.append_recording_bytes(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                recording_file_type,
+            );
             self.cursor.flush_residual_bits();
         }
 
@@ -605,7 +644,13 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                let _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+                let _ = fs.append_recording_bytes(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    recording_file_type,
+                );
                 self.cursor.flush_residual_bits();
             }
         }
@@ -614,7 +659,13 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                let _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+                let _ = fs.append_recording_bytes(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    recording_file_type,
+                );
                 self.cursor.flush_residual_bits();
             }
         }
@@ -623,10 +674,22 @@ impl<'a> CptvStream<'a> {
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
         if at_header_location {
-            let _ = fs.append_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            let _ = fs.append_recording_bytes(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                recording_file_type,
+            );
         } else {
             // Write the last part of the file
-            let _ = fs.append_last_recording_bytes(to_flush, num_bytes, block_index, page_index);
+            let _ = fs.append_last_recording_bytes(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                recording_file_type,
+            );
         }
     }
 
@@ -634,17 +697,17 @@ impl<'a> CptvStream<'a> {
     /// will be prepended to the main data stream when transferred out to the raspberry pi.  These
     /// two gzip 'members' or self-contained gip streams when concatenated are themselves a valid
     /// gzip stream, and therefore make up a valid CPTV file.
-    pub fn finalise(&mut self, fs: &mut OnboardFlash) {
+    pub fn finalise(&mut self, fs: &mut OnboardFlash, recording_file_type: RecordingFileType) {
         // Write out the gzip trailer for the main data - the CPTV frames.
-        self.write_gzip_trailer(fs, false);
+        self.write_gzip_trailer(fs, false, recording_file_type);
 
         // Now write the CPTV header into the first page of the starting block as a separate gzip member,
         // now that we know the total frame count for the recording, and the min/max pixel values.
-        self.init_gzip_stream(fs, true);
+        self.init_gzip_stream(fs, true, recording_file_type);
         for byte in push_header_iterator(&self.cptv_header.clone()) {
-            self.push_byte(byte, fs);
+            self.push_byte(byte, fs, recording_file_type);
         }
-        self.write_gzip_trailer(fs, true);
+        self.write_gzip_trailer(fs, true, recording_file_type);
     }
 }
 

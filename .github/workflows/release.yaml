@@ -21,7 +21,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: 1.86.0 # If changing this also change the `rust-toolchain.toml`
+          toolchain: 1.88.0 # If changing this also change the `rust-toolchain.toml`
           override: true
           components: rustfmt, clippy
 
