@@ -65,14 +65,33 @@ impl From<u8> for CameraState {
     }
 }
 
-#[derive(Format)]
+#[derive(Format, Copy, Clone)]
 pub struct RecordingTypeDetail {
     user_requested: bool,
     thermal_requested: bool,
     duration_seconds: usize,
 }
 
-#[derive(Format)]
+#[derive(Format, Copy, Clone)]
+pub enum RecordingMode {
+    Audio(AudioRecordingType),
+    Thermal,
+}
+
+impl RecordingMode {
+    pub fn record_audio(&self) -> bool {
+        match self {
+            RecordingMode::Audio(_) => true,
+            RecordingMode::Thermal => false,
+        }
+    }
+
+    pub fn record_thermal(&self) -> bool {
+        !self.record_audio()
+    }
+}
+
+#[derive(Format, Copy, Clone)]
 pub enum AudioRecordingType {
     Test(RecordingTypeDetail),
     Long(RecordingTypeDetail),
@@ -424,12 +443,44 @@ impl SharedI2C {
         }
     }
 
+    fn set_offload_flag(&mut self, delay: &mut Delay, is_recording: bool) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(mut state) => {
+                if is_recording {
+                    state |= tc2_agent_state::OFFLOAD;
+                } else {
+                    state &= !tc2_agent_state::OFFLOAD;
+                }
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
+                    Ok(()) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(x) => Err(x),
+        }
+    }
+
     pub fn started_recording(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.set_recording_flag(delay, true)
     }
 
     pub fn stopped_recording(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.set_recording_flag(delay, false)
+    }
+
+    pub fn begin_offload(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.set_offload_flag(delay, true)
+    }
+
+    pub fn end_offload(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        self.set_offload_flag(delay, false)
+    }
+
+    pub fn offload_flag_is_set(&mut self, delay: &mut Delay) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => Ok((state & tc2_agent_state::OFFLOAD) == tc2_agent_state::OFFLOAD),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {
@@ -534,6 +585,22 @@ impl SharedI2C {
 
     pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::TEST_AUDIO_RECORDING, false)
+    }
+
+    pub fn tc2_agent_clear_mode_flags(&mut self, delay: &mut Delay) -> Result<(), Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
+            Ok(state) => {
+                let mut val = state & !tc2_agent_state::LONG_AUDIO_RECORDING;
+                val &= !tc2_agent_state::TEST_AUDIO_RECORDING;
+                val &= !tc2_agent_state::THERMAL_MODE;
+                val &= !tc2_agent_state::TAKE_AUDIO;
+                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
+                    Ok(()) => Ok(()),
+                    Err(x) => Err(x),
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn tc2_agent_write_flag(

@@ -1,4 +1,4 @@
-use crate::attiny_rtc_i2c::{AudioRecordingType, SharedI2C, tc2_agent_state};
+use crate::attiny_rtc_i2c::{AudioRecordingType, RecordingMode, SharedI2C, tc2_agent_state};
 use crate::audio_task::{
     AlarmMode, MAX_GAP_MIN, check_alarm_still_valid_with_thermal_window, schedule_audio_rec,
 };
@@ -12,9 +12,10 @@ use crate::onboard_flash::OnboardFlash;
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    offload_all_recordings_and_events,
+    offload_all_recordings_and_events, offload_latest_recording,
 };
 use crate::synced_date_time::SyncedDateTime;
+use crate::utils::restart;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use cortex_m::delay::Delay;
 use defmt::{error, info, panic, warn};
@@ -22,45 +23,107 @@ use fugit::HertzU32;
 use rp2040_hal::pac::DMA;
 use rp2040_hal::{Timer, Watchdog};
 
-pub fn should_record_audio(
+pub fn current_recording_mode(
     config: &DeviceConfig,
     i2c: &mut SharedI2C,
     delay: &mut Delay,
     time: &SyncedDateTime,
-) -> bool {
-    let mut wants_to_record_audio_now: bool = config.is_audio_device();
+) -> RecordingMode {
+    let mut is_audio_device = config.is_audio_device();
+    let mut is_audio_only_device = config.audio_mode() == AudioMode::AudioOnly;
     if let Ok(audio_only) = i2c.check_if_is_audio_device(delay) {
         info!("EEPROM audio device: {}", audio_only);
-        wants_to_record_audio_now = wants_to_record_audio_now || audio_only;
+        is_audio_only_device = audio_only;
+        is_audio_device = is_audio_device || audio_only;
     }
-    if wants_to_record_audio_now {
-        // FIXME: If we have actual audio only devices as set by eeprom, it doesn't seem like the
-        //  device config should be able to override that.
-        if config.records_audio_and_thermal() {
-            if let Ok(state) = i2c.tc2_agent_state(delay) {
-                if (state & (tc2_agent_state::THERMAL_MODE)) != 0 {
-                    let _ = i2c.tc2_agent_clear_thermal_mode(delay);
-                    info!("Audio request thermal mode");
-                    // audio mode wants to go in thermal mode
-                    wants_to_record_audio_now = false;
-                } else {
-                    let in_window =
-                        config.time_is_in_configured_recording_window(&time.get_date_time());
-                    if in_window {
-                        wants_to_record_audio_now = (state
-                            & (tc2_agent_state::LONG_AUDIO_RECORDING
-                                | tc2_agent_state::TAKE_AUDIO
-                                | tc2_agent_state::TEST_AUDIO_RECORDING))
-                            != 0;
-                        if wants_to_record_audio_now {
-                            info!("Will record audio because thermal requested or test rec");
-                        }
-                    }
-                }
+    let state = i2c.tc2_agent_state(delay).unwrap_or(0);
+    let audio_mode_requested_thermal = state & (tc2_agent_state::THERMAL_MODE) != 0;
+    let long_audio_recording = state & (tc2_agent_state::LONG_AUDIO_RECORDING) != 0;
+    let test_audio_recording = state & (tc2_agent_state::TEST_AUDIO_RECORDING) != 0;
+    let regular_scheduled_audio_recording = state & (tc2_agent_state::TAKE_AUDIO) != 0;
+    // All of these flags *should* be mutually exclusive:
+    if audio_mode_requested_thermal
+        && (long_audio_recording || test_audio_recording || regular_scheduled_audio_recording)
+    {
+        error!(
+            "Mixed recording flags: audio_mode_requested_thermal: {}, long_audio_recording: {}, test_audio_recording: {}, regular_scheduled_audio_recording: {}",
+            audio_mode_requested_thermal,
+            long_audio_recording,
+            test_audio_recording,
+            regular_scheduled_audio_recording
+        );
+    } else if long_audio_recording
+        && (audio_mode_requested_thermal
+            || test_audio_recording
+            || regular_scheduled_audio_recording)
+    {
+        error!(
+            "Mixed recording flags: audio_mode_requested_thermal: {}, long_audio_recording: {}, test_audio_recording: {}, regular_scheduled_audio_recording: {}",
+            audio_mode_requested_thermal,
+            long_audio_recording,
+            test_audio_recording,
+            regular_scheduled_audio_recording
+        );
+    } else if test_audio_recording
+        && (long_audio_recording
+            || audio_mode_requested_thermal
+            || regular_scheduled_audio_recording)
+    {
+        error!(
+            "Mixed recording flags: audio_mode_requested_thermal: {}, long_audio_recording: {}, test_audio_recording: {}, regular_scheduled_audio_recording: {}",
+            audio_mode_requested_thermal,
+            long_audio_recording,
+            test_audio_recording,
+            regular_scheduled_audio_recording
+        );
+    } else if regular_scheduled_audio_recording
+        && (long_audio_recording || test_audio_recording || audio_mode_requested_thermal)
+    {
+        error!(
+            "Mixed recording flags: audio_mode_requested_thermal: {}, long_audio_recording: {}, test_audio_recording: {}, regular_scheduled_audio_recording: {}",
+            audio_mode_requested_thermal,
+            long_audio_recording,
+            test_audio_recording,
+            regular_scheduled_audio_recording
+        );
+    }
+
+    if i2c.tc2_agent_clear_mode_flags(delay).is_err() {
+        error!("Failed to clear recording mode flags");
+    }
+    if is_audio_only_device {
+        if long_audio_recording {
+            RecordingMode::Audio(AudioRecordingType::long_recording())
+        } else if test_audio_recording {
+            RecordingMode::Audio(AudioRecordingType::test_recording())
+        } else {
+            RecordingMode::Audio(AudioRecordingType::scheduled_recording())
+        }
+    } else if is_audio_device {
+        if audio_mode_requested_thermal {
+            info!("Audio request thermal mode");
+            // audio mode wants to go in thermal mode
+            RecordingMode::Thermal
+        } else {
+            // NOTE: Audio only gets scheduled in the thermal window if we're configured
+            //  as `AudioMode::AudioAndThermal`, we promise.
+
+            if long_audio_recording {
+                info!("Will record audio because long test requested");
+                RecordingMode::Audio(AudioRecordingType::long_recording())
+            } else if test_audio_recording {
+                info!("Will record audio because test requested");
+                RecordingMode::Audio(AudioRecordingType::test_recording())
+            } else if config.time_is_in_configured_recording_window(&time.get_date_time()) {
+                info!("Will record audio because thermal requested");
+                RecordingMode::Audio(AudioRecordingType::thermal_scheduled_recording())
+            } else {
+                RecordingMode::Audio(AudioRecordingType::scheduled_recording())
             }
         }
+    } else {
+        RecordingMode::Thermal
     }
-    wants_to_record_audio_now
 }
 
 pub fn get_device_config(
@@ -83,7 +146,7 @@ pub fn get_device_config(
 
     // FIXME: This should become "config startup handshake", and we have another
     //  camera config handshake later on when the lepton has actually initialised or whatever.
-    let (device_config, device_config_was_updated, prefer_not_to_offload_files) =
+    let (device_config, device_config_was_updated, prioritise_frame_preview) =
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             fs,
             pi_spi,
@@ -93,7 +156,7 @@ pub fn get_device_config(
             device_config,
         );
     match device_config {
-        Some(device_config) => (device_config, prefer_not_to_offload_files),
+        Some(device_config) => (device_config, prioritise_frame_preview),
         None => {
             panic!("Couldn't get config");
         }
@@ -135,72 +198,70 @@ pub fn get_next_audio_alarm(
 ) -> Option<DateTime<Utc>> {
     // FIXME: Shouldn't this have already happened on startup?
     let mut next_audio_alarm = None;
-    match config.audio_mode() {
-        AudioMode::AudioOrThermal | AudioMode::AudioAndThermal => {
-            let (alarm_mode, audio_alarm) = get_audio_alarm(fs);
-            let mut schedule_alarm = true;
-            // if audio alarm is set check it's within 60 minutes and before or on thermal window start
-            if let Some(audio_alarm) = audio_alarm {
-                match alarm_mode {
-                    Ok(alarm_mode) => {
-                        // FIXME: Document what the AlarmModes mean
-                        if alarm_mode == AlarmMode::Audio {
-                            let synced = time.get_date_time();
-                            let until_alarm = (audio_alarm - synced).num_minutes();
-                            // FIXME: This doesn't seem to handle alarms in the past?
-                            if until_alarm <= i64::from(MAX_GAP_MIN) {
-                                info!(
-                                    "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                                    audio_alarm.year(),
-                                    audio_alarm.month(),
-                                    audio_alarm.day(),
-                                    audio_alarm.hour(),
-                                    audio_alarm.minute()
-                                );
-                                if check_alarm_still_valid_with_thermal_window(
-                                    &audio_alarm,
-                                    &synced,
-                                    config,
-                                ) {
-                                    next_audio_alarm = Some(audio_alarm);
-                                    schedule_alarm = false;
-                                } else {
-                                    schedule_alarm = true;
-                                    // if window time changed and alarm is after rec window start
-                                    info!("Rescheduling as alarm is after window start");
-                                }
+    if config.records_audio_and_thermal() {
+        let (alarm_mode, audio_alarm) = get_audio_alarm(fs);
+        let mut schedule_alarm = true;
+        // if audio alarm is set check it's within 60 minutes and before or on thermal window start
+        if let Some(audio_alarm) = audio_alarm {
+            match alarm_mode {
+                Ok(alarm_mode) => {
+                    // FIXME: Document what the AlarmModes mean
+                    if alarm_mode == AlarmMode::Audio {
+                        let synced = time.get_date_time();
+                        let until_alarm = (audio_alarm - synced).num_minutes();
+                        // FIXME: This doesn't seem to handle alarms in the past?
+                        if until_alarm <= i64::from(MAX_GAP_MIN) {
+                            info!(
+                                "Audio alarm already scheduled for {}-{}-{} {}:{}",
+                                audio_alarm.year(),
+                                audio_alarm.month(),
+                                audio_alarm.day(),
+                                audio_alarm.hour(),
+                                audio_alarm.minute()
+                            );
+                            if check_alarm_still_valid_with_thermal_window(
+                                &audio_alarm,
+                                &synced,
+                                config,
+                            ) {
+                                next_audio_alarm = Some(audio_alarm);
+                                schedule_alarm = false;
                             } else {
-                                info!("Alarm is missed");
+                                schedule_alarm = true;
+                                // if window time changed and alarm is after rec window start
+                                info!("Rescheduling as alarm is after window start");
                             }
+                        } else {
+                            info!("Alarm is missed");
                         }
                     }
-                    Err(reason) => {
-                        error!("{}", reason);
-                    }
                 }
-            }
-            if schedule_alarm {
-                // Reschedule a new alarm
-                if let Ok(next_alarm) = schedule_audio_rec(delay, time, i2c, fs, events, config) {
-                    next_audio_alarm = Some(next_alarm);
-                    info!("Setting a pending audio alarm");
-                } else {
-                    error!("Couldn't schedule alarm");
+                Err(reason) => {
+                    error!("{}", reason);
                 }
             }
         }
-        _ => {
-            info!("Clearing audio alarm");
-            clear_audio_alarm(fs);
+        if schedule_alarm {
+            // Reschedule a new alarm
+            if let Ok(next_alarm) = schedule_audio_rec(delay, time, i2c, fs, events, config) {
+                next_audio_alarm = Some(next_alarm);
+                info!("Setting a pending audio alarm");
+            } else {
+                error!("Couldn't schedule alarm");
+            }
         }
+    } else {
+        info!("Clearing audio alarm");
+        clear_audio_alarm(fs);
     }
+
     next_audio_alarm
 }
 
 #[allow(clippy::too_many_lines)]
 pub fn maybe_offload_files_and_events_on_startup(
-    recording_mode: &str,
-    prefer_not_to_offload_files_now: bool,
+    recording_mode: RecordingMode,
+    prioritise_frame_preview: bool,
     fs: &mut OnboardFlash,
     config: &DeviceConfig,
     time: &SyncedDateTime,
@@ -211,124 +272,134 @@ pub fn maybe_offload_files_and_events_on_startup(
     pi_spi: &mut ExtSpiTransfers,
     delay: &mut Delay,
     watchdog: &mut Watchdog,
-) -> bool {
+) {
     let has_files_to_offload = fs.has_recordings_to_offload();
-    if has_files_to_offload {
-        info!("Finished scan, has files to offload");
-    }
+    let has_events_to_offload = events.has_events_to_offload();
+    let last_recording_was_user_requested = fs.last_recording_was_user_requested();
+    let rpi_is_awake = i2c.pi_is_waking_or_awake(delay).unwrap_or(false)
+        && i2c.tc2_agent_is_ready(delay, false, None).unwrap_or(false);
+    let is_inside_thermal_recording_window =
+        config.time_is_in_configured_recording_window(&time.get_date_time());
+    let is_outside_thermal_recording_window = !is_inside_thermal_recording_window;
+    let records_audio = config.audio_mode() != AudioMode::Disabled;
+    let is_too_full_to_record_in_current_mode = match recording_mode {
+        RecordingMode::Audio(mode) => fs.is_too_full_to_start_new_audio_recordings(&mode),
+        RecordingMode::Thermal => fs.is_too_full_to_start_new_cptv_recordings(),
+    };
+    let is_old_file_system = fs.file_start_block_index.is_none();
+    let mut offload_wake_reason = WakeReason::Unknown;
+    let mut should_offload = false;
 
-    if events.has_events_to_offload() {
+    if has_files_to_offload {
+        info!("Onboard flash has files to offload");
+    }
+    if has_events_to_offload {
         info!("There are {} event(s) to offload", events.count());
     }
+    if last_recording_was_user_requested {
+        if !rpi_is_awake {
+            warn!("Last recording was user requested, but rPi is somehow not awake");
+        }
+        info!("Last recording was user requested, offload immediately");
+    }
 
-    // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
-    //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
-    //  Otherwise, if the rp2040 happens to restart, we'll pretty much
-    //  always start the pi up, which we don't want.
+    // Also
+    // fs.last_recording_was_status()
+    let end_of_thermal_window = fs.last_recorded_file_is_cptv()
+        && !last_recording_was_user_requested
+        && is_outside_thermal_recording_window;
 
-    let should_offload = (has_files_to_offload
-        && !config.time_is_in_configured_recording_window(&time.get_date_time()))
-        || fs.is_too_full_to_start_new_cptv_recordings()
-        || (has_files_to_offload && fs.file_start_block_index.is_none());
-    // means old file system offload once
-
-    if should_offload {
-        events.log(Event::ToldRpiToWake(WakeReason::ThermalOffload), time, fs);
+    if end_of_thermal_window {
+        should_offload = true;
+        if recording_mode.record_thermal() {
+            offload_wake_reason = WakeReason::ThermalOffload;
+        } else {
+            offload_wake_reason = WakeReason::AudioThermalEnded;
+        }
+    }
+    if is_too_full_to_record_in_current_mode {
+        should_offload = true;
+        if recording_mode.record_thermal() {
+            offload_wake_reason = WakeReason::ThermalTooFull;
+        } else {
+            offload_wake_reason = WakeReason::AudioTooFull;
+        }
+    }
+    if is_old_file_system {
+        should_offload = true;
+        offload_wake_reason = WakeReason::Unknown;
+    }
+    if events.is_nearly_full() {
+        should_offload = true;
+        offload_wake_reason = WakeReason::EventsTooFull;
+    }
+    if last_recording_was_user_requested {
+        should_offload = true;
+        offload_wake_reason = WakeReason::OffloadTestRecording;
+    }
+    if rpi_is_awake && recording_mode.record_audio() {
+        // Opportunistically offload recordings anyway,
+        // since the rpi is on (maybe in high power mode)
+        should_offload = true;
     }
     let should_offload = if !should_offload && has_files_to_offload {
+        offload_wake_reason = WakeReason::ThermalOffloadAfter24Hours;
         duration_since_prev_offload_greater_than_24hrs(events, fs, time)
     } else {
         should_offload
     };
 
-    ////////
-    // Happened in thermal branch
-    if !config.use_low_power_mode() {
-        // TODO: Do we want to do this in both branches, assuming the pi is awake?
+    // Regardless of whether we need forced offload, try to honour `prioritise_frame_preview`.
+    // If the rpi is awake, offload unless it would prefer us not to.
+    if should_offload {
+        // NOTE: We'll only wake the pi if we have files to offload, and it is *outside* the recording
+        //  window, or the previous offload happened more than 24 hours ago, or the flash is nearly full.
+        //  Otherwise, if the rp2040 happens to restart, we'll pretty much
+        //  always start the pi up, which we don't want.
+        if recording_mode.record_thermal() && config.use_high_power_mode() {
+            offload_wake_reason = WakeReason::ThermalHighPower;
+        }
         if wake_raspberry_pi(i2c, delay) {
-            events.log(Event::ToldRpiToWake(WakeReason::ThermalHighPower), time, fs);
+            events.log(Event::ToldRpiToWake(offload_wake_reason), time, fs);
         }
-        maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
-    }
-
-    /////////
-
-    // FIXME: This should all happen in main startup
-    let did_offload_files = if should_offload {
-        offload_all_recordings_and_events(
-            fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
-        )
-    } else {
-        false
-    };
-
-    //////
-    // From audio startup
-    // FIXME: Consolidate this logic in main
-
-    // Rather than deciding if we should wake, just decide if we should offload, and then of course
-    // we'll wake if needed.
-
-    let mut should_wake = false;
-    if config.records_audio_and_thermal()
-        && config.time_is_in_configured_recording_window(&time.get_date_time())
-    {
-        let has_cptv_files = fs.last_recorded_file_is_cptv();
-        // this means end of thermal window so should offload recordings
-        if has_cptv_files {
-            info!("Has cptv files {}", has_cptv_files);
-            should_wake = true;
-            events.log(
-                Event::ToldRpiToWake(WakeReason::AudioThermalEnded),
-                time,
-                fs,
-            );
-        }
-    }
-    if !should_wake {
-        should_wake = should_offload_audio_recordings(fs, events);
-        if should_wake {
-            events.log(
-                Event::ToldRpiToWake(WakeReason::AudioShouldOffload),
-                time,
-                fs,
-            );
+        if last_recording_was_user_requested {
+            if !offload_latest_recording(
+                fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
+            ) {
+                // Offload failed, restart and try again.
+                restart(watchdog);
+            }
+        } else if prioritise_frame_preview {
+            // Just offload the bare minimum of files to free up space, and all events if needed.
+            if events.is_nearly_full() {
+                maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
+            }
+            let mut is_too_full = is_too_full_to_record_in_current_mode;
+            while is_too_full {
+                if offload_latest_recording(
+                    fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
+                ) {
+                    is_too_full = match recording_mode {
+                        RecordingMode::Audio(mode) => {
+                            fs.is_too_full_to_start_new_audio_recordings(&mode)
+                        }
+                        RecordingMode::Thermal => fs.is_too_full_to_start_new_cptv_recordings(),
+                    };
+                } else {
+                    // Offload failed, restart and try again.
+                    restart(watchdog);
+                }
+            }
+        } else {
+            // Offload everything
+            if !offload_all_recordings_and_events(
+                fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
+            ) {
+                // Failed to offload, restart and try again
+                restart(watchdog);
+            }
         }
     }
-    //
-    // if offload(i2c, fs, pi_spi, events, should_wake, delay, time, watchdog).is_err() {
-    //     warn!("Restarting as could not offload");
-    //     restart(watchdog);
-    // }
-
-    //////
-
-    did_offload_files
-}
-
-fn should_offload_audio_recordings(fs: &mut OnboardFlash, events: &mut EventLogger) -> bool {
-    let has_files = fs.has_recordings_to_offload() || events.is_nearly_full();
-    if !has_files {
-        return false;
-    }
-    // flash getting full
-    if fs.is_too_full_to_start_new_audio_recordings(&AudioRecordingType::long_recording()) {
-        info!("Offloading as flash is nearly full");
-        return true;
-    }
-
-    // probably never happens if functioning correctly
-    if events.is_nearly_full() {
-        info!("Offloading as logger is nearly full");
-        return true;
-    }
-    if fs.file_start_block_index.is_none() {
-        //one off
-        info!("Offloading as previous file system version");
-        return true;
-    }
-
-    false
 }
 
 fn duration_since_prev_offload_greater_than_24hrs(
@@ -345,14 +416,5 @@ fn duration_since_prev_offload_greater_than_24hrs(
                     time.get_date_time() - date_time_utc
                 })
         });
-    if duration_since_prev_offload > Duration::hours(24) {
-        events.log(
-            Event::ToldRpiToWake(WakeReason::ThermalOffloadAfter24Hours),
-            time,
-            fs,
-        );
-        true
-    } else {
-        false
-    }
+    duration_since_prev_offload > Duration::hours(24)
 }

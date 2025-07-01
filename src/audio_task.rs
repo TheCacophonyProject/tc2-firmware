@@ -129,6 +129,7 @@ pub fn audio_task(
     gpio1: gpio::Pin<Gpio1, FunctionNull, PullDown>,
     mut watchdog: Watchdog,
     alarm_triggered: bool,
+    audio_recording_type: AudioRecordingType,
     config: &DeviceConfig,
     mut fs: OnboardFlash,
     mut events: EventLogger,
@@ -138,6 +139,11 @@ pub fn audio_task(
     mut delay: Delay,
 ) -> ! {
     watchdog.feed();
+
+    // FIXME: If we weren't woken by an alarm (we were woken by attiny watchdog, or by a user)
+    // Then we may not have a valid audio_recording_type...
+    // In that case, maybe we still want to record audio?
+
     let mut recording_type = None;
     if alarm_triggered {
         recording_type = Some(AudioRecordingType::scheduled_recording());
@@ -222,11 +228,11 @@ pub fn audio_task(
                 if let Err(e) =
                     i2c.tc2_agent_clear_and_set_flag(&mut delay, flag_to_clear, flag_to_set)
                 {
-                    // FIXME: Is this a fatal error?  Shouldn't we just retry until success?
                     error!("Failed to clear and set flags {}", e);
                 }
                 restart(&mut watchdog);
             } else {
+                // Schedule the next audio recording
                 i2c.clear_alarm(&mut delay);
                 reschedule = true;
                 clear_audio_alarm(&mut fs);
@@ -299,7 +305,7 @@ fn power_down_or_restart(
     // TODO: Extract into shutdown function.
 
     loop {
-        // If we're in low power mode, we don't need the rPi anymore.
+        // If we're in low-power mode, we don't need the rPi anymore.
         if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
             && logged_power_down.take().is_some()
         {
@@ -338,17 +344,13 @@ fn power_down_or_restart(
                 }
 
                 // FIXME: Should just restart and offload files here.
-
-                // may as well offload again if we are awake and have just taken a recording
                 if !pi_is_powered_down && fs.has_recordings_to_offload() {
-                    warn!("Restarting as failed to offload");
+                    warn!("Restarting to offload, since pi is powered on");
                     restart(&mut watchdog);
                 }
             }
         }
         if boot_into_thermal_mode && should_sleep {
-            // FIXME: This logic is weird
-
             // if we have done everything and PI is still on go into thermal for preview
             if let Ok(()) = i2c.tc2_agent_request_thermal_mode(&mut delay) {
                 info!("Going into thermal mode");

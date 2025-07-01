@@ -16,6 +16,11 @@ pub enum WakeReason {
     ThermalHighPower = 3,
     AudioThermalEnded = 4,
     AudioShouldOffload = 5,
+    AudioTooFull = 6,
+    ThermalTooFull = 7,
+    EventsTooFull = 8,
+    OffloadTestRecording = 9,
+    OffloadOnUserDemand = 10,
 }
 
 impl From<WakeReason> for u8 {
@@ -63,6 +68,7 @@ pub enum Event {
     OffloadedLogs,
     CorruptFile,
     LostFrames(u64),
+    FileOffloadInterruptedByUser,
 }
 
 impl From<Event> for u16 {
@@ -101,6 +107,7 @@ impl From<Event> for u16 {
             LogOffloadFailed => 29,
             CorruptFile => 30,
             LostFrames(_) => 31,
+            FileOffloadInterruptedByUser => 32,
         }
     }
 }
@@ -143,6 +150,7 @@ impl TryFrom<u16> for Event {
             29 => Ok(LogOffloadFailed),
             30 => Ok(CorruptFile),
             31 => Ok(LostFrames(0)),
+            32 => Ok(FileOffloadInterruptedByUser),
             _ => Err(()),
         }
     }

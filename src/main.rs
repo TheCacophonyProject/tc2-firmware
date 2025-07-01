@@ -27,7 +27,7 @@ mod sun_times;
 mod synced_date_time;
 mod utils;
 
-use crate::attiny_rtc_i2c::SharedI2C;
+use crate::attiny_rtc_i2c::{RecordingMode, SharedI2C};
 use crate::audio_task::audio_task;
 use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{
@@ -40,8 +40,8 @@ use crate::onboard_flash::OnboardFlash;
 use crate::onboard_flash::extend_lifetime_generic_mut;
 use crate::onboard_flash::{FLASH_SPI_TOTAL_PAYLOAD_SIZE, extend_lifetime_generic};
 use crate::startup_functions::{
-    get_device_config, get_next_audio_alarm, get_synced_time,
-    maybe_offload_files_and_events_on_startup, should_record_audio,
+    current_recording_mode, get_device_config, get_next_audio_alarm, get_synced_time,
+    maybe_offload_files_and_events_on_startup,
 };
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
@@ -94,6 +94,8 @@ fn main() -> ! {
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let mut peripherals = unsafe { Peripherals::steal() };
+
+    // TODO: Check if we can read out alarm time once it has triggered.
 
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
@@ -210,20 +212,14 @@ fn main() -> ! {
     let mut events = EventLogger::new(&mut fs);
     let time = get_synced_time(&mut i2c, &mut delay, &mut events, &mut fs, timer);
 
-    if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
-        // Unset the is_recording flag on attiny on startup if still enabled.
-        // If it was still set, that suggests a previous recording was interrupted.
-        // TODO: We can check if that is true by checking the is_last flag on the last page
-        //  written.
-        if is_recording {
-            events.log(Event::RecordingNotFinished, &time, &mut fs);
-            if let Err(e) = i2c.stopped_recording(&mut delay) {
-                error!("Error unsetting recording flag on attiny: {}", e);
-            }
-        }
+    let woken_by_alarm = i2c.alarm_triggered(&mut delay);
+    if woken_by_alarm {
+        info!("Woken by RTC alarm? {}", woken_by_alarm);
+        events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
+        i2c.clear_alarm(&mut delay);
     }
 
-    let (device_config, prefer_not_to_offload_files_now) = get_device_config(
+    let (config, prioritise_frame_preview) = get_device_config(
         &mut fs,
         &mut i2c,
         &mut delay,
@@ -233,22 +229,25 @@ fn main() -> ! {
         &mut peripherals.DMA,
     );
 
-    let woken_by_alarm = i2c.alarm_triggered(&mut delay);
-    if woken_by_alarm {
-        info!("Woken by RTC alarm? {}", woken_by_alarm);
-        events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
-        i2c.clear_alarm(&mut delay);
+    if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
+        // Unset the is_recording flag on attiny on startup if still enabled.
+        // If it was still set, that suggests a previous recording was interrupted.
+        if is_recording {
+            if config.use_low_power_mode() && fs.last_recording_is_complete() {
+                error!("Still had recording bit set, but last recording seems to be complete");
+            }
+            events.log(Event::RecordingNotFinished, &time, &mut fs);
+            if let Err(e) = i2c.stopped_recording(&mut delay) {
+                error!("Error unsetting recording flag on attiny: {}", e);
+            }
+        }
     }
 
-    let next_audio_alarm = get_next_audio_alarm(
-        &device_config,
-        &mut fs,
-        &time,
-        &mut delay,
-        &mut i2c,
-        &mut events,
-    );
-    let record_audio_now = should_record_audio(&device_config, &mut i2c, &mut delay, &time);
+    let next_audio_alarm =
+        get_next_audio_alarm(&config, &mut fs, &time, &mut delay, &mut i2c, &mut events);
+
+    // Maybe we should use the next_audio_alarm here to help figure out what state we've woken up in?
+    let recording_mode = current_recording_mode(&config, &mut i2c, &mut delay, &time);
 
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
     //  log if we can't get one
@@ -261,17 +260,15 @@ fn main() -> ! {
     // - if an audio recording is not scheduled imminently?
     // - AND the user is not interacting with the device via sidekick.
 
-    // Maybe offload files
-    // TODO: We might defer this if the user is using sidekick etc?
-    // TODO: Make offloads interruptable?
-    let recording_mode = if record_audio_now { "audio" } else { "thermal" };
-
-    // TODO: If the latest file is a test recording, at least offload the latest immediately.
-    let did_offload = maybe_offload_files_and_events_on_startup(
+    // Maybe offload files and events:
+    // Offloads can be interrupted by a user via tc2-agent, and can also be deferred as much as
+    // possible (also via tc2-agent) if there is a user interacting with side-kick, in which
+    // case we try to prioritise getting frames sent.
+    maybe_offload_files_and_events_on_startup(
         recording_mode,
-        prefer_not_to_offload_files_now,
+        prioritise_frame_preview,
         &mut fs,
-        &device_config,
+        &config,
         &time,
         &mut events,
         &mut peripherals.RESETS,
@@ -282,8 +279,19 @@ fn main() -> ! {
         &mut watchdog,
     );
 
-    // TODO: We might defer this if the user is using sidekick etc?
-    if record_audio_now {
+    let record_audio_now = if let RecordingMode::Audio(audio_recording_type) = recording_mode {
+        if prioritise_frame_preview && !audio_recording_type.is_user_requested() {
+            // We're not trying to make a test audio recording, and the user is interacting
+            // with sidekick.
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+
+    if record_audio_now && let RecordingMode::Audio(audio_recording_type) = recording_mode {
         let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
         audio_task(
             i2c,
@@ -292,7 +300,8 @@ fn main() -> ! {
             pins.gpio1,
             watchdog,
             woken_by_alarm,
-            &device_config,
+            audio_recording_type,
+            &config,
             fs,
             events,
             &time,
@@ -330,7 +339,7 @@ fn main() -> ! {
             delay,
             &clocks,
             rosc,
-            &device_config,
+            &config,
             events,
             time,
             next_audio_alarm,

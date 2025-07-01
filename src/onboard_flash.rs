@@ -695,6 +695,63 @@ impl OnboardFlash {
         has_files
     }
 
+    pub fn last_recording_was_user_requested(&mut self) -> bool {
+        if !self.has_recordings_to_offload() {
+            false
+        } else if self.last_recording_is_complete() {
+            self.current_page.is_user_requested_test_recording()
+        } else {
+            false
+        }
+    }
+
+    pub fn last_recording_was_status(&mut self) -> bool {
+        if !self.has_recordings_to_offload() {
+            false
+        } else if self.last_recording_is_complete() {
+            self.current_page.is_status_recording()
+        } else {
+            false
+        }
+    }
+
+    pub fn last_recording_is_complete(&mut self) -> bool {
+        if self.has_recordings_to_offload() {
+            let mut found_last_page = false;
+            if let Some(start_block_index) = self.file_start_block_index {
+                let mut block_index = start_block_index;
+                let mut page_index = 1;
+                loop {
+                    // read 1 as if incomplete 0 won't be writen to
+                    if self.read_page(block_index, page_index).is_ok() {
+                        self.read_page_from_cache(block_index);
+                        self.wait_for_all_ready();
+                        if self.current_page.is_last_page_for_file() {
+                            found_last_page = true;
+                            break;
+                        }
+                        if !self.current_page.page_is_used() {
+                            break;
+                        }
+                        if page_index == NUM_PAGES_PER_BLOCK - 1 {
+                            page_index = 0;
+                            block_index += 1;
+                        }
+                        if block_index == NUM_RECORDING_BLOCKS - 1 {
+                            break;
+                        }
+                    } else {
+                        error!("Failed to read block {}, page {}", block_index, page_index);
+                        break;
+                    }
+                }
+            }
+            found_last_page
+        } else {
+            true
+        }
+    }
+
     fn advance_file_cursor(&mut self, is_last: bool) {
         // If current_page < 64, increment page
         if self.current_page_index < 63 && !is_last {

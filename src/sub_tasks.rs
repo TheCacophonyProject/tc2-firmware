@@ -138,6 +138,9 @@ fn offload_recordings_and_events(
     if !only_last_file {
         maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
     }
+    if i2c.begin_offload(delay).is_err() {
+        warn!("Failed setting offload-in-progress flag");
+    }
     let mut has_file = fs.begin_offload_reverse();
 
     // do some offloading.
@@ -146,7 +149,16 @@ fn offload_recordings_and_events(
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
 
+    let mut interrupted_by_user = false;
     while has_file {
+        if let Ok(offload_flag_set) = i2c.offload_flag_is_set(delay) {
+            if !offload_flag_set {
+                // We were interrupted by the rPi,
+                interrupted_by_user = true;
+                break;
+            }
+        }
+
         let mut file_start = true;
         let mut part_count = 0;
         let mut file_ended = false;
@@ -267,12 +279,19 @@ fn offload_recordings_and_events(
         has_file = fs.begin_offload_reverse();
     }
 
+    if !interrupted_by_user && i2c.end_offload(delay).is_err() {
+        warn!("Failed un-setting offload-in-progress flag");
+    }
+
     if success {
+        if interrupted_by_user {
+            events.log(Event::FileOffloadInterruptedByUser, time, fs);
+            fs.scan();
+        }
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
-        // FIXME: If only offloading latest file we return false
         file_count != 0
     } else {
         events.log(Event::FileOffloadFailed, time, fs);
@@ -294,7 +313,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
 ) -> (Option<DeviceConfig>, bool, bool) {
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
-    let mut prefer_not_to_offload_files = false;
+    let mut prioritise_frame_preview = false;
     if let Some(free_spi) = fs.free_spi() {
         pi_spi.enable(free_spi, resets);
         LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
@@ -316,7 +335,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 let mut length_used = 0;
                 if new_config.is_some() {
                     length_used = new_config.as_mut().unwrap().cursor_position;
-                    prefer_not_to_offload_files = device_config[4 + length_used] == 5;
+                    prioritise_frame_preview = device_config[4 + length_used] == 5;
                 }
 
                 let mut new_config_bytes = [0u8; 2400 + 112];
@@ -378,13 +397,13 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         config_was_updated = true;
                     }
                 }
-                (new_config, config_was_updated, prefer_not_to_offload_files)
+                (new_config, config_was_updated, prioritise_frame_preview)
             } else {
                 warn!("Pi did not respond");
                 (
                     existing_config,
                     config_was_updated,
-                    prefer_not_to_offload_files,
+                    prioritise_frame_preview,
                 )
             };
             if let Some(spi_free) = pi_spi.disable() {
@@ -398,7 +417,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             (
                 existing_config,
                 config_was_updated,
-                prefer_not_to_offload_files,
+                prioritise_frame_preview,
             )
         }
     } else {
@@ -413,7 +432,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
         (
             existing_config,
             config_was_updated,
-            prefer_not_to_offload_files,
+            prioritise_frame_preview,
         )
     }
 }
