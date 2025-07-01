@@ -1,6 +1,6 @@
 use crate::attiny_rtc_i2c::{AudioRecordingType, RecordingMode, SharedI2C, tc2_agent_state};
 use crate::audio_task::{
-    AlarmMode, MAX_GAP_MIN, check_alarm_still_valid_with_thermal_window, schedule_audio_rec,
+    AlarmMode, MAX_GAP_MIN, check_alarm_still_valid_with_thermal_window, schedule_next_recording,
 };
 use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig, get_datetime_utc};
@@ -243,7 +243,7 @@ pub fn get_next_audio_alarm(
         }
         if schedule_alarm {
             // Reschedule a new alarm
-            if let Ok(next_alarm) = schedule_audio_rec(delay, time, i2c, fs, events, config) {
+            if let Ok(next_alarm) = schedule_next_recording(delay, time, i2c, fs, events, config) {
                 next_audio_alarm = Some(next_alarm);
                 info!("Setting a pending audio alarm");
             } else {

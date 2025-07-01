@@ -8,7 +8,7 @@ use crate::event_logger::{
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
 use cortex_m::delay::Delay;
-use defmt::{error, info, warn};
+use defmt::{error, info};
 use rp2040_hal::gpio;
 
 use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
@@ -140,16 +140,18 @@ pub fn audio_task(
 ) -> ! {
     watchdog.feed();
 
-    // FIXME: If we weren't woken by an alarm (we were woken by attiny watchdog, or by a user)
-    // Then we may not have a valid audio_recording_type...
-    // In that case, maybe we still want to record audio?
+    // We can get here at the end of a thermal recording window, in which case,
+    // the audio task is responsible for scheduling the next thermal wakeup time as
+    // the start of the next thermal recording window. When it does this, `alarm_triggered`
+    // is `false`, and `recording_type` stays `None`.
 
-    let mut recording_type = None;
-    if alarm_triggered {
-        recording_type = Some(AudioRecordingType::scheduled_recording());
-    } else if let Ok(audio_rec) = i2c.tc2_agent_requested_audio_recording(&mut delay) {
-        recording_type = audio_rec;
-    }
+    let mut recording_type = if alarm_triggered {
+        Some(AudioRecordingType::scheduled_recording())
+    } else if audio_recording_type.is_user_requested() {
+        Some(audio_recording_type)
+    } else {
+        None
+    };
 
     let mut reschedule = false;
     let mut alarm_date_time: Option<DateTime<Utc>> = None;
@@ -254,7 +256,7 @@ pub fn audio_task(
         watchdog.feed();
         info!("Scheduling new recording");
         if let Ok(scheduled_time) =
-            schedule_audio_rec(&mut delay, time, &mut i2c, &mut fs, &mut events, config)
+            schedule_next_recording(&mut delay, time, &mut i2c, &mut fs, &mut events, config)
         {
             alarm_date_time = Some(scheduled_time);
         } else {
@@ -301,12 +303,11 @@ fn power_down_or_restart(
     let in_thermal_recording_window = config.audio_mode() == AudioMode::AudioAndThermal
         && config.time_is_in_configured_recording_window(&time.get_date_time());
 
-    // TODO: If tc2-agent is awake and ready, and we have files to offload, restart.
-    // TODO: Extract into shutdown function.
-
     loop {
+        let pi_is_powered_down = i2c.pi_is_powered_down(&mut delay, true).is_ok_and(|v| v);
         // If we're in low-power mode, we don't need the rPi anymore.
-        if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
+        if !pi_is_powered_down
+            && advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
             && logged_power_down.take().is_some()
         {
             events.log(Event::ToldRpiToSleep, time, &mut fs);
@@ -317,14 +318,13 @@ fn power_down_or_restart(
             if let Ok(pi_is_powered_down) = i2c.pi_is_powered_down(&mut delay, true) {
                 if pi_is_powered_down {
                     if let Some(alarm_time) = alarm_date_time {
-                        // FIXME: Handle negative minutes?
                         let until_alarm = (alarm_time - time.get_date_time()).num_minutes();
-
                         if until_alarm < 1 {
                             // otherwise the alarm could trigger between here and sleeping
                             should_sleep = false;
                             info!("Alarm is scheduled in {} so not sleeping", until_alarm);
                             if until_alarm <= 0 {
+                                // Alarm is in the past, so reset and try again.
                                 restart(&mut watchdog);
                             }
                             continue;
@@ -334,19 +334,12 @@ fn power_down_or_restart(
                     if !in_thermal_recording_window {
                         info!("Ask Attiny to power down rp2040");
                         events.log(Event::Rp2040Sleep, time, &mut fs);
-
                         if i2c.tell_attiny_to_power_down_rp2040(&mut delay).is_ok() {
                             info!("Sleeping");
                         } else {
                             error!("Failed sending sleep request to attiny");
                         }
                     }
-                }
-
-                // FIXME: Should just restart and offload files here.
-                if !pi_is_powered_down && fs.has_recordings_to_offload() {
-                    warn!("Restarting to offload, since pi is powered on");
-                    restart(&mut watchdog);
                 }
             }
         }
@@ -369,7 +362,7 @@ fn power_down_or_restart(
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn schedule_audio_rec(
+pub fn schedule_next_recording(
     delay: &mut Delay,
     time: &SyncedDateTime,
     i2c: &mut SharedI2C,
@@ -441,33 +434,30 @@ pub fn schedule_audio_rec(
 
     let mut alarm_mode = AlarmMode::Audio;
     let audio_mode = config.audio_mode();
-    match audio_mode {
-        AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
-            let (start, end) = config.next_or_current_recording_window(&current_time);
-            info!(
-                "Checking next alarm {}:{} for rec window start{}:{}",
-                wakeup.hour(),
-                wakeup.minute(),
-                start.hour(),
-                start.minute(),
-            );
-            if wakeup >= start {
-                if start < current_time {
-                    if let AudioMode::AudioAndThermal = audio_mode {
-                        //audio recording inside recording window
-                        info!("Scheduling audio inside thermal window");
-                    } else {
-                        info!("Already in rec window so restart now");
-                        return Err(());
-                    }
+    if config.records_audio_and_thermal() {
+        let (start, end) = config.next_or_current_recording_window(&current_time);
+        info!(
+            "Checking next alarm {}:{} for rec window start{}:{}",
+            wakeup.hour(),
+            wakeup.minute(),
+            start.hour(),
+            start.minute(),
+        );
+        if wakeup >= start {
+            if start < current_time {
+                if let AudioMode::AudioAndThermal = audio_mode {
+                    //audio recording inside recording window
+                    info!("Scheduling audio inside thermal window");
                 } else {
-                    info!("Setting wake up to be start of next rec window");
-                    wakeup = start;
-                    alarm_mode = AlarmMode::Thermal;
+                    info!("Already in rec window so restart now");
+                    return Err(());
                 }
+            } else {
+                info!("Setting wake up to be start of next thermal recording window");
+                wakeup = start;
+                alarm_mode = AlarmMode::Thermal;
             }
         }
-        _ => (),
     }
 
     if let Err(err) = i2c.enable_alarm(delay) {

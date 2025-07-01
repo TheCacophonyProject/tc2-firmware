@@ -16,6 +16,7 @@ use crate::motion_detector::{MotionTracking, track_motion};
 use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 
+use crate::frame_processing::Core0Task::LeptonReadyToSleep;
 use crate::lepton_telemetry::Telemetry;
 use crate::rpi_power::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi};
 use crate::synced_date_time::SyncedDateTime;
@@ -96,6 +97,7 @@ pub enum Core0Task {
     RequestReset = 0xea,
     HighPowerMode = 0xeb,
     ReceiveFrameWithPendingFFC = 0xac,
+    LeptonReadyToSleep = 0xbf,
 }
 #[derive(Format, PartialEq, Eq)]
 enum StatusRecording {
@@ -789,7 +791,7 @@ pub fn thermal_motion_task(
             }
             if fs_nearly_full {
                 // Request restart to offload.
-                restart(&mut sio);
+                request_restart(&mut sio);
             }
 
             if is_outside_recording_window
@@ -800,10 +802,12 @@ pub fn thermal_motion_task(
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
                     warn!("Recording window ended with files to offload, request restart");
-                    restart(&mut sio);
+                    request_restart(&mut sio);
                 }
-
-                if bk.use_high_power_mode() {
+                let pi_is_awake = i2c
+                    .pi_is_awake_and_tc2_agent_is_ready(&mut delay, false)
+                    .is_ok_and(|val| val);
+                if bk.use_high_power_mode() || pi_is_awake {
                     // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
                     if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
                         && bk.logged_told_rpi_to_sleep.take().is_some()
@@ -870,7 +874,7 @@ pub fn thermal_motion_task(
             info!("Taking audio recording");
             // make audio rec now
             if i2c.tc2_agent_take_audio_rec(&mut delay).is_ok() {
-                restart(&mut sio);
+                request_restart(&mut sio);
             }
         }
 
@@ -923,13 +927,15 @@ fn shutdown_if_possible(
                 events.log(Event::GotRpiPoweredDown, time, fs);
             }
 
-            // FIXME: I don't understand this logic
+            // FIXME: I don't understand this logic - Does the audio branch
+            //  take us into sleep if it doesn't have anything scheduled?
+            //  Does the audio branch handle scheduling the next thermal window?
             // only reboot into audio mode if pi is powered down and rp2040 is asleep
             // so we can keep the thermal preview up as long as the PI is on.
             if config.records_audio_and_thermal() {
                 // just reboot and it will go into audio branch
                 info!("Reset as thermal finished and time for audio");
-                restart(sio);
+                request_restart(sio);
             }
 
             // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
@@ -940,8 +946,7 @@ fn shutdown_if_possible(
             } else {
                 config.next_recording_window_start(&time.get_date_time())
             };
-            let enabled_alarm = i2c.enable_alarm(delay);
-            if enabled_alarm.is_err() {
+            if i2c.enable_alarm(delay).is_err() {
                 error!("Failed enabling alarm");
                 events.log(Event::RtcCommError, time, fs);
             }
@@ -957,19 +962,7 @@ fn shutdown_if_possible(
                         time,
                         fs,
                     );
-
-                    info!("Tell core1 to get ready to sleep");
-                    // Tell core1 we're exiting the recording loop, and it should
-                    // power down the lepton module, and wait for reply.
-                    sio.fifo.write(Core0Task::ReadyToSleep.into());
-                    loop {
-                        if let Some(result) = sio.fifo.read() {
-                            if result == 255 {
-                                // FIXME: Document 255
-                                break;
-                            }
-                        }
-                    }
+                    power_down_frame_acquisition(sio);
                     info!("Ask Attiny to power down rp2040");
                     events.log(Event::Rp2040Sleep, time, fs);
                     if i2c.tell_attiny_to_power_down_rp2040(delay).is_ok() {
@@ -997,6 +990,22 @@ fn shutdown_if_possible(
         "Check pi power down state took {}µs",
         (timer.get_counter() - check_power_down_state_start).to_micros()
     );
+}
+
+fn power_down_frame_acquisition(sio: &mut Sio) {
+    info!("Tell core1 to get ready to sleep");
+    // Tell core1 we're exiting the recording loop, and it should
+    // power down the lepton module, and wait for reply.
+    sio.fifo.write(Core0Task::ReadyToSleep.into());
+    loop {
+        // Wait until core1 tells us that the message was received and the lepton
+        // module has been put to sleep.
+        if let Some(result) = sio.fifo.read() {
+            if result == LeptonReadyToSleep.into() {
+                break;
+            }
+        }
+    }
 }
 
 fn should_restart_to_make_an_audio_recording(
@@ -1050,7 +1059,8 @@ fn should_restart_to_make_an_audio_recording(
     false
 }
 
-fn restart(sio: &mut Sio) {
+fn request_restart(sio: &mut Sio) {
+    power_down_frame_acquisition(sio);
     sio.fifo.write(Core0Task::RequestReset.into());
     loop {
         // Wait to be reset

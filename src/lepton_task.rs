@@ -487,7 +487,7 @@ pub fn frame_acquisition_loop(
                             info!("Powering down lepton module");
                             lepton.power_down_sequence(delay);
                             next_message = sio_fifo.read();
-                            sio_fifo.write(255);
+                            sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
                         } else if message == Core0Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
