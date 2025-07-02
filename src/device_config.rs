@@ -202,18 +202,28 @@ impl DeviceConfigInner {
         } else {
             (None, None)
         };
-        let start_offset = u32::try_from(start_offset).expect("start offset should be positive");
-        let end_offset = u32::try_from(end_offset).expect("end offset should be positive");
         let mut start_time = if is_absolute_start {
             now_utc
-                .with_time(NaiveTime::from_num_seconds_from_midnight_opt(start_offset, 0).unwrap())
+                .with_time(
+                    NaiveTime::from_num_seconds_from_midnight_opt(
+                        u32::try_from(start_offset).expect("start offset should be positive"),
+                        0,
+                    )
+                    .unwrap(),
+                )
                 .unwrap()
         } else {
             window_start.unwrap()
         };
         let mut end_time = if is_absolute_end {
             now_utc
-                .with_time(NaiveTime::from_num_seconds_from_midnight_opt(end_offset, 0).unwrap())
+                .with_time(
+                    NaiveTime::from_num_seconds_from_midnight_opt(
+                        u32::try_from(end_offset).expect("end offset should be positive"),
+                        0,
+                    )
+                    .unwrap(),
+                )
                 .unwrap()
         } else {
             window_end.unwrap()

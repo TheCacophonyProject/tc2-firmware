@@ -127,8 +127,6 @@ fn main() -> ! {
     // init flash
     // Create double buffers which are used for DMA transfers to the onboard flash module.
     // These need to live for the life of the program, so creating them here makes sense?
-    // FIXME: I guess they could also be created inside OnboardFlash, since they'll live for as long as it
-    //  does?  That would definitely feel much cleaner.
     let mut flash_page_buf = [0xffu8; FLASH_SPI_TOTAL_PAYLOAD_SIZE];
     let mut flash_page_buf_2 = [0xffu8; FLASH_SPI_TOTAL_PAYLOAD_SIZE];
     let flash_page_buf = unsafe { extend_lifetime_generic_mut(&mut flash_page_buf) };
@@ -227,6 +225,8 @@ fn main() -> ! {
         system_clock_freq,
         &mut peripherals.RESETS,
         &mut peripherals.DMA,
+        &mut watchdog,
+        events.count(),
     );
 
     if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
@@ -246,8 +246,14 @@ fn main() -> ! {
     let next_audio_alarm =
         get_next_audio_alarm(&config, &mut fs, &time, &mut delay, &mut i2c, &mut events);
 
+    // FIXME: Test audio recording doesn't work.
+    // FIXME: Pi doesn't respond to startup handshake with new config, or can't get mask regions structure.
+    // FIXME: Startup status recording doesn't end after 18 frames, keeps going.
+
     // Maybe we should use the next_audio_alarm here to help figure out what state we've woken up in?
     let recording_mode = current_recording_mode(&config, &mut i2c, &mut delay, &time);
+
+    info!("Recording mode: {:?}", recording_mode);
 
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
     //  log if we can't get one
@@ -304,6 +310,7 @@ fn main() -> ! {
             &config,
             fs,
             events,
+            pi_spi,
             &time,
             pio1,
             sm1,
@@ -360,7 +367,7 @@ pub fn thermal_code(
     delay: Delay,
     clocks: &ClocksManager,
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
-    device_config: &DeviceConfig,
+    config: &DeviceConfig,
     events: EventLogger,
     time: SyncedDateTime,
     next_audio_alarm: Option<DateTime<Utc>>,
@@ -389,7 +396,7 @@ pub fn thermal_code(
 
     watchdog.feed();
     watchdog.disable();
-
+    let is_high_power_mode = config.use_high_power_mode();
     let _ = core_1.spawn(core1_stack.take().unwrap(), move || {
         lepton_core1_task(
             lepton_pins,
@@ -399,6 +406,7 @@ pub fn thermal_code(
             &rosc,
             static_frame_buffer_a,
             static_frame_buffer_b,
+            is_high_power_mode,
         );
     });
 
@@ -411,7 +419,7 @@ pub fn thermal_code(
         onboard_flash,
         static_frame_buffer_a,
         static_frame_buffer_b,
-        device_config,
+        config,
         events,
         time,
         next_audio_alarm,
@@ -426,6 +434,7 @@ pub fn lepton_core1_task(
     rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
+    is_high_power_mode: bool,
 ) -> ! {
     // This task runs on the second core, so we need to steal the peripherals.
     // Core peripherals are per core, so we can just take our copy (but the current cortex-m API
@@ -495,5 +504,6 @@ pub fn lepton_core1_task(
         static_frame_buffer_a,
         static_frame_buffer_b,
         watchdog,
+        is_high_power_mode,
     );
 }

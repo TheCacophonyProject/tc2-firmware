@@ -6,24 +6,27 @@ use crate::bsp::pac::DMA;
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use crate::device_config::{DeviceConfig, get_datetime_utc};
+use crate::device_config::DeviceConfig;
 use crate::event_logger::{Event, EventLogger, WakeReason};
-use core::cell::RefCell;
-
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER_HEADER_LENGTH};
 use crate::lepton::FFCStatus;
 use crate::motion_detector::{MotionTracking, track_motion};
 use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
+use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use core::cell::RefCell;
 
+use crate::bsp;
 use crate::frame_processing::Core0Task::LeptonReadyToSleep;
 use crate::lepton_telemetry::Telemetry;
 use crate::rpi_power::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi};
 use crate::synced_date_time::SyncedDateTime;
 use cortex_m::asm::nop;
 use cortex_m::delay::Delay;
+use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
 use defmt::{Format, error, info, warn};
+use rp2040_hal::pac::RESETS;
 use rp2040_hal::{Sio, Timer};
 
 pub const NUM_LEPTON_SEGMENTS: usize = 4;
@@ -156,7 +159,36 @@ impl BookkeepingState {
     }
 }
 
-// FIXME: Clean up the logic around status recordings
+fn send_camera_connect_info(
+    fs: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    dma: &mut DMA,
+    resets: &mut RESETS,
+    radiometry_enabled: u32,
+    lepton_serial: u32,
+) {
+    if let Some(free_spi) = fs.free_spi() {
+        let mut payload = [0u8; 16];
+        pi_spi.enable(free_spi, resets);
+        LittleEndian::write_u32(&mut payload[0..4], radiometry_enabled);
+        LittleEndian::write_u32(&mut payload[8..12], lepton_serial);
+        LittleEndian::write_u32(&mut payload[12..16], 0); // Thermal mode
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let crc = crc_check.checksum(&payload);
+        info!("Sending camera connect info");
+        let success = pi_spi.send_message_over_spi(
+            ExtTransferMessage::CameraConnectInfo,
+            &payload,
+            crc,
+            dma,
+            resets,
+            None,
+        );
+        if let Some(spi) = pi_spi.disable() {
+            fs.take_spi(spi, resets);
+        }
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 pub fn thermal_motion_task(
@@ -180,6 +212,7 @@ pub fn thermal_motion_task(
         warn!("FIELD MODE");
     }
     let timer = time.get_timer();
+    let mut peripherals = unsafe { bsp::pac::Peripherals::steal() };
 
     // TODO: Do we want to have a max recording length timeout, or just pause recording if a
     //  subject stays in the frame but doesn't move for a while?  Maybe if a subject is stationary
@@ -189,16 +222,7 @@ pub fn thermal_motion_task(
     //  Also consider the case where we have a mask region to ignore or pay attention to.
 
     events.log(Event::ThermalMode, &time, &mut fs);
-    if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
-        if is_recording {
-            events.log(Event::RecordingNotFinished, &time, &mut fs);
-        }
-    }
-    // Unset the is_recording flag on attiny on startup
-    if let Err(e) = i2c.stopped_recording(&mut delay) {
-        error!("Error setting recording flag on attiny: {}", e);
-    }
-    let startup_date_time_utc: DateTime<Utc> = time.get_date_time();
+    let startup_date_time_utc = time.date_time();
 
     // This is the 'raw' frame buffer which can be sent to the rPi as is: it has 18 bytes
     // reserved at the beginning for a header, and 2 bytes of padding to make it align to 32bits
@@ -212,6 +236,7 @@ pub fn thermal_motion_task(
     let crc_table = make_crc_table();
 
     // Copy huffman table into ram for faster access.
+    // TODO: See if this actually affects write speed.
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
@@ -241,16 +266,16 @@ pub fn thermal_motion_task(
         ),
     );
 
-    // TODO: Send CameraConnectInfo
-    let has_cptv_files_saved = fs.has_cptv_files();
-
-    let current_recording_window = config.next_or_current_recording_window(&time.get_date_time());
-
-    info!(
-        "Has cptv files? {} has files? {}",
-        has_cptv_files_saved,
-        fs.has_recordings_to_offload()
+    send_camera_connect_info(
+        &mut fs,
+        &mut pi_spi,
+        &mut dma,
+        &mut peripherals.RESETS,
+        radiometry_enabled,
+        lepton_serial,
     );
+
+    let has_cptv_files_saved = fs.has_cptv_files();
 
     if let Some(audio_alarm) = next_audio_alarm {
         info!(
@@ -261,9 +286,18 @@ pub fn thermal_motion_task(
         );
     }
 
+    let current_recording_window = config.next_or_current_recording_window(&time.date_time());
     let mut bk = {
+        // This might be true if we woke up in thermal mode having been randomly shutdown?
+        // FIXME: If the user cancels offload, then we might think we've made a status recording
+        //  this session when we actually haven't?
+        //  Maybe we also write the current time to the metadata of written files,
+        //  then we can see when they were made?
         let made_shutdown_status_recording = !config
-            .time_is_in_supplied_recording_window(&time.get_date_time(), current_recording_window);
+            .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
+
+        // NOTE: Assume that if we have any cptv files saved we're in the active window
+        //  recording session, and therefore we've already made a startup recording in this session.
         let made_startup_status_recording = has_cptv_files_saved;
         BookkeepingState {
             audio_pending: false,
@@ -282,13 +316,21 @@ pub fn thermal_motion_task(
             logged_fs_nearly_full: Some(()),
         }
     };
+    // FIXME: Put into bk, model as state machine transitions.
+    let mut status_recording_state = if bk.made_startup_status_recording {
+        StatusRecording::NotPending
+    } else {
+        StatusRecording::StartupStatus
+    };
 
     warn!("Core 0 is ready to receive frames");
     sio.fifo.write_blocking(Core0Task::Ready.into());
-    if !config.config().use_low_power_mode {
-        sio.fifo.write_blocking(Core0Task::HighPowerMode.into());
-    }
+
+    // FIXME: If we're in high power mode, we don't do FFCs, not sure why.
+    //  I guess we'd just need to check for the recording flag before doing
+    //  any FFC?  Check what thermal-recorder does here.
     let mut cptv_stream: Option<CptvStream> = None;
+    let mut motion_detection: Option<MotionTracking> = None;
 
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
@@ -298,34 +340,28 @@ pub fn thermal_motion_task(
     let mut frames_written = 0u32;
     let mut frames_seen = 0usize;
     let max_length_in_frames = if DEV_MODE { 60 * 9 } else { 60 * 10 * 9 };
+
     let mut prev_telemetry: Option<Telemetry> = None;
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
-    let mut is_daytime = config.time_is_in_daylight(&time.get_date_time());
+    let mut is_daytime = config.time_is_in_daylight(&time.date_time());
 
     info!(
         "Current time is in recording window? {}",
-        config.time_is_in_configured_recording_window(&time.get_date_time())
+        config.time_is_in_configured_recording_window(&time.date_time())
     );
 
-    let mut motion_detection: Option<MotionTracking> = None;
-
-    // NOTE: If there are already recordings on the flash memory,
-    //  assume we've already made the startup status recording during this recording window.
-
-    let mut status_recording_state = if bk.made_startup_status_recording {
-        StatusRecording::NotPending
-    } else {
-        StatusRecording::StartupStatus
-    };
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     info!(
-        "Entering frame loop made start up? {}",
+        "Entering recording loop.  Made start up status recording: {}",
         bk.made_startup_status_recording
     );
-    loop {
+    #[allow(unused_labels)]
+    'recording_loop: loop {
         let input = sio.fifo.read_blocking();
+
+        // FIXME: Maybe a more elegant way of handling FFC in high power mode
         let needs_ffc = if input == Core0Task::ReceiveFrameWithPendingFFC.into() {
             true
         } else {
@@ -358,6 +394,9 @@ pub fn thermal_motion_task(
             cptv_stream.is_some(),
         );
 
+        // FIXME: GP: What's the logic here?  Why set the ffc imminent bits manually, wouldn't
+        //  we want to just trigger that implicitly when we trigger an actual FFC event at a safe time?
+
         // if in high power mode need to check thermal-recorder hasn't made a recording
         if needs_ffc && config.use_high_power_mode() {
             // only check status every 20 seconds
@@ -387,7 +426,7 @@ pub fn thermal_motion_task(
         }
 
         let frame_transfer_start = timer.get_counter();
-        // Transfer RAW frame to pi if it is available.
+        // Transfer RAW frame including telemetry header to pi if it is available.
         let transfer = if frame_is_valid {
             pi_spi.begin_message_pio(
                 ExtTransferMessage::CameraRawFrameTransfer,
@@ -430,7 +469,8 @@ pub fn thermal_motion_task(
             motion_detection = None;
         }
         let frame_output_stable = frames_seen >= WAIT_N_FRAMES_FOR_STABLE;
-        // NOTE: In low power mode, don't try to start recordings/motion detection until frames have stabilised.
+        // NOTE: In low power mode, don't try to start recordings/motion detection
+        //  until frames have stabilised.
         let should_record_to_flash =
             frame_output_stable && config.use_low_power_mode() && frame_is_valid;
         let past_ffc_event = !too_close_to_ffc_event;
@@ -438,6 +478,7 @@ pub fn thermal_motion_task(
         //  we get an invalid frame header?  Maybe this doesn't happen in practice?
 
         if should_record_to_flash {
+            // FIXME: Is this true?  Did we actually do this in prod?
             // just want 1 previous frame for first status
             if past_ffc_event {
                 let this_frame_motion_detection = track_motion(
@@ -457,7 +498,7 @@ pub fn thermal_motion_task(
                     && status_recording_state.is_not_pending()
                 {
                     if DEV_MODE {
-                        if time.get_date_time() + Duration::minutes(1)
+                        if time.date_time() + Duration::minutes(1)
                             > startup_date_time_utc + Duration::minutes(4)
                         {
                             warn!("Make shutdown status recording");
@@ -465,7 +506,7 @@ pub fn thermal_motion_task(
                         }
                     } else {
                         let (_, window_end) = &current_recording_window;
-                        if &(time.get_date_time() + Duration::minutes(1)) > window_end {
+                        if time.date_time() + Duration::minutes(1) > *window_end {
                             warn!("Make shutdown status recording");
                             status_recording_state = StatusRecording::ShutdownStatus;
                         }
@@ -483,10 +524,14 @@ pub fn thermal_motion_task(
                 let should_end_current_recording = if cptv_stream.is_some() {
                     let (recording_is_max_length, storage_insufficient, motion_ended) =
                         if bk.making_status_recording {
-                            (frames_written >= max_length_in_frames, fs.is_full(), false)
-                        } else {
                             (
                                 frames_written >= NUM_STATUS_RECORDING_FRAMES,
+                                fs.is_full(),
+                                false,
+                            )
+                        } else {
+                            (
+                                frames_written >= max_length_in_frames,
                                 fs.is_nearly_full_for_thermal_recordings(),
                                 this_frame_motion_detection.triggering_ended(),
                             )
@@ -504,10 +549,10 @@ pub fn thermal_motion_task(
                     // (when we do our once a minute checks) when we're *not* trying to start a recording.
                     let is_inside_recording_window = if DEV_MODE {
                         // Recording window is 5 minutes from startup time in dev mode.
-                        time.get_date_time() < startup_date_time_utc + Duration::minutes(5)
+                        time.date_time() < startup_date_time_utc + Duration::minutes(5)
                     } else {
                         config.time_is_in_supplied_recording_window(
-                            &time.get_date_time(),
+                            &time.date_time(),
                             current_recording_window,
                         )
                     };
@@ -573,6 +618,7 @@ pub fn thermal_motion_task(
                                     user_requested: false,
                                     status: bk.making_status_recording,
                                 }),
+                                &time,
                             );
                             error!(
                                 "Ending current recording start block {} end block{}",
@@ -639,8 +685,9 @@ pub fn thermal_motion_task(
         }
         let frame_transfer_end = timer.get_counter();
         if should_start_new_recording {
-            // Since we write 2 frames every new recording, this can take too long and
-            // we drop a frame so cache the current frame and tell core1 to keep getting
+            // Since we write 2 frames every new recording, this can take too long
+            // to write out to flash memory within our time budget, so we end up
+            // dropping a frame. Cache the current frame and tell core1 to keep getting
             // lepton frames, this will spread the initial load over the first 2 frames.
             warn!("Setting recording flag on attiny");
             if let Err(e) = i2c.started_recording(&mut delay) {
@@ -695,6 +742,8 @@ pub fn thermal_motion_task(
                 *buffer.borrow_ref_mut(cs) = thread_local_frame_buffer.take();
             });
             sio.fifo.write(Core0Task::StartRecording.into());
+
+            // FIXME: Satisfy myself this will actually work with dormant mode
             info!("Sent start recording message to core1");
             sio.fifo.write(Core0Task::FrameProcessingComplete.into());
 
@@ -730,92 +779,93 @@ pub fn thermal_motion_task(
             info!("Send end recording message to core0");
             sio.fifo.write(Core0Task::EndRecording.into());
         }
+        // FIXME: Are we logging dropped/skipped frames anywhere still?
 
         if frames_seen % (10 * 9) == 0 && frame_is_valid {
             info!("Got frame #{}", telemetry.frame_num);
         }
 
+        // FIXME: Check these time estimates
         let expected_rtc_sync_time_us = 4200u32; // using slower clock speed
         let not_recording_and_every_minute_interval_arrived =
             (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none();
         // INFO RTC Sync time took 1350µs
-        // NOTE: Every minute when we're not recording, we try to re-sync our time with the RTC module,
+
+        // NOTE: Every minute when we're not recording, we try to re-sync our time with the RTC,
         //  as well as checking if we need to tell the rPi to shutdown if we're in low-power mode.
-        //  We also check if the flash storage is nearly full, and if so, we request a restart to offload
-        //  files to the rPi.
+        //  We also check if the flash storage is nearly full, and if so, we request a restart to
+        //  offload files to the rPi.
         //  We also check if we need to restart to make an audio recording.
         //  If we're in low power mode and outside the recording window, we set an alarm and ask
         //  the Attiny to put us to sleep.
-        //  The reason we only do all this once per minute is because the i2c comms can take longer than
-        //  expected, and cause us to lose sync.
+        //  The reason we only do all this once per minute is because the i2c comms can take
+        //  longer than expected, and cause us to lose sync.
 
         if not_recording_and_every_minute_interval_arrived {
-            is_daytime = config.time_is_in_daylight(&time.get_date_time());
+            is_daytime = config.time_is_in_daylight(&time.date_time());
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
-            //  since the change in frame times can affect our frame sync.  It's fine to call this repeatedly,
-            //  the RPi will shut down when it wants to.
+            //  since the change in frame times can affect our frame sync.
+            //  It's fine to call this repeatedly, the RPi will shut down when it wants to.
 
             if config.use_low_power_mode() {
-                // Once per minute, if we're not currently recording, tell the RPi it can shut down, as it's not
-                // needed in low-power mode unless it's offloading/uploading CPTV data.
+                // Once per minute, if we're not currently recording,
+                // tell the RPi it can shut down, as it's not needed in
+                // low-power mode unless it's sending preview frames.
+
+                // FIXME: Keeps tabs on if pi is still awake so that we can not do this i2c
+                //  call if it's already asleep
                 if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
                     && bk.logged_told_rpi_to_sleep.take().is_some()
                 {
                     events.log(Event::ToldRpiToSleep, &time, &mut fs);
                 }
             }
-            match i2c.get_datetime(&mut delay) {
-                Ok(now) => time.set(get_datetime_utc(now)),
-                Err(err_str) => {
-                    events.log(Event::RtcCommError, &time, &mut fs);
-                    error!("Unable to get DateTime from RTC: {}", err_str);
-                }
-            }
+            time.resync_with_rtc(&mut i2c, &mut delay, &mut events, &mut fs);
 
-            // NOTE: In continuous recording mode, the device will only shut down briefly when the flash storage
-            //  is nearly full, and it needs to offload files.  Or, in the case of non-low-power-mode, it will
-            //  never shut down.
+            // NOTE: In continuous recording mode, the device will only shut down briefly
+            //  when the flash storage is nearly full, and it needs to offload files.
+            //  Or, in the case of high-power-mode, it will  never shut down.
             let is_outside_recording_window = if DEV_MODE {
                 let is_inside_recording_window =
-                    time.get_date_time() < startup_date_time_utc + Duration::minutes(5);
+                    time.date_time() < startup_date_time_utc + Duration::minutes(5);
                 !is_inside_recording_window
             } else {
-                !config.time_is_in_configured_recording_window(&time.get_date_time())
+                !config.time_is_in_configured_recording_window(&time.date_time())
             };
             let is_inside_recording_window = !is_outside_recording_window;
 
-            let fs_nearly_full = fs.is_too_full_to_start_new_cptv_recordings();
-            if fs_nearly_full && bk.logged_fs_nearly_full.take().is_some() {
-                events.log(Event::FlashStorageNearlyFull, &time, &mut fs);
-            }
-            if fs_nearly_full {
+            if fs.is_too_full_to_start_new_cptv_recordings() {
+                if bk.logged_fs_nearly_full.take().is_some() {
+                    events.log(Event::FlashStorageNearlyFull, &time, &mut fs);
+                }
                 // Request restart to offload.
-                request_restart(&mut sio);
+                warn!("Flash storage nearly full, request restart");
+                request_restart(&mut sio, &mut delay);
             }
 
             if is_outside_recording_window
                 && (bk.use_high_power_mode() || bk.made_shutdown_status_recording)
             {
                 if fs.has_recordings_to_offload() {
-                    // If flash storage is nearly full, or we're now outside the recording window,
+                    // If we're now outside the recording window,
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
                     warn!("Recording window ended with files to offload, request restart");
-                    request_restart(&mut sio);
+                    request_restart(&mut sio, &mut delay);
                 }
                 let pi_is_awake = i2c
                     .pi_is_awake_and_tc2_agent_is_ready(&mut delay, false)
                     .is_ok_and(|val| val);
-                if bk.use_high_power_mode() || pi_is_awake {
-                    // Tell rPi it is outside its recording window in *non*-low-power mode, and can go to sleep.
+                if bk.use_high_power_mode() && pi_is_awake {
+                    // Tell rPi it is outside its recording window in high-power mode, and can go to sleep.
                     if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
                         && bk.logged_told_rpi_to_sleep.take().is_some()
                     {
                         events.log(Event::ToldRpiToSleep, &time, &mut fs);
                     }
                 }
-                shutdown_if_possible(
+                shutdown_rp2040_if_possible(
                     &timer,
                     &mut i2c,
                     &time,
@@ -829,7 +879,11 @@ pub fn thermal_motion_task(
             } else if is_inside_recording_window && bk.use_high_power_mode() {
                 // This obviously blocks for a long time, if the rPi is asleep,
                 // but is essentially instant if it is already awake and ready.
-                if wake_raspberry_pi(&mut i2c, &mut delay) {
+                // Even if we send the wake signal, we'll probably get killed by
+                // the watchdog timer on the frame acquisition thread here.
+                if wake_raspberry_pi(&mut i2c, &mut delay, None) {
+                    // Not sure that we can actually get here without being restarted first
+                    // during bring-up of tc2-agent
                     events.log(
                         Event::ToldRpiToWake(WakeReason::ThermalHighPower),
                         &time,
@@ -874,7 +928,7 @@ pub fn thermal_motion_task(
             info!("Taking audio recording");
             // make audio rec now
             if i2c.tc2_agent_take_audio_rec(&mut delay).is_ok() {
-                request_restart(&mut sio);
+                request_restart(&mut sio, &mut delay);
             }
         }
 
@@ -903,12 +957,12 @@ fn advance_time_by_n_frames(
     if frames_elapsed > 100 {
         warn!("Got {} elapsed frames, ignoring", frames_elapsed);
     } else {
-        time.set(time.get_date_time() + Duration::milliseconds(115 * i64::from(frames_elapsed)));
+        time.set(time.date_time() + Duration::milliseconds(115 * i64::from(frames_elapsed)));
     }
 }
 
 // FIXME: This has similarities with the audio shutdown function, can we share logic?
-fn shutdown_if_possible(
+fn shutdown_rp2040_if_possible(
     timer: &Timer,
     i2c: &mut SharedI2C,
     time: &SyncedDateTime,
@@ -927,24 +981,23 @@ fn shutdown_if_possible(
                 events.log(Event::GotRpiPoweredDown, time, fs);
             }
 
-            // FIXME: I don't understand this logic - Does the audio branch
-            //  take us into sleep if it doesn't have anything scheduled?
-            //  Does the audio branch handle scheduling the next thermal window?
-            // only reboot into audio mode if pi is powered down and rp2040 is asleep
+            // Only reboot into audio mode if pi is powered down and rp2040 is asleep
             // so we can keep the thermal preview up as long as the PI is on.
-            if config.records_audio_and_thermal() {
-                // just reboot and it will go into audio branch
+            if config.records_audio_and_thermal() && !DEV_MODE {
+                // Just reboot and it will go into audio branch.
+                // Since there is no alarm set, the audio branch should then set an alarm
+                // without taking a recording, and then go to sleep.
                 info!("Reset as thermal finished and time for audio");
-                request_restart(sio);
+                request_restart(sio, delay);
             }
 
             // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
             //  and ask for the rp2040 to be put to sleep.
             let next_recording_window_start = if DEV_MODE {
                 // In dev mode, we always set the restart alarm for 2 minutes time.
-                time.get_date_time() + Duration::minutes(2)
+                time.date_time() + Duration::minutes(2)
             } else {
-                config.next_recording_window_start(&time.get_date_time())
+                config.next_recording_window_start(&time.date_time())
             };
             if i2c.enable_alarm(delay).is_err() {
                 error!("Failed enabling alarm");
@@ -1008,6 +1061,19 @@ fn power_down_frame_acquisition(sio: &mut Sio) {
     }
 }
 
+fn check_if_rpi_is_recording_in_high_power_mode(
+    bk: &mut BookkeepingState,
+    i2c: &mut SharedI2C,
+    delay: &mut Delay,
+) {
+    if bk.use_high_power_mode() {
+        // If i2c comms fail, assume we're not recording on the pi
+        bk.is_recording_on_rpi = i2c
+            .get_is_recording(delay)
+            .is_ok_and(|is_recording| is_recording);
+    }
+}
+
 fn should_restart_to_make_an_audio_recording(
     bk: &mut BookkeepingState,
     is_recording_cptv: bool,
@@ -1019,7 +1085,7 @@ fn should_restart_to_make_an_audio_recording(
 ) -> bool {
     if let Some(next_audio_alarm) = bk.next_audio_alarm {
         if !bk.audio_pending {
-            let current_time = time.get_date_time();
+            let current_time = time.date_time();
             bk.audio_pending = current_time > next_audio_alarm;
             info!(
                 "Audio recording is pending because time {}:{} is after {}:{} ",
@@ -1029,13 +1095,14 @@ fn should_restart_to_make_an_audio_recording(
                 next_audio_alarm.minute()
             );
         }
+        if is_recording_cptv {
+            return false;
+        }
 
-        if !is_recording_cptv
-            && bk.audio_pending
-            && bk.twenty_seconds_elapsed_since_last_check(telemetry)
-        {
+        if bk.audio_pending && bk.twenty_seconds_elapsed_since_last_check(telemetry) {
             bk.frame_checkpoint = telemetry.frame_num;
-            let duration_until_window_end = *window_end - time.get_date_time();
+            let duration_until_window_end = *window_end - time.date_time();
+
             // If within 2 minutes of the window end, make status before doing audio recording:
             // this ensures we always make the status recording.
             let need_to_make_shutdown_status_recording = bk.use_low_power_mode()
@@ -1046,10 +1113,8 @@ fn should_restart_to_make_an_audio_recording(
                 info!("Pending audio recording, but deferring until after shutdown status");
             } else {
                 // handles case where thermal recorder on the rPi is doing recording
-                bk.is_recording_on_rpi = bk.use_high_power_mode()
-                    && i2c
-                        .get_is_recording(delay)
-                        .is_ok_and(|is_recording| is_recording);
+                // FIXME: Where does this flag actually get set on the pi in high-power mode?
+                check_if_rpi_is_recording_in_high_power_mode(bk, i2c, delay);
                 if !bk.is_recording_on_rpi {
                     return true;
                 }
@@ -1059,8 +1124,10 @@ fn should_restart_to_make_an_audio_recording(
     false
 }
 
-fn request_restart(sio: &mut Sio) {
+fn request_restart(sio: &mut Sio, delay: &mut Delay) {
     power_down_frame_acquisition(sio);
+    // Delay so we actually get to see the shutdown message in the console.
+    delay.delay_ms(50);
     sio.fifo.write(Core0Task::RequestReset.into());
     loop {
         // Wait to be reset

@@ -253,17 +253,43 @@ impl EventLogger {
         }
     }
 
-    pub fn get_event_at_index(event_index: EventIndex, fs: &mut OnboardFlash) -> Option<[u8; 18]> {
+    pub fn get_event_at_index_old(
+        event_index: EventIndex,
+        fs: &mut OnboardFlash,
+    ) -> Option<[u8; 18]> {
         // 4 partial writes per page, 64 pages per block.
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
         let page = ((event_index % 256) / 4) as PageIndex;
-        let page_offset = (event_index % 4) * 64; // Allocate 64 bytes for each event
+        // Originally events started 64 bytes apart in the first page, but that broke ECC
+        let page_offset = (event_index % 4) * 64;
 
         if block >= FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX {
             None
         } else if fs.read_page(block, page).is_ok() {
             let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
             if event[0] == 0xff { None } else { Some(event) }
+        } else {
+            None
+        }
+    }
+
+    pub fn get_event_at_index(event_index: EventIndex, fs: &mut OnboardFlash) -> Option<[u8; 18]> {
+        // 4 partial writes per page, 64 pages per block.
+        let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
+        let page = ((event_index % 256) / 4) as PageIndex;
+        // Events need to start at each of the User Main data 0..=3 blocks, otherwise ECC breaks.
+        let page_offset = (event_index % 4) * 512;
+
+        if block >= FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX {
+            None
+        } else if fs.read_page(block, page).is_ok() {
+            let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
+            if event[0] == 0xff {
+                // TODO: Temporary migration code, take out in version 21
+                Self::get_event_at_index_old(event_index, fs)
+            } else {
+                Some(event)
+            }
         } else {
             None
         }
@@ -369,7 +395,7 @@ impl EventLogger {
                 let event_index = *next_event_index;
                 let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
                 let page = ((event_index % 256) / 4) as u8;
-                let page_offset = (event_index % 4) * 64;
+                let page_offset = (event_index % 4) * 512;
                 fs.write_event(&event_data, block, page, page_offset);
                 *next_event_index += 1;
             }

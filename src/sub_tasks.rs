@@ -13,7 +13,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{info, unreachable, warn};
-use fugit::{ExtU32, HertzU32};
+use fugit::HertzU32;
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -128,23 +128,25 @@ fn offload_recordings_and_events(
     only_last_file: bool,
 ) -> bool {
     warn!("There are files to offload!");
-    watchdog.disable();
-
-    if wake_raspberry_pi(i2c, delay) {
+    if wake_raspberry_pi(i2c, delay, Some(watchdog)) {
         events.log(Event::GotRpiPoweredOn, time, fs);
     }
-    watchdog.start(8_388_607.micros());
-
     if !only_last_file {
         maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
     }
-    if i2c.begin_offload(delay).is_err() {
-        warn!("Failed setting offload-in-progress flag");
-    }
+
     let mut has_file = fs.begin_offload_reverse();
 
+    if has_file {
+        info!("Has file to offload");
+    }
+
+    if has_file && i2c.begin_offload(delay).is_err() {
+        warn!("Failed setting offload-in-progress flag");
+    }
+
     // do some offloading.
-    let mut file_count = 0;
+    let mut file_count = None;
     let mut success: bool = true;
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
@@ -153,6 +155,7 @@ fn offload_recordings_and_events(
     while has_file {
         if let Ok(offload_flag_set) = i2c.offload_flag_is_set(delay) {
             if !offload_flag_set {
+                warn!("Offload interrupted by user");
                 // We were interrupted by the rPi,
                 interrupted_by_user = true;
                 break;
@@ -253,7 +256,10 @@ fn offload_recordings_and_events(
 
             part_count += 1;
             if is_last_page_for_file {
-                file_count += 1;
+                if file_count.is_none() {
+                    file_count = Some(0);
+                }
+                *file_count.as_mut().unwrap() += 1;
                 info!("Offloaded {} file(s)", file_count);
                 watchdog.feed();
                 let _ = fs.erase_last_file();
@@ -283,6 +289,7 @@ fn offload_recordings_and_events(
         warn!("Failed un-setting offload-in-progress flag");
     }
 
+    watchdog.feed();
     if success {
         if interrupted_by_user {
             events.log(Event::FileOffloadInterruptedByUser, time, fs);
@@ -292,7 +299,7 @@ fn offload_recordings_and_events(
             "Completed file offload, transferred {} files start {} previous is {}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
-        file_count != 0
+        file_count.is_none() || file_count.unwrap() != 0
     } else {
         events.log(Event::FileOffloadFailed, time, fs);
         fs.scan();
@@ -310,16 +317,26 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     dma: &mut DMA,
     clock_freq: HertzU32,
     existing_config: Option<DeviceConfig>,
+    event_count: u16,
 ) -> (Option<DeviceConfig>, bool, bool) {
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
     let mut prioritise_frame_preview = false;
+
+    let num_files_to_offload = fs.num_files_in_initial_scan;
+    let num_blocks_to_offload = fs.last_used_block_index.unwrap_or(0);
+    let num_events_to_offload = event_count;
+
     if let Some(free_spi) = fs.free_spi() {
         pi_spi.enable(free_spi, resets);
+        LittleEndian::write_u32(&mut payload[0..4], u32::from(num_events_to_offload));
         LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
+        LittleEndian::write_u32(&mut payload[8..12], u32::from(num_files_to_offload));
+        LittleEndian::write_u32(&mut payload[12..16], u32::from(num_blocks_to_offload));
+
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
-
+        info!("Sending startup handshake");
         if pi_spi.send_message_over_spi(
             ExtTransferMessage::StartupHandshake,
             &payload,

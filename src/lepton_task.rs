@@ -72,6 +72,7 @@ pub fn frame_acquisition_loop(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     mut watchdog: bsp::hal::Watchdog,
+    is_high_power_mode: bool,
 ) -> ! {
     let mut selected_frame_buffer = 0;
     let mut frame_counter = 0;
@@ -109,7 +110,6 @@ pub fn frame_acquisition_loop(
     let mut needs_ffc = false;
     let mut ffc_requested = false;
     let mut can_do_ffc = true;
-    let mut high_power_mode = false;
     let mut seen_telemetry_revision = [0u8, 0u8];
     let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
@@ -204,7 +204,7 @@ pub fn frame_acquisition_loop(
                             {
                                 needs_ffc = true;
                                 ffc_requested = false;
-                                if high_power_mode {
+                                if is_high_power_mode {
                                     // FIXME: Why, if we're in high-power mode, can't we do an FFC here?  Document this.
                                     can_do_ffc = false;
                                 }
@@ -493,8 +493,6 @@ pub fn frame_acquisition_loop(
                             prev_frame_needs_transfer = false;
                         } else if message == Core0Task::RequestReset.into() {
                             restart(&mut watchdog);
-                        } else if message == Core0Task::HighPowerMode.into() {
-                            high_power_mode = true;
                         }
                         if let Some(message) = next_message {
                             if message == Core0Task::FrameProcessingComplete.into() {

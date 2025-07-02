@@ -525,7 +525,7 @@ impl ExtSpiTransfers {
                                 {
                                     transmit_success = true;
                                     //info!("Transfer success");
-                                    if message_type == ExtTransferMessage::CameraConnectInfo {
+                                    if message_type == ExtTransferMessage::StartupHandshake {
                                         // We also expect to get a bunch of device config handshake info:
                                         self.return_payload_offset = Some(start + 4);
                                     } else if message_type

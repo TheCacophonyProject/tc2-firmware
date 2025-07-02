@@ -1,19 +1,22 @@
 use crate::attiny_rtc_i2c::{AudioRecordingType, SharedI2C, tc2_agent_state};
 use crate::bsp;
-use crate::bsp::pac::{PIO1, Peripherals};
+use crate::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
 use crate::device_config::{AudioMode, DeviceConfig};
 use crate::event_logger::{
     Event, EventLogger, clear_audio_alarm, get_audio_alarm, write_audio_alarm,
 };
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
+use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
 use defmt::{error, info};
 use rp2040_hal::gpio;
 
 use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
+use crc::{CRC_16_XMODEM, Crc};
 use fugit::{ExtU32, HertzU32};
 
+use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::rpi_power::advise_raspberry_pi_it_may_shutdown;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
@@ -99,7 +102,7 @@ fn maybe_reschedule_audio_recording(
     if recording_type.is_none() {
         // check we haven't missed the alarm somehow
         if let Some(alarm) = alarm_date_time {
-            let until_alarm = (*alarm - time.get_date_time()).num_minutes();
+            let until_alarm = (*alarm - time.date_time()).num_minutes();
             if until_alarm <= 0 || until_alarm > i64::from(MAX_GAP_MIN) {
                 info!(
                     "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
@@ -121,6 +124,33 @@ fn maybe_reschedule_audio_recording(
     }
 }
 
+fn send_camera_connect_info(
+    fs: &mut OnboardFlash,
+    pi_spi: &mut ExtSpiTransfers,
+    dma: &mut DMA,
+    resets: &mut RESETS,
+) {
+    if let Some(free_spi) = fs.free_spi() {
+        let mut payload = [0u8; 16];
+        pi_spi.enable(free_spi, resets);
+        LittleEndian::write_u32(&mut payload[12..16], 1); // Audio mode
+        let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+        let crc = crc_check.checksum(&payload);
+        info!("Sending camera connect info");
+        let success = pi_spi.send_message_over_spi(
+            ExtTransferMessage::CameraConnectInfo,
+            &payload,
+            crc,
+            dma,
+            resets,
+            None,
+        );
+        if let Some(spi) = pi_spi.disable() {
+            fs.take_spi(spi, resets);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn audio_task(
     mut i2c: SharedI2C,
@@ -133,6 +163,7 @@ pub fn audio_task(
     config: &DeviceConfig,
     mut fs: OnboardFlash,
     mut events: EventLogger,
+    mut pi_spi: ExtSpiTransfers,
     time: &SyncedDateTime,
     pio1: PIO<PIO1>,
     sm1: UninitStateMachine<(PIO1, SM1)>,
@@ -178,6 +209,14 @@ pub fn audio_task(
         }
         let timestamp = time.get_timestamp_micros();
         let mut peripherals: Peripherals = unsafe { Peripherals::steal() };
+
+        // Tell tc2-agent we're in audio mode
+        send_camera_connect_info(
+            &mut fs,
+            &mut pi_spi,
+            &mut peripherals.DMA,
+            &mut peripherals.RESETS,
+        );
 
         let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
         let mut microphone = PdmMicrophone::new(
@@ -301,7 +340,7 @@ fn power_down_or_restart(
     let boot_into_thermal_mode = config.records_audio_and_thermal();
     // FIXME: This looks sus to me – what happens in AudioOrThermal mode?
     let in_thermal_recording_window = config.audio_mode() == AudioMode::AudioAndThermal
-        && config.time_is_in_configured_recording_window(&time.get_date_time());
+        && config.time_is_in_configured_recording_window(&time.date_time());
 
     loop {
         let pi_is_powered_down = i2c.pi_is_powered_down(&mut delay, true).is_ok_and(|v| v);
@@ -318,7 +357,7 @@ fn power_down_or_restart(
             if let Ok(pi_is_powered_down) = i2c.pi_is_powered_down(&mut delay, true) {
                 if pi_is_powered_down {
                     if let Some(alarm_time) = alarm_date_time {
-                        let until_alarm = (alarm_time - time.get_date_time()).num_minutes();
+                        let until_alarm = (alarm_time - time.date_time()).num_minutes();
                         if until_alarm < 1 {
                             // otherwise the alarm could trigger between here and sleeping
                             should_sleep = false;
@@ -376,7 +415,7 @@ pub fn schedule_next_recording(
     }
     let mut wakeup: DateTime<Utc>;
     let seed: u64;
-    let current_time = time.get_date_time();
+    let current_time = time.date_time();
 
     if config.audio_seed() > 0 {
         wakeup = if let Some(time) = current_time
@@ -395,7 +434,7 @@ pub fn schedule_next_recording(
 
         seed = u64::wrapping_add(ts_millis, u64::from(config.config().audio_seed));
     } else {
-        let Ok(ts_seconds) = u64::try_from(time.get_date_time().timestamp()) else {
+        let Ok(ts_seconds) = u64::try_from(time.date_time().timestamp()) else {
             error!("Failed to convert current_time timestamp to u64");
             return Err(());
         };
@@ -426,8 +465,8 @@ pub fn schedule_next_recording(
     }
     info!(
         "Set alarm, current time is {}:{} Next alarm is {}:{}",
-        time.get_date_time().time().hour(),
-        time.get_date_time().time().minute(),
+        time.date_time().time().hour(),
+        time.date_time().time().minute(),
         wakeup.hour(),
         wakeup.minute()
     );

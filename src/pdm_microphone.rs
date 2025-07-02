@@ -282,6 +282,7 @@ impl PdmMicrophone {
             #[allow(clippy::cast_possible_truncation)]
             audio_buffer.init(timestamp, adjusted_sample_rate as u16);
             fs.start_file(0);
+            let mut first_file_block = Some(());
             loop {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
@@ -294,7 +295,7 @@ impl PdmMicrophone {
                 let (rx_buf, next_rx_transfer) = rx_transfer.wait();
                 cycle += 1;
                 if cycle < WARMUP_CYCLES {
-                    // get the values initialized so the start of the recording is nice
+                    // get the values initialised so the start of the recording is nice
                     let payload = bytemuck::cast_slice(rx_buf);
                     filter.filter(payload, VOLUME, None);
 
@@ -317,11 +318,22 @@ impl PdmMicrophone {
                         let data_size = (audio_buffer.index - 2) * 2;
                         let data = audio_buffer.as_u8_slice();
                         watchdog.feed();
-                        if let Err(e) = fs.append_recording_bytes(
+                        if first_file_block.take().is_some() {
+                            if let Err(e) = fs.append_recording_bytes_with_time(
+                                data,
+                                data_size,
+                                RecordingFileType::Audio(RecordingFileTypeDetails {
+                                    user_requested: user_requested_test_recording,
+                                    status: false,
+                                }),
+                                time,
+                            ) {
+                                warn!("Error writing bytes to flash ending rec early {}", e);
+                                break;
+                            }
+                        } else if let Err(e) = fs.append_recording_bytes(
                             data,
                             data_size,
-                            None,
-                            None,
                             RecordingFileType::Audio(RecordingFileTypeDetails {
                                 user_requested: user_requested_test_recording,
                                 status: false,
@@ -330,13 +342,13 @@ impl PdmMicrophone {
                             warn!("Error writing bytes to flash ending rec early {}", e);
                             break;
                         }
+
                         audio_buffer.reset();
                         if !leftover.is_empty() {
                             let out = audio_buffer.slice_for(leftover.len());
 
                             filter.filter(leftover, VOLUME, Some(out));
                         }
-                        // break;
                     }
                     if current_recording.is_complete() {
                         watchdog.feed();
@@ -344,14 +356,12 @@ impl PdmMicrophone {
                             "Recording done took {} ms",
                             (timer.get_counter() - start).to_millis(),
                         );
-                        let start = time.get_date_time();
+                        let start = time.date_time();
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if let Err(e) = fs.append_last_recording_bytes(
                             payload,
                             data_size,
-                            None,
-                            None,
                             RecordingFileType::Audio(RecordingFileTypeDetails {
                                 user_requested: user_requested_test_recording,
                                 status: false,

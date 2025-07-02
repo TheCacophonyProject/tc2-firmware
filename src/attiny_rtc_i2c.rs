@@ -516,7 +516,7 @@ impl SharedI2C {
             if is_awake {
                 // If the agent is ready, make sure the REG_RP2040_PI_POWER_CTRL is set to 1
                 let _ = self.tell_pi_to_wakeup(delay);
-                self.tc2_agent_is_ready(delay, print, None)
+                self.tc2_agent_is_ready(delay, print)
             } else {
                 if print {
                     if let Some(state) = &recorded_camera_state {
@@ -528,27 +528,25 @@ impl SharedI2C {
         })
     }
 
-    pub fn tc2_agent_is_ready(
-        &mut self,
-        delay: &mut Delay,
-        print: bool,
-        max_attempts: Option<i32>,
-    ) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, max_attempts) {
+    pub fn tc2_agent_is_ready(&mut self, delay: &mut Delay, print: bool) -> Result<bool, Error> {
+        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
             Ok(state) => {
                 if print {
-                    if state == 0 {
+                    if state == tc2_agent_state::NOT_READY {
                         info!("tc2-agent not ready");
-                    } else if state == 2 {
+                    } else if state == tc2_agent_state::READY {
+                        // 2
                         info!("tc2-agent ready");
-                    } else if state == 4 {
+                    } else if state == tc2_agent_state::NOT_READY | tc2_agent_state::RECORDING {
                         info!("tc2-agent not ready, rp2040 recording",);
-                    } else if state == 6 {
+                    } else if state == tc2_agent_state::READY | tc2_agent_state::RECORDING {
                         info!("tc2-agent ready and rp2040 recording",);
-                    } else if state == 10 {
-                        info!("tc2-agent ready and wanting test recording {}", state);
+                    } else if state
+                        == tc2_agent_state::READY | tc2_agent_state::TEST_AUDIO_RECORDING
+                    {
+                        info!("tc2-agent ready and wanting test audio recording");
                     } else {
-                        info!("tc2-agent unknown state {}", state);
+                        info!("tc2-agent unknown state {:08b}({})", state, state);
                     }
                 }
                 Ok((state & tc2_agent_state::READY) == tc2_agent_state::READY)

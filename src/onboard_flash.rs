@@ -11,15 +11,18 @@
 // We keep a pointer to the next free byte offset updated, though we may only be able to write things
 // in blocks of a certain size.
 
+use crate::Utc;
 use crate::bsp::pac::SPI1;
 use crate::byte_slice_cursor::CursorMut;
 
 use byteorder::{ByteOrder, LittleEndian};
+use chrono::DateTime;
 use core::mem;
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Format, error, info, println, warn};
 
 use crate::attiny_rtc_i2c::AudioRecordingType;
+use crate::synced_date_time::SyncedDateTime;
 use cortex_m::prelude::*;
 use embedded_hal::digital::OutputPin;
 use fugit::{HertzU32, RateExtU32};
@@ -93,32 +96,29 @@ impl OnboardFlashStatus {
         // TODO: return relocation info?
         let ecc_bits = (self.inner >> 4) & 0b0000_0111;
         match ecc_bits {
-            0 => EccStatus {
+            0b000 => EccStatus {
                 okay: true,
                 should_relocate: false,
             },
-            1 => {
+            0b001 => {
                 warn!("ECC error - 1-3 bits corrected");
                 EccStatus {
                     okay: true,
                     should_relocate: false,
                 }
             }
-            2 => {
-                error!("ECC error - uncorrectable error, data corrupted!");
-                EccStatus {
-                    okay: false,
-                    should_relocate: true,
-                }
-            }
-            3 => {
+            0b010 => EccStatus {
+                okay: false,
+                should_relocate: true,
+            },
+            0b011 => {
                 warn!("ECC error - 4-6 bits corrected, should re-locate data");
                 EccStatus {
                     okay: true,
                     should_relocate: true,
                 }
             }
-            5 => {
+            0b101 => {
                 warn!("ECC error - 7-8 bits corrected, MUST re-locate data");
                 EccStatus {
                     okay: true,
@@ -209,6 +209,7 @@ impl Page {
         &self.cache_data()[0x820..=0x83f]
     }
 
+    // NOTE: User metadata 2 doesn't have ECC correction, so we may never want to use it.
     fn user_metadata_2(&self) -> &[u8] {
         &self.cache_data()[0x804..=0x81f]
     }
@@ -243,6 +244,17 @@ impl Page {
 
     pub fn is_audio_recording(&self) -> bool {
         self.user_metadata_1()[4] >> 2 == 0
+    }
+
+    // NOTE: File written time is only available in the metadata section of the *first page* in a file.
+    pub fn file_written_time(&self) -> Option<DateTime<Utc>> {
+        let start = LittleEndian::read_u16(&self.user_metadata_1()[16..=17]);
+        if start == u16::MAX {
+            None
+        } else {
+            let timetamp = LittleEndian::read_i64(&self.user_metadata_1()[16..24]);
+            DateTime::from_timestamp_micros(timetamp)
+        }
     }
 
     pub fn file_start_block_index(&self) -> Option<u16> {
@@ -340,6 +352,7 @@ pub struct OnboardFlash {
     pub previous_file_start_block_index: Option<BlockIndex>,
     pub first_used_block_index: Option<BlockIndex>,
     pub bad_blocks: [BlockIndex; 40],
+    pub num_files_in_initial_scan: u16,
     pub current_page: Page,
     pub prev_page: Page,
     dma_channel_1: Option<Channel<CH1>>,
@@ -383,6 +396,7 @@ impl OnboardFlash {
             prev_page: Page::new(flash_page_buf_2),
             dma_channel_1: Some(dma_channel_1),
             dma_channel_2: Some(dma_channel_2),
+            num_files_in_initial_scan: 0,
             payload_buffer,
             file_start_block_index: None,
             previous_file_start_block_index: None,
@@ -490,6 +504,7 @@ impl OnboardFlash {
             Some(page_index),
             true,
             RecordingFileType::Other,
+            None,
         )
     }
 
@@ -603,12 +618,16 @@ impl OnboardFlash {
             }
         }
         let mut good_block = false;
+
+        let mut last_file_block_index = u16::MAX;
+        let mut num_files = 0;
+
         for block_index in 0..TOTAL_FLASH_BLOCKS {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
 
-            //incase of incomplete cptv files page 0 will be empty
+            // in the case of incomplete cptv files page 0 will be empty
             if self.read_page(block_index, 1).is_ok() {
                 self.read_page_metadata(block_index);
                 self.wait_for_all_ready();
@@ -623,6 +642,16 @@ impl OnboardFlash {
                 } else if block_index < NUM_RECORDING_BLOCKS {
                     good_block = true;
                     last_good_block = Some(block_index);
+
+                    if self.current_page.page_is_used()
+                        && let Some(file_start_block_index) =
+                            self.current_page.file_start_block_index()
+                        && last_file_block_index != file_start_block_index
+                    {
+                        last_file_block_index = block_index;
+                        num_files += 1;
+                    }
+
                     if !self.current_page.page_is_used() {
                         // This will be the starting block of the next file to be written.
                         if self.last_used_block_index.is_none()
@@ -644,6 +673,7 @@ impl OnboardFlash {
                 error!("Failed to read page 1 at block {}", block_index);
             }
         }
+        self.num_files_in_initial_scan = num_files;
 
         // if we have written write to the end of the flash need to handle this
         if self.last_used_block_index.is_none() && self.first_used_block_index.is_some() {
@@ -659,6 +689,10 @@ impl OnboardFlash {
                 );
             }
         }
+
+        // FIXME: Maybe we'll log the number of bad blocks seen every so often
+        //  (if it's a monday for instance), just so we can get a sense of what is normal in the field.
+
         self.bad_blocks = bad_blocks;
     }
 
@@ -685,14 +719,7 @@ impl OnboardFlash {
 
     pub fn has_recordings_to_offload(&self) -> bool {
         // When we did our initial scan, did we encounter any used blocks?
-        let has_files = self.first_used_block_index.is_some();
-        if has_files {
-            info!(
-                "First used block {:?}, last used {:?}",
-                self.first_used_block_index, self.last_used_block_index
-            );
-        }
-        has_files
+        self.first_used_block_index.is_some()
     }
 
     pub fn last_recording_was_user_requested(&mut self) -> bool {
@@ -736,6 +763,8 @@ impl OnboardFlash {
                         if page_index == NUM_PAGES_PER_BLOCK - 1 {
                             page_index = 0;
                             block_index += 1;
+                        } else {
+                            page_index += 1;
                         }
                         if block_index == NUM_RECORDING_BLOCKS - 1 {
                             break;
@@ -1007,29 +1036,34 @@ impl OnboardFlash {
         self.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
         let status = self.wait_for_all_ready();
 
-        // TODO: Check ECC status, mark and relocate block if needed.
-
-        // To keep things simple, we'll never do relocations if we get ECC errors during reading
-        // – only during writing, when we can just advance to the next good block, marking the
-        // current block as bad.
-
-        // TODO: Now we need to check the ECC status bits, and return okay if it is ok
-        info!("Status after read into cache {:#010b}", status.inner);
         let EccStatus {
             okay,
             should_relocate,
         } = status.ecc_status();
-        if !okay {
-            // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
-            // that the file spans as temporarily corrupt, so this file doesn't get read and
-            // send to the raspberry pi
-            //Err(&"unrecoverable data corruption error")
+        if okay {
+            if should_relocate {
+                // FIXME: mark and relocate block if needed.
+                // If we get a block that's going bad, we need to mark it as such after reading
+                // the page.  Because we're reading the page, that means we're offloading files,
+                // so we'll be erasing this block soon.  Maybe we just never use it again?
+                // We don't really know how much a few ECC errors that were detected and corrected
+                // escalates into a fully unusable block.  It might be better just to log an event,
+                // so we can detect the frequency of this happening.
+
+                // We don't care about refreshing/relocating the data, since it's only
+                // getting read off the flash once, and then erased.
+            }
+            Ok(())
+        } else {
             warn!(
                 "unrecoverable data corruption error at {}:{} - should relocate? {}",
                 block, page, should_relocate
             );
+            // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
+            // that the file spans as temporarily corrupt, so this file doesn't get read and
+            // sent to the raspberry pi.  This returns no useful data.
+            Err("unrecoverable data corruption error")
         }
-        Ok(())
     }
 
     #[allow(clippy::unnecessary_wraps)]
@@ -1255,6 +1289,24 @@ impl OnboardFlash {
         &mut self,
         bytes: &mut [u8],
         user_bytes_length: usize,
+        recording_file_type: RecordingFileType,
+    ) -> Result<(), &str> {
+        self.append_file_bytes(
+            bytes,
+            user_bytes_length,
+            false,
+            None,
+            None,
+            false,
+            recording_file_type,
+            None,
+        )
+    }
+
+    pub fn append_recording_bytes_at_location(
+        &mut self,
+        bytes: &mut [u8],
+        user_bytes_length: usize,
         block_index: Option<BlockIndex>,
         page_index: Option<PageIndex>,
         recording_file_type: RecordingFileType,
@@ -1267,10 +1319,69 @@ impl OnboardFlash {
             page_index,
             false,
             recording_file_type,
+            None,
+        )
+    }
+
+    pub fn append_recording_bytes_at_location_with_time(
+        &mut self,
+        bytes: &mut [u8],
+        user_bytes_length: usize,
+        block_index: Option<BlockIndex>,
+        page_index: Option<PageIndex>,
+        recording_file_type: RecordingFileType,
+        time: Option<&SyncedDateTime>,
+    ) -> Result<(), &str> {
+        self.append_file_bytes(
+            bytes,
+            user_bytes_length,
+            false,
+            block_index,
+            page_index,
+            false,
+            recording_file_type,
+            time,
+        )
+    }
+
+    pub fn append_recording_bytes_with_time(
+        &mut self,
+        bytes: &mut [u8],
+        user_bytes_length: usize,
+        recording_file_type: RecordingFileType,
+        time: &SyncedDateTime,
+    ) -> Result<(), &str> {
+        self.append_file_bytes(
+            bytes,
+            user_bytes_length,
+            false,
+            None,
+            None,
+            false,
+            recording_file_type,
+            Some(time),
         )
     }
 
     pub fn append_last_recording_bytes(
+        &mut self,
+        bytes: &mut [u8],
+        user_bytes_length: usize,
+        recording_file_type: RecordingFileType,
+    ) -> Result<(), &str> {
+        self.append_file_bytes(
+            bytes,
+            user_bytes_length,
+            true,
+            None,
+            None,
+            false,
+            recording_file_type,
+            None,
+        )
+    }
+
+    pub fn append_last_recording_bytes_at_location(
         &mut self,
         bytes: &mut [u8],
         user_bytes_length: usize,
@@ -1286,11 +1397,12 @@ impl OnboardFlash {
             page_index,
             false,
             recording_file_type,
+            None,
         )
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn append_file_bytes(
+    fn append_file_bytes(
         &mut self,
         bytes: &mut [u8],
         user_bytes_length: usize,
@@ -1299,6 +1411,7 @@ impl OnboardFlash {
         page_index: Option<PageIndex>,
         extended_write: bool,
         recording_file_type: RecordingFileType,
+        time: Option<&SyncedDateTime>,
     ) -> Result<(), &str> {
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
@@ -1398,6 +1511,11 @@ impl OnboardFlash {
                     LittleEndian::write_u16(space, previous_start);
                 }
             }
+            if let Some(time) = time {
+                // Write the timestamp when the file was finalised
+                let space = &mut user_metadata_bytes[16..24];
+                LittleEndian::write_i64(space, time.get_timestamp_micros());
+            }
         }
         if is_last {
             warn!("Ending file at {}:{}", block, page);
@@ -1449,12 +1567,12 @@ impl OnboardFlash {
             assert!(self.write_enabled());
             let mut bytes = [0u8; FLASH_SPI_HEADER_SMALL + NUM_EVENT_BYTES];
             let address = OnboardFlash::get_address(block_index, page_index);
-            let plane = ((block_index % 2) << 4) as u8;
+            let plane_and_offset_msb = (((block_index % 2) << 4) | offset >> 8) as u8;
             {
                 let spi_header = &mut bytes[..FLASH_SPI_HEADER_SMALL];
                 spi_header[0] = PROGRAM_LOAD;
-                spi_header[1] = plane;
-                spi_header[2] = offset as u8;
+                spi_header[1] = plane_and_offset_msb;
+                spi_header[2] = (offset & 0xff) as u8;
             }
             bytes[FLASH_SPI_HEADER_SMALL..].copy_from_slice(event_bytes);
             self.spi_write(&bytes);
