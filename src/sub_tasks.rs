@@ -34,6 +34,7 @@ pub fn maybe_offload_events(
             watchdog.feed();
             let event_bytes = EventLogger::get_event_at_index(event_index, fs);
             if let Some(event_bytes) = event_bytes {
+                EventLogger::print_event(event_index as usize, &event_bytes);
                 if let Some(spi) = fs.free_spi() {
                     pi_spi.enable(spi, resets);
                     let transfer_type = ExtTransferMessage::SendLoggerEvent;
@@ -378,30 +379,30 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                         LittleEndian::read_u16(&piece_bytes[0..2]);
                                     let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                                     let length = piece_bytes[2];
-                                    // FIXME: Document what this +1 offset is
-                                    let crc = crc_check
-                                        .checksum(&piece_bytes[2..=2 + length as usize + 1]);
+                                    let crc =
+                                        crc_check.checksum(&piece_bytes[2..=2 + length as usize]);
                                     if crc == crc_from_remote {
                                         new_config
                                             .motion_detection_mask
                                             .append_piece(&piece_bytes[4..4 + length as usize]);
                                         break;
                                     }
-                                    warn!("crc failed for mask piece {}, re-requesting", piece);
+                                    warn!(
+                                        "crc failed for mask piece {}, re-requesting ({:?})",
+                                        piece,
+                                        &piece_bytes[0..10]
+                                    );
                                 }
                             }
                         }
                     }
 
-                    info!("Got config from rPi {:#?}", new_config.config());
+                    info!("Got config from rPi");
                     if existing_config.is_none()
                         || *new_config != *existing_config.as_ref().unwrap()
                     {
                         if existing_config.is_some() {
-                            warn!(
-                                "Config has changed {}",
-                                *existing_config.as_ref().unwrap() != *new_config
-                            );
+                            warn!("Config has changed: {:?}", new_config.config());
                         }
                         new_config_bytes[length_used..length_used + 2400]
                             .copy_from_slice(&new_config.motion_detection_mask.inner);

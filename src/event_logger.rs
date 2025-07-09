@@ -193,38 +193,14 @@ const EVENT_PAYLOAD_LENGTH: u8 = 8;
 const EVENT_LENGTH: u8 = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH;
 
 const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 4;
-const FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS;
+const FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 1; // Don't erase the saved audio alarm if any
 pub struct EventLogger {
     next_event_index: Option<EventIndex>,
 }
 impl EventLogger {
     pub fn new(fs: &mut OnboardFlash) -> EventLogger {
         // Scan all the pages
-        let logger = EventLogger::init(0, None, fs);
-        for (i, event_index) in logger.event_range().enumerate() {
-            let event = Self::get_event_at_index(event_index, fs);
-            if let Some(event) = event {
-                let kind = LittleEndian::read_u16(&event[0..2]);
-                if let Ok(kind) = Event::try_from(kind) {
-                    let time = LittleEndian::read_i64(&event[2..10]);
-                    let utc_time = DateTime::<Utc>::from_timestamp_micros(time).unwrap();
-                    let year = utc_time.year();
-                    let month = utc_time.month();
-                    let day = utc_time.day();
-                    let hour = utc_time.hour();
-                    let minute = utc_time.minute();
-                    let second = utc_time.second();
-                    info!(
-                        "Event #{}, kind {}, time {}/{}/{} {}:{}:{}",
-                        i, kind, year, month, day, hour, minute, second
-                    );
-                } else {
-                    warn!("Unknown event kind found on flash log {}", kind);
-                }
-            }
-        }
-
-        logger
+        EventLogger::init(0, None, fs)
     }
 
     fn init(
@@ -250,6 +226,35 @@ impl EventLogger {
 
         EventLogger {
             next_event_index: next_free_event_index,
+        }
+    }
+
+    pub fn list(&self, fs: &mut OnboardFlash) {
+        for (i, event_index) in self.event_range().enumerate() {
+            let event = Self::get_event_at_index(event_index, fs);
+            if let Some(event) = event {
+                Self::print_event(i, &event);
+            }
+        }
+    }
+
+    pub fn print_event(index: usize, event: &[u8; 18]) {
+        let kind = LittleEndian::read_u16(&event[0..2]);
+        if let Ok(kind) = Event::try_from(kind) {
+            let time = LittleEndian::read_i64(&event[2..10]);
+            let utc_time = DateTime::<Utc>::from_timestamp_micros(time).unwrap();
+            let year = utc_time.year();
+            let month = utc_time.month();
+            let day = utc_time.day();
+            let hour = utc_time.hour();
+            let minute = utc_time.minute();
+            let second = utc_time.second();
+            info!(
+                "Event #{}, kind {}, time {}/{}/{} {}:{}:{}",
+                index, kind, year, month, day, hour, minute, second
+            );
+        } else {
+            warn!("Unknown event kind found on flash log {}", kind);
         }
     }
 

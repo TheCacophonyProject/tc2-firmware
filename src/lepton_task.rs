@@ -5,7 +5,7 @@ use crate::frame_processing::{
 use crate::lepton::{FFCStatus, LeptonModule};
 use crate::lepton_telemetry::Telemetry;
 use crate::utils::restart;
-use crate::{FFC_INTERVAL_MS, bsp};
+use crate::{FFC_INTERVAL_MS, MIN_FCC_INTERVAL_DURING_WARMUP_MS, bsp};
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
 use bsp::hal::rosc::RingOscillator;
@@ -109,7 +109,7 @@ pub fn frame_acquisition_loop(
     // Do FFC every 20 mins?
     let mut needs_ffc = false;
     let mut ffc_requested = false;
-    let mut can_do_ffc = true;
+    let mut safe_to_execute_ffc = true;
     let mut seen_telemetry_revision = [0u8, 0u8];
     let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
@@ -142,12 +142,9 @@ pub fn frame_acquisition_loop(
         }
         if !transferring_prev_frame && prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
-            if needs_ffc {
-                sio_fifo.write(Core0Task::ReceiveFrameWithPendingFFC.into());
-            } else {
-                sio_fifo.write(Core0Task::ReceiveFrame.into());
-            }
+            sio_fifo.write(Core0Task::ReceiveFrame.into());
             sio_fifo.write(selected_frame_buffer);
+            safe_to_execute_ffc = sio_fifo.read_blocking() == 1;
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
             } else {
@@ -191,23 +188,38 @@ pub fn frame_acquisition_loop(
                             && telemetry.msec_on != 0
                             && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
                         {
+                            let temperature_shifted_too_much_since_last_ffc =
+                                (telemetry.fpa_temp_c_at_last_ffc - telemetry.fpa_temp_c).abs()
+                                    > 1.5;
+                            let ffc_frame_diff =
+                                telemetry.msec_on.saturating_sub(telemetry.time_at_last_ffc);
+                            let time_for_ffc = ffc_frame_diff > FFC_INTERVAL_MS;
+                            let min_time_between_ffcs_elapsed =
+                                ffc_frame_diff > MIN_FCC_INTERVAL_DURING_WARMUP_MS;
                             // If time on ms is zero, that indicates a corrupt/invalid frame.
                             if telemetry.msec_on < telemetry.time_at_last_ffc {
                                 warn!(
                                     "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
                                     telemetry.msec_on, telemetry.time_at_last_ffc
                                 );
-                            } else if telemetry.msec_on - telemetry.time_at_last_ffc
-                                > FFC_INTERVAL_MS
-                                && telemetry.ffc_status != FFCStatus::Imminent
+                            } else if (time_for_ffc
+                                || (min_time_between_ffcs_elapsed
+                                    && temperature_shifted_too_much_since_last_ffc))
                                 && telemetry.ffc_status != FFCStatus::InProgress
                             {
+                                if temperature_shifted_too_much_since_last_ffc {
+                                    // NOTE: If the sensor temperature has shifted by >1.5C° since the
+                                    //  previous FFC, we also want to trigger an FFC.
+                                    info!(
+                                        "Temp diff between FFCs {}:{} {}",
+                                        telemetry.fpa_temp_c,
+                                        telemetry.fpa_temp_c_at_last_ffc,
+                                        (telemetry.fpa_temp_c_at_last_ffc - telemetry.fpa_temp_c)
+                                            .abs()
+                                    );
+                                }
                                 needs_ffc = true;
                                 ffc_requested = false;
-                                if is_high_power_mode {
-                                    // FIXME: Why, if we're in high-power mode, can't we do an FFC here?  Document this.
-                                    can_do_ffc = false;
-                                }
                             }
 
                             // Sometimes the header is invalid, but the frame becomes valid and gets sync.
@@ -356,8 +368,10 @@ pub fn frame_acquisition_loop(
                     prev_segment_was_4 = is_last_segment;
                     if packet_id == last_packet_id_for_segment {
                         if is_last_segment {
-                            if can_do_ffc && needs_ffc && !ffc_requested {
+                            if safe_to_execute_ffc && needs_ffc && !ffc_requested {
                                 ffc_requested = true;
+                                // FIXME: This sometimes seems to spam the FFC request i2c
+                                //  until the FFC actually happens - but maybe that's okay?
                                 info!("Requesting needed FFC");
                                 let success = lepton.do_ffc();
                                 match success {
@@ -473,15 +487,14 @@ pub fn frame_acquisition_loop(
 
                 if transferring_prev_frame {
                     // Could read blocking, but need to increment current_segment_num appropriately?
-                    let mut next_message = None;
 
                     if let Some(message) = sio_fifo.read() {
+                        let mut next_message = None;
                         if message == Core0Task::StartRecording.into() {
                             is_recording = true;
                             next_message = sio_fifo.read();
                         } else if message == Core0Task::EndRecording.into() {
                             recording_ended = true;
-                            can_do_ffc = true;
                             next_message = sio_fifo.read();
                         } else if message == Core0Task::ReadyToSleep.into() {
                             info!("Powering down lepton module");

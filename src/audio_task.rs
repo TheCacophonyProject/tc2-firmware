@@ -9,7 +9,7 @@ use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
 use byteorder::{ByteOrder, LittleEndian};
 use cortex_m::delay::Delay;
-use defmt::{error, info};
+use defmt::{Format, error, info};
 use rp2040_hal::gpio;
 
 use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
@@ -31,7 +31,7 @@ use rp2040_hal::pio::SM1;
 use rp2040_hal::pio::UninitStateMachine;
 
 #[repr(u8)]
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Format)]
 pub enum AlarmMode {
     Audio = 0,
     Thermal = 1,
@@ -62,13 +62,7 @@ fn maybe_reschedule_audio_recording(
     watchdog: &mut Watchdog,
     alarm_triggered: &bool,
 ) {
-    // this isn't reliable so use alarm stored in flash
-    // let mut alarm_hours = i2c.get_alarm_hours();
-    // let mut alarm_minutes = i2c.get_alarm_minutes();
     let mut scheduled: bool = false;
-
-    // GP 30th Jan TODO if alarm is set we always need to check alarm against current time if the alarm wasn't triggered
-    // otherwise can have edge cases where tc2 agent status code thinks we should rec but the alarm is later
     let (alarm_mode, flash_alarm) = get_audio_alarm(fs);
 
     if let Err(err) = alarm_mode {
@@ -105,11 +99,11 @@ fn maybe_reschedule_audio_recording(
             let until_alarm = (*alarm - time.date_time()).num_minutes();
             if until_alarm <= 0 || until_alarm > i64::from(MAX_GAP_MIN) {
                 info!(
-                    "Missed alarm was scheduled for the {} at {}:{} but its {} minutes away",
+                    "Missed alarm was scheduled for the {} at {}:{} but that was {} minutes ago",
                     alarm.day(),
                     alarm.hour(),
                     alarm.minute(),
-                    until_alarm
+                    -until_alarm
                 );
 
                 // should take recording now
@@ -242,7 +236,7 @@ pub fn audio_task(
             recording_type.is_user_requested(),
         );
         if let Err(e) = i2c.stopped_recording(&mut delay) {
-            error!("Error setting recording flag on attiny: {}", e);
+            error!("Error unsetting recording flag on attiny: {}", e);
         }
         if recording_failed {
             events.log(Event::AudioRecordingFailed, time, &mut fs);
@@ -274,7 +268,9 @@ pub fn audio_task(
                 restart(&mut watchdog);
             } else {
                 // Schedule the next audio recording
-                i2c.clear_alarm(&mut delay);
+                if let Err(e) = i2c.clear_alarm(&mut delay) {
+                    error!("{}", e);
+                }
                 reschedule = true;
                 clear_audio_alarm(&mut fs);
                 if recording_type.is_thermal_requested() {
@@ -390,7 +386,10 @@ fn power_down_or_restart(
             }
         }
 
-        if i2c.alarm_triggered(&mut delay) {
+        if i2c.alarm_triggered(&mut delay).unwrap_or_else(|e| {
+            error!("{}", e);
+            false
+        }) {
             info!("Alarm triggered after taking a recording resetting rp2040");
             restart(&mut watchdog);
         }
@@ -476,7 +475,7 @@ pub fn schedule_next_recording(
     if config.records_audio_and_thermal() {
         let (start, end) = config.next_or_current_recording_window(&current_time);
         info!(
-            "Checking next alarm {}:{} for rec window start{}:{}",
+            "Checking next alarm {}:{} for rec window start {}:{}",
             wakeup.hour(),
             wakeup.minute(),
             start.hour(),

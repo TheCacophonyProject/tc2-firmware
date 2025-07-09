@@ -6,12 +6,11 @@ use cortex_m::delay::Delay;
 use crc::{Algorithm, Crc};
 use defmt::{Format, error, info, warn};
 use embedded_hal::digital::InputPin;
-use embedded_hal::i2c::I2c;
+use embedded_hal::i2c::{Error, ErrorKind, I2c};
 use pcf8563::{Control, DateTime, PCF8563};
 use rp2040_hal::I2C;
 use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
 use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput};
-use rp2040_hal::i2c::Error;
 
 pub type I2CConfig = I2C<
     I2C1,
@@ -20,8 +19,12 @@ pub type I2CConfig = I2C<
         Pin<Gpio7, FunctionI2C, PullUp>,
     ),
 >;
+
+type I2cUnlockedPin = Pin<Gpio3, FunctionSio<SioInput>, PullDown>;
+type I2cLockedPin = Pin<Gpio3, FunctionSio<SioInput>, PullUp>;
+
 pub struct SharedI2C {
-    unlocked_pin: Option<Pin<Gpio3, FunctionSio<SioInput>, PullDown>>,
+    unlocked_pin: Option<I2cUnlockedPin>,
     i2c: Option<I2CConfig>,
     rtc: Option<PCF8563<I2CConfig>>,
 }
@@ -171,6 +174,52 @@ impl AudioRecordingType {
     }
 }
 
+static I2C_ATTINY_CRC_MISMATCH_ERROR: &str = "CRC mismatch";
+static I2C_ATTINY_WRITE_FAILED: &str = "Attiny write failed";
+static I2C_UNKNOWN_ERROR: &str = "i2c unknown error";
+
+fn map_i2c_err(e: ErrorKind) -> &'static str {
+    match e {
+        ErrorKind::Bus => "i2c bus error",
+        ErrorKind::ArbitrationLoss => "i2c arbitration loss error",
+        ErrorKind::NoAcknowledge(src) => match src {
+            embedded_hal::i2c::NoAcknowledgeSource::Data => "i2c no acknowledge (data) error",
+            embedded_hal::i2c::NoAcknowledgeSource::Address => "i2c no acknowledge (address) error",
+            embedded_hal::i2c::NoAcknowledgeSource::Unknown => "i2c no acknowledge (unknown) error",
+        },
+        ErrorKind::Overrun => "i2c overrun error",
+        ErrorKind::Other => "i2c other error",
+        _ => I2C_UNKNOWN_ERROR,
+    }
+}
+
+fn map_rtc_err(e: pcf8563::Error<rp2040_hal::i2c::Error>) -> &'static str {
+    match e {
+        pcf8563::Error::I2C(e) => match e {
+            rp2040_hal::i2c::Error::Abort(err_code) => {
+                error!("rtc/i2c abort {}", err_code);
+                "rtc/i2c abort error"
+            }
+            rp2040_hal::i2c::Error::InvalidReadBufferLength => {
+                "rtc/i2c zero length read buffer passed"
+            }
+            rp2040_hal::i2c::Error::InvalidWriteBufferLength => {
+                "rtc/i2c zero length write buffer passed"
+            }
+            rp2040_hal::i2c::Error::AddressOutOfRange(address) => {
+                error!("rtc/i2c address out of range: {}", address);
+                "rtc/i2c address out of range"
+            }
+            rp2040_hal::i2c::Error::AddressReserved(address) => {
+                error!("rtc/i2c address reserved : {}", address);
+                "rtc/i2c address reserved "
+            }
+            _ => I2C_UNKNOWN_ERROR,
+        },
+        pcf8563::Error::InvalidInputData => "rtc/i2c invalid input data",
+    }
+}
+
 #[repr(u8)]
 enum CameraConnectionState {
     NoConnection = 0x00,
@@ -186,6 +235,7 @@ const REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
 const REG_KEEP_ALIVE: u8 = 0x0e;
 //const REG_PI_WAKEUP: u8 = 0x06;
 const REG_TC2_AGENT_STATE: u8 = 0x07;
+const DEFAULT_MAX_I2C_ATTEMPTS: u8 = 100;
 
 pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
     width: 16,
@@ -253,265 +303,207 @@ impl SharedI2C {
         }
     }
 
-    fn i2c(&mut self) -> &mut I2CConfig {
-        if let Some(device) = self.rtc.take() {
-            let dev = device.destroy();
-            self.i2c = Some(dev);
-        }
-        self.i2c.as_mut().unwrap()
-    }
-
-    fn write_i2c(&mut self, data: &[u8]) -> Result<(), Error> {
-        let result = self.i2c().write(ATTINY_ADDRESS, data);
-        while self.i2c().tx_fifo_used() != 0 {}
-        result
-    }
-
-    fn rtc(&mut self) -> &mut PCF8563<I2CConfig> {
-        if let Some(config) = self.i2c.take() {
-            self.rtc = Some(PCF8563::new(config));
-        }
-        self.rtc.as_mut().unwrap()
-    }
-
-    fn attiny_write_command(&mut self, command: u8, value: u8, crc: u16) -> Result<(), Error> {
-        let mut lock_pin = self.unlocked_pin.take().unwrap();
-        let is_low = lock_pin.is_low().unwrap_or(false);
-        if is_low {
-            let pin = lock_pin.into_pull_type::<PullUp>();
-            let mut payload = [command, value, 0, 0];
-            BigEndian::write_u16(&mut payload[2..=3], crc);
-            let result = self.write_i2c(&payload);
-            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-            result
+    pub fn get_scheduled_alarm_time(&mut self, delay: &mut Delay) -> (Option<u8>, Option<u8>) {
+        let success = self.with_rtc(delay, |rtc| {
+            let hours = rtc.get_alarm_hours().ok();
+            let mins = rtc.get_alarm_minutes().ok();
+            Ok::<(Option<u8>, Option<u8>), &str>((hours, mins))
+        });
+        if let Ok((hours, mins)) = success {
+            (hours, mins)
         } else {
-            self.unlocked_pin = Some(lock_pin);
-            Err(Error::Abort(1))
-        }
-    }
-
-    fn attiny_write_read_command(
-        &mut self,
-        command: u8,
-        value: Option<u8>,
-        payload: &mut [u8; 3],
-    ) -> Result<(), Error> {
-        let mut lock_pin = self.unlocked_pin.take().unwrap();
-        let is_low = lock_pin.is_low().unwrap_or(false);
-        if is_low {
-            let pin = lock_pin.into_pull_type::<PullUp>();
-            let result = if let Some(v) = value {
-                let mut request = [command, v, 0x00, 0x00];
-                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..=1]);
-                BigEndian::write_u16(&mut request[2..=3], crc);
-                self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
-            } else {
-                let mut request = [command, 0x00, 0x00];
-                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
-                BigEndian::write_u16(&mut request[1..=2], crc);
-                self.i2c().write_read(ATTINY_ADDRESS, &request, payload)
-            };
-            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-            result
-        } else {
-            self.unlocked_pin = Some(lock_pin);
-            Err(Error::Abort(1))
-        }
-    }
-
-    fn try_attiny_read_command(
-        &mut self,
-        command: u8,
-        delay: &mut Delay,
-        attempts: Option<i32>,
-    ) -> Result<u8, Error> {
-        let mut payload = [0u8; 3];
-        let max_attempts = attempts.unwrap_or(100);
-        let mut num_attempts = 0;
-        loop {
-            payload[0] = 0;
-            match self.attiny_write_read_command(command, None, &mut payload) {
-                Ok(()) => {
-                    let value = payload[0];
-                    let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&payload[0..1]);
-                    if BigEndian::read_u16(&payload[1..=2]) == crc {
-                        return Ok(payload[0]);
-                    }
-                    num_attempts += 1;
-                    if num_attempts == max_attempts {
-                        return Err(Error::Abort(1));
-                    }
-                    delay.delay_us(500);
-                }
-                Err(e) => {
-                    num_attempts += 1;
-                    if num_attempts == max_attempts {
-                        return Err(e);
-                    }
-                    delay.delay_us(500);
-                }
-            }
+            error!("Failed to get scheduled alarm time from RTC");
+            (None, None)
         }
     }
 
     fn try_attiny_write_command(
         &mut self,
+        delay: &mut Delay,
         command: u8,
         value: u8,
-        delay: &mut Delay,
-    ) -> Result<(), Error> {
-        let mut num_attempts = 0;
-        let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command, value]);
-        loop {
-            match self.attiny_write_command(command, value, crc) {
-                Ok(()) => {
-                    // Now immediately read it back to see that it actually got set properly.
-                    let result = self.try_attiny_read_command(command, delay, None);
-                    if let Ok(set_val) = result {
-                        if set_val == value {
-                            return Ok(());
+    ) -> Result<(), &str> {
+        let request_crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command, value]);
+        self.with_i2c(delay, |i2c| {
+            let mut payload = [command, value, 0, 0];
+            BigEndian::write_u16(&mut payload[2..=3], request_crc);
+            // Write the value
+            let result = i2c
+                .write(ATTINY_ADDRESS, &payload)
+                .map_err(|e| map_i2c_err(e.kind()));
+            while i2c.tx_fifo_used() != 0 {}
+            if result.is_ok() {
+                // Verify that it actually got written:
+                payload[0] = 0;
+                let mut request = [command, 0x00, 0x00];
+                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
+                BigEndian::write_u16(&mut request[1..=2], crc);
+                let result = i2c
+                    .write_read(ATTINY_ADDRESS, &request, &mut payload[0..=2])
+                    .map_err(|e| map_i2c_err(e.kind()));
+                return if result.is_ok() {
+                    let returned_value = payload[0];
+                    let returned_crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[returned_value]);
+                    if BigEndian::read_u16(&payload[1..=2]) == returned_crc {
+                        if returned_value == value {
+                            Ok(())
+                        } else {
+                            warn!(
+                                "Failed writing command {} with value {} to attiny, got {}",
+                                command, value, returned_value
+                            );
+                            Err(I2C_ATTINY_WRITE_FAILED)
                         }
-                        warn!(
-                            "Failed writing command {} with value {} to attiny, got {}",
-                            command, value, set_val
-                        );
                     } else {
-                        warn!(
-                            "Failed reading back value from attiny for command {}",
-                            command
-                        );
-                        // Continue
+                        Err(I2C_ATTINY_CRC_MISMATCH_ERROR)
                     }
-                }
-                Err(e) => {
-                    if num_attempts == 100 {
-                        error!(
-                            "Failed writing command {} with value {} to attiny",
-                            command, value
-                        );
-                        return Err(e);
-                    }
-                    warn!("ATTiny write error, retrying in 500µs");
-                    num_attempts += 1;
-                    delay.delay_us(500);
-                }
-            }
-        }
-    }
-
-    pub fn get_attiny_firmware_version(&mut self, delay: &mut Delay) -> Result<u8, Error> {
-        self.try_attiny_read_command(REG_VERSION, delay, None)
-    }
-
-    pub fn tell_pi_to_shutdown(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x00, delay)
-    }
-
-    pub fn tell_pi_to_wakeup(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x01, delay)
-    }
-
-    pub fn power_ctrl_status(&mut self, delay: &mut Delay) -> Result<u8, Error> {
-        self.try_attiny_read_command(REG_RP2040_PI_POWER_CTRL, delay, None)
-    }
-
-    pub fn get_is_recording(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok((state & tc2_agent_state::RECORDING) == tc2_agent_state::RECORDING),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn attiny_keep_alive(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        self.try_attiny_write_command(REG_KEEP_ALIVE, 0x01, delay)
-    }
-
-    fn set_recording_flag(&mut self, delay: &mut Delay, is_recording: bool) -> Result<(), Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(mut state) => {
-                if is_recording {
-                    state |= tc2_agent_state::RECORDING;
                 } else {
-                    state &= !tc2_agent_state::RECORDING;
-                }
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
-                    Ok(()) => Ok(()),
-                    Err(x) => Err(x),
-                }
+                    result
+                };
             }
-            Err(x) => Err(x),
-        }
+            result
+        })
     }
 
-    fn set_offload_flag(&mut self, delay: &mut Delay, is_recording: bool) -> Result<(), Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(mut state) => {
-                if is_recording {
-                    state |= tc2_agent_state::OFFLOAD;
+    fn attiny_write_read_command(
+        &mut self,
+        delay: &mut Delay,
+        command: u8,
+        value: Option<u8>,
+        payload: &mut [u8; 3],
+    ) -> Result<(), &str> {
+        self.with_i2c(delay, |i2c| {
+            if let Some(v) = value {
+                let mut request = [command, v, 0x00, 0x00];
+                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..=1]);
+                BigEndian::write_u16(&mut request[2..=3], crc);
+                i2c.write_read(ATTINY_ADDRESS, &request, payload)
+                    .map_err(|e| map_i2c_err(e.kind()))
+            } else {
+                let mut request = [command, 0x00, 0x00];
+                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..1]);
+                BigEndian::write_u16(&mut request[1..=2], crc);
+                i2c.write_read(ATTINY_ADDRESS, &request, payload)
+                    .map_err(|e| map_i2c_err(e.kind()))
+            }
+        })
+    }
+
+    fn try_attiny_read_command(
+        &mut self,
+        delay: &mut Delay,
+        command: u8,
+    ) -> Result<u8, &'static str> {
+        let mut payload = [0u8; 3];
+        let request_crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command]);
+        self.with_i2c(delay, |i2c| {
+            payload[0] = 0;
+            let mut request = [command, 0x00, 0x00];
+            BigEndian::write_u16(&mut request[1..=2], request_crc);
+            let result = i2c
+                .write_read(ATTINY_ADDRESS, &request, &mut payload)
+                .map(|r| 0u8)
+                .map_err(|e| map_i2c_err(e.kind()));
+            if result.is_ok() {
+                let value = payload[0];
+                let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[value]);
+                return if BigEndian::read_u16(&payload[1..=2]) == crc {
+                    Ok(value)
                 } else {
-                    state &= !tc2_agent_state::OFFLOAD;
-                }
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, state, delay) {
-                    Ok(()) => Ok(()),
-                    Err(x) => Err(x),
-                }
+                    Err(I2C_ATTINY_CRC_MISMATCH_ERROR)
+                };
             }
-            Err(x) => Err(x),
-        }
+            result
+        })
     }
 
-    pub fn started_recording(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn get_attiny_firmware_version(&mut self, delay: &mut Delay) -> Result<u8, &str> {
+        self.try_attiny_read_command(delay, REG_VERSION)
+    }
+
+    pub fn tell_pi_to_shutdown(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        self.try_attiny_write_command(delay, REG_RP2040_PI_POWER_CTRL, 0x00)
+    }
+
+    pub fn tell_pi_to_wakeup(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        self.try_attiny_write_command(delay, REG_RP2040_PI_POWER_CTRL, 0x01)
+    }
+
+    pub fn power_ctrl_status(&mut self, delay: &mut Delay) -> Result<u8, &str> {
+        self.try_attiny_read_command(delay, REG_RP2040_PI_POWER_CTRL)
+    }
+
+    pub fn get_is_recording(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        Ok((state & tc2_agent_state::RECORDING) == tc2_agent_state::RECORDING)
+    }
+
+    pub fn attiny_keep_alive(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        self.try_attiny_write_command(delay, REG_KEEP_ALIVE, 0x01)
+    }
+
+    fn set_recording_flag(&mut self, delay: &mut Delay, is_recording: bool) -> Result<(), &str> {
+        let mut state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        if is_recording {
+            state |= tc2_agent_state::RECORDING;
+        } else {
+            state &= !tc2_agent_state::RECORDING;
+        }
+        self.try_attiny_write_command(delay, REG_TC2_AGENT_STATE, state)
+    }
+
+    fn set_offload_flag(&mut self, delay: &mut Delay, is_offloading: bool) -> Result<(), &str> {
+        let mut state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        if is_offloading {
+            state |= tc2_agent_state::OFFLOAD;
+        } else {
+            state &= !tc2_agent_state::OFFLOAD;
+        }
+        self.try_attiny_write_command(delay, REG_TC2_AGENT_STATE, state)
+    }
+
+    pub fn started_recording(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.set_recording_flag(delay, true)
     }
 
-    pub fn stopped_recording(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn stopped_recording(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.set_recording_flag(delay, false)
     }
 
-    pub fn begin_offload(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn begin_offload(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.set_offload_flag(delay, true)
     }
 
-    pub fn end_offload(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn end_offload(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.set_offload_flag(delay, false)
     }
 
-    pub fn offload_flag_is_set(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => Ok((state & tc2_agent_state::OFFLOAD) == tc2_agent_state::OFFLOAD),
-            Err(e) => Err(e),
-        }
+    pub fn offload_flag_is_set(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        Ok(state & tc2_agent_state::OFFLOAD == tc2_agent_state::OFFLOAD)
     }
 
-    pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
-            Ok(state) => {
-                let camera_state = CameraState::from(state);
-                match camera_state {
-                    CameraState::PoweredOn | CameraState::PoweringOn => Ok(true),
-                    _ => Ok(false),
-                }
-            }
-            Err(e) => Err(e),
+    pub fn pi_is_waking_or_awake(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_CAMERA_STATE)?;
+        let camera_state = CameraState::from(state);
+        match camera_state {
+            CameraState::PoweredOn | CameraState::PoweringOn => Ok(true),
+            _ => Ok(false),
         }
     }
     pub fn pi_is_awake_and_tc2_agent_is_ready(
         &mut self,
         delay: &mut Delay,
         print: bool,
-    ) -> Result<bool, Error> {
-        let mut recorded_camera_state = None;
-        let pi_is_awake = match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
-            Ok(state) => {
-                recorded_camera_state = Some(CameraState::from(state));
-                let camera_state = CameraState::from(state);
-                match camera_state {
-                    CameraState::PoweredOn => Ok(true),
-                    _ => Ok(false),
-                }
-            }
-            Err(e) => Err(e),
+    ) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_CAMERA_STATE)?;
+        let recorded_camera_state = Some(CameraState::from(state));
+        let camera_state = CameraState::from(state);
+        let pi_is_awake = match camera_state {
+            CameraState::PoweredOn => Ok(true),
+            _ => Ok(false),
         };
+        // FIXME: Tidy control flow
         pi_is_awake.and_then(|is_awake| {
             if is_awake {
                 // If the agent is ready, make sure the REG_RP2040_PI_POWER_CTRL is set to 1
@@ -528,77 +520,67 @@ impl SharedI2C {
         })
     }
 
-    pub fn tc2_agent_is_ready(&mut self, delay: &mut Delay, print: bool) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                if print {
-                    if state == tc2_agent_state::NOT_READY {
-                        info!("tc2-agent not ready");
-                    } else if state == tc2_agent_state::READY {
-                        // 2
-                        info!("tc2-agent ready");
-                    } else if state == tc2_agent_state::NOT_READY | tc2_agent_state::RECORDING {
-                        info!("tc2-agent not ready, rp2040 recording",);
-                    } else if state == tc2_agent_state::READY | tc2_agent_state::RECORDING {
-                        info!("tc2-agent ready and rp2040 recording",);
-                    } else if state
-                        == tc2_agent_state::READY | tc2_agent_state::TEST_AUDIO_RECORDING
-                    {
-                        info!("tc2-agent ready and wanting test audio recording");
-                    } else {
-                        info!("tc2-agent unknown state {:08b}({})", state, state);
-                    }
-                }
-                Ok((state & tc2_agent_state::READY) == tc2_agent_state::READY)
+    pub fn tc2_agent_is_ready(&mut self, delay: &mut Delay, print: bool) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        if print {
+            if state == tc2_agent_state::NOT_READY {
+                info!("tc2-agent not ready");
+            } else if state == tc2_agent_state::READY {
+                // 2
+                info!("tc2-agent ready");
+            } else if state == tc2_agent_state::NOT_READY | tc2_agent_state::RECORDING {
+                info!("tc2-agent not ready, rp2040 recording",);
+            } else if state == tc2_agent_state::READY | tc2_agent_state::RECORDING {
+                info!("tc2-agent ready and rp2040 recording",);
+            } else if state == tc2_agent_state::READY | tc2_agent_state::TEST_AUDIO_RECORDING {
+                info!("tc2-agent ready and wanting test audio recording");
+            } else {
+                info!("tc2-agent unknown state {:08b}({})", state, state);
             }
-            Err(e) => Err(e),
         }
+        Ok((state & tc2_agent_state::READY) == tc2_agent_state::READY)
     }
 
-    pub fn tc2_agent_state(&mut self, delay: &mut Delay) -> Result<u8, Error> {
-        self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)
+    pub fn tc2_agent_state(&mut self, delay: &mut Delay) -> Result<u8, &str> {
+        self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)
     }
 
     pub fn tc2_agent_requested_audio_recording(
         &mut self,
         delay: &mut Delay,
-    ) -> Result<Option<AudioRecordingType>, Error> {
-        let state = self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None)?;
-        let rec_state: bool = state & tc2_agent_state::READY == tc2_agent_state::READY;
+    ) -> Result<Option<AudioRecordingType>, &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        let rec_state = state & tc2_agent_state::READY == tc2_agent_state::READY;
         if rec_state {
             if state & tc2_agent_state::TEST_AUDIO_RECORDING
                 == tc2_agent_state::TEST_AUDIO_RECORDING
             {
-                return Ok(Some(AudioRecordingType::test_recording()));
+                Ok(Some(AudioRecordingType::test_recording()))
             } else if state & tc2_agent_state::LONG_AUDIO_RECORDING
                 == tc2_agent_state::LONG_AUDIO_RECORDING
             {
-                return Ok(Some(AudioRecordingType::long_recording()));
+                Ok(Some(AudioRecordingType::long_recording()))
             } else if state & tc2_agent_state::TAKE_AUDIO == tc2_agent_state::TAKE_AUDIO {
-                return Ok(Some(AudioRecordingType::thermal_scheduled_recording()));
+                Ok(Some(AudioRecordingType::thermal_scheduled_recording()))
+            } else {
+                Ok(None)
             }
+        } else {
+            Ok(None)
         }
-        Ok(None)
     }
 
-    pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn tc2_agent_clear_test_audio_rec(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::TEST_AUDIO_RECORDING, false)
     }
 
-    pub fn tc2_agent_clear_mode_flags(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                let mut val = state & !tc2_agent_state::LONG_AUDIO_RECORDING;
-                val &= !tc2_agent_state::TEST_AUDIO_RECORDING;
-                val &= !tc2_agent_state::THERMAL_MODE;
-                val &= !tc2_agent_state::TAKE_AUDIO;
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
-                    Ok(()) => Ok(()),
-                    Err(x) => Err(x),
-                }
-            }
-            Err(e) => Err(e),
-        }
+    pub fn tc2_agent_clear_mode_flags(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        let mut val = state & !tc2_agent_state::LONG_AUDIO_RECORDING;
+        val &= !tc2_agent_state::TEST_AUDIO_RECORDING;
+        val &= !tc2_agent_state::THERMAL_MODE;
+        val &= !tc2_agent_state::TAKE_AUDIO;
+        self.try_attiny_write_command(delay, REG_TC2_AGENT_STATE, val)
     }
 
     pub fn tc2_agent_write_flag(
@@ -606,17 +588,10 @@ impl SharedI2C {
         delay: &mut Delay,
         flag: u8,
         set: bool,
-    ) -> Result<(), Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                let val = if set { state | flag } else { state & !flag };
-                match self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay) {
-                    Ok(()) => Ok(()),
-                    Err(x) => Err(x),
-                }
-            }
-            Err(e) => Err(e),
-        }
+    ) -> Result<(), &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        let val = if set { state | flag } else { state & !flag };
+        self.try_attiny_write_command(delay, REG_TC2_AGENT_STATE, val)
     }
 
     pub fn tc2_agent_clear_and_set_flag(
@@ -624,398 +599,347 @@ impl SharedI2C {
         delay: &mut Delay,
         clear_flag: u8,
         set_flag: Option<u8>,
-    ) -> Result<(), Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                let mut val = state & !clear_flag;
-                if let Some(flag) = set_flag {
-                    val |= flag;
-                }
-                self.try_attiny_write_command(REG_TC2_AGENT_STATE, val, delay)
-            }
-            Err(e) => Err(e),
+    ) -> Result<(), &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        let mut val = state & !clear_flag;
+        if let Some(flag) = set_flag {
+            val |= flag;
         }
+        self.try_attiny_write_command(delay, REG_TC2_AGENT_STATE, val)
     }
 
-    pub fn tc2_agent_requested_thermal_mode(&mut self, delay: &mut Delay) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_TC2_AGENT_STATE, delay, None) {
-            Ok(state) => {
-                Ok((state & tc2_agent_state::THERMAL_MODE) == tc2_agent_state::THERMAL_MODE)
-            }
-            Err(e) => Err(e),
-        }
+    pub fn tc2_agent_requested_thermal_mode(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_TC2_AGENT_STATE)?;
+        Ok((state & tc2_agent_state::THERMAL_MODE) == tc2_agent_state::THERMAL_MODE)
     }
-    pub fn tc2_agent_request_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn tc2_agent_request_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::THERMAL_MODE, true)
     }
 
-    pub fn tc2_agent_clear_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn tc2_agent_clear_thermal_mode(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::THERMAL_MODE, false)
     }
 
-    pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn tc2_agent_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::TAKE_AUDIO, true)
     }
 
-    pub fn tc2_agent_clear_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), Error> {
+    pub fn tc2_agent_clear_take_audio_rec(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.tc2_agent_write_flag(delay, tc2_agent_state::TAKE_AUDIO, false)
     }
 
-    pub fn pi_is_powered_down(&mut self, delay: &mut Delay, print: bool) -> Result<bool, Error> {
-        match self.try_attiny_read_command(REG_CAMERA_STATE, delay, None) {
-            Ok(state) => {
-                let camera_state = CameraState::from(state);
-                if print {
-                    info!("Pi camera state {}", camera_state);
-                }
-                match camera_state {
-                    CameraState::PoweredOff => Ok(true),
-                    _ => Ok(false),
-                }
-            }
-            Err(e) => Err(e),
+    pub fn pi_is_powered_down(&mut self, delay: &mut Delay, print: bool) -> Result<bool, &str> {
+        let state = self.try_attiny_read_command(delay, REG_CAMERA_STATE)?;
+        let camera_state = CameraState::from(state);
+        if print {
+            info!("Pi camera state {}", camera_state);
+        }
+        match camera_state {
+            CameraState::PoweredOff => Ok(true),
+            _ => Ok(false),
         }
     }
 
     pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, &str> {
-        let mut num_attempts = 0;
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let result = match self.rtc().get_datetime() {
-                    Ok(datetime) => {
-                        if num_attempts != 0 {
-                            info!("Getting datetime took {} attempts", num_attempts);
-                        }
-                        if datetime.day == 0
-                            || datetime.day > 31
-                            || datetime.month == 0
-                            || datetime.month > 12
-                        {
-                            Err("Invalid datetime input from RTC")
-                        } else {
-                            Ok(datetime)
-                        }
-                    }
-                    Err(pcf8563::Error::I2C(e)) => Err("I2C error to RTC"),
-                    Err(pcf8563::Error::InvalidInputData) => {
-                        unreachable!("Should never get here")
-                    }
-                };
-
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if result.is_ok() || num_attempts == 100 {
-                    return result;
-                }
-                num_attempts += 1;
-                delay.delay_us(500);
-            } else {
-                num_attempts += 1;
-                delay.delay_us(500);
-                self.unlocked_pin = Some(lock_pin);
-                if num_attempts == 100 {
-                    return Err("I2C in use");
+        self.with_rtc(delay, |rtc| match rtc.get_datetime() {
+            Ok(datetime) => {
+                if datetime.day == 0
+                    || datetime.day > 31
+                    || datetime.month == 0
+                    || datetime.month > 12
+                {
+                    Err("Invalid datetime output from RTC")
+                } else {
+                    Ok(datetime)
                 }
             }
-        }
+            Err(e) => Err(map_rtc_err(e)),
+        })
     }
 
     pub fn enable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
-        let mut attempts = 0;
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let mut success = true;
-                success = success && self.rtc().clear_alarm_flag().is_ok();
-                success = success && self.rtc().control_alarm_interrupt(Control::On).is_ok();
-                success = success && self.rtc().control_alarm_interrupt(Control::On).is_ok();
-                success = success && self.rtc().control_alarm_day(Control::Off).is_ok();
-                success = success && self.rtc().control_alarm_hours(Control::On).is_ok();
-                success = success && self.rtc().control_alarm_minutes(Control::On).is_ok();
-                success = success && self.rtc().control_alarm_weekday(Control::Off).is_ok();
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if success {
-                    return Ok(());
-                }
-                attempts += 1;
-                if attempts == 100 {
-                    return Err("Failed to enable alarm");
-                }
-                delay.delay_us(500);
+        self.with_rtc(delay, |rtc| {
+            let mut success = true;
+            success = success && rtc.clear_alarm_flag().is_ok();
+            success = success && rtc.control_alarm_interrupt(Control::On).is_ok();
+            success = success && rtc.control_alarm_day(Control::Off).is_ok();
+            success = success && rtc.control_alarm_hours(Control::On).is_ok();
+            success = success && rtc.control_alarm_minutes(Control::On).is_ok();
+            success = success && rtc.control_alarm_weekday(Control::Off).is_ok();
+            if success {
+                Ok(())
             } else {
-                attempts += 1;
-                self.unlocked_pin = Some(lock_pin);
-                if attempts == 100 {
-                    return Err("Failed to access I2C to enable alarm");
-                }
-                delay.delay_us(500);
+                Err("Failed to enable alarm")
             }
-        }
+        })
     }
 
     pub fn disable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
-        let mut attempts = 0;
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let mut success = true;
-                success = success && self.rtc().clear_alarm_flag().is_ok();
-                success = success && self.rtc().control_alarm_interrupt(Control::Off).is_ok();
-                success = success && self.rtc().disable_all_alarms().is_ok();
-
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if success {
-                    return Ok(());
-                }
-                attempts += 1;
-                if attempts == 100 {
-                    return Err("Failed to enable alarm");
-                }
-                delay.delay_us(500);
+        self.with_rtc(delay, |rtc| {
+            let mut success = true;
+            success = success && rtc.clear_alarm_flag().is_ok();
+            success = success && rtc.control_alarm_interrupt(Control::Off).is_ok();
+            success = success && rtc.disable_all_alarms().is_ok();
+            if success {
+                Ok(())
             } else {
-                attempts += 1;
-                self.unlocked_pin = Some(lock_pin);
-                if attempts == 100 {
-                    return Err("Failed to access I2C to enable alarm");
-                }
-                delay.delay_us(500);
+                Err("Failed to disable alarm")
             }
-        }
+        })
     }
+
     pub fn set_wakeup_alarm(
         &mut self,
         datetime_utc: &chrono::DateTime<Utc>,
         delay: &mut Delay,
     ) -> Result<(), &str> {
-        let wake_hour = datetime_utc.time().hour();
-        let wake_min = datetime_utc.time().minute();
-        info!("Setting wake alarm for UTC {}h:{}m", wake_hour, wake_min);
-        let mut num_attempts = 0;
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            #[allow(clippy::cast_possible_truncation)]
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let mut success = true;
-                success = success && self.rtc().set_alarm_hours(wake_hour as u8).is_ok();
-                success = success && self.rtc().set_alarm_minutes(wake_min as u8).is_ok();
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if success {
-                    return Ok(());
-                }
-                if num_attempts == 100 {
-                    return Err("Failed to set wakeup alarm");
-                }
-                num_attempts += 1;
-                delay.delay_us(500);
+        #[allow(clippy::cast_possible_truncation)]
+        let wake_hour = datetime_utc.time().hour() as u8;
+        #[allow(clippy::cast_possible_truncation)]
+        let wake_min = datetime_utc.time().minute() as u8;
+        info!("Setting wake alarm for UTC {}:{}", wake_hour, wake_min);
+        let success = self.with_rtc(delay, |rtc| {
+            let mut success = true;
+            success = success && rtc.set_alarm_hours(wake_hour).is_ok();
+            success = success && rtc.set_alarm_minutes(wake_min).is_ok();
+            if success {
+                Ok(())
             } else {
-                num_attempts += 1;
-                self.unlocked_pin = Some(lock_pin);
-                if num_attempts == 100 {
-                    return Err("Failed to access I2C to set wakeup alarm");
-                }
-                delay.delay_us(500);
+                Err("Failed to set wakeup alarm")
             }
+        });
+        if success.is_ok() {
+            info!("Set alarm {:?}", self.get_scheduled_alarm_time(delay));
         }
+        success
     }
 
-    pub fn alarm_triggered(&mut self, delay: &mut Delay) -> bool {
-        // NOTE: This only returns on success, otherwise it blocks indefinitely.
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let result = self.rtc().get_alarm_flag();
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if let Ok(result) = result {
-                    return result;
-                }
-            } else {
-                self.unlocked_pin = Some(lock_pin);
-            }
-            delay.delay_us(500);
+    pub fn alarm_triggered(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        self.with_rtc(delay, |rtc| rtc.get_alarm_flag().map_err(map_rtc_err))
+    }
+
+    fn restore_i2c_rtc_lock_pin(&mut self, pin: I2cLockedPin, rtc: PCF8563<I2CConfig>) {
+        self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+        self.rtc = Some(rtc);
+    }
+
+    fn take_i2c_rtc_lock(&mut self) -> Option<(I2cLockedPin, PCF8563<I2CConfig>)> {
+        if let Some(config) = self.i2c.take() {
+            self.rtc = Some(PCF8563::new(config));
         }
-    }
-
-    pub fn clear_alarm(&mut self, delay: &mut Delay) {
-        // FIXME: deal with all this duplicate logic
-        // NOTE: This only returns on success, otherwise it blocks indefinitely.
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let result = self.rtc().clear_alarm_flag();
-                let success = result.is_ok();
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if success {
-                    return;
-                }
-            } else {
-                self.unlocked_pin = Some(lock_pin);
-            }
-            delay.delay_us(500);
-        }
-    }
-
-    pub fn alarm_interrupt_enabled(&mut self, delay: &mut Delay) -> Result<bool, &str> {
-        let mut attempts = 0;
-        loop {
-            let mut lock_pin = self.unlocked_pin.take().unwrap();
-            let is_low = lock_pin.is_low().unwrap_or(false);
-            if is_low {
-                let pin = lock_pin.into_pull_type::<PullUp>();
-                let result = self.rtc().is_alarm_interrupt_enabled();
-                let success = result.is_ok();
-                self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-                if success {
-                    return Ok(result.unwrap());
-                }
-                attempts += 1;
-                if attempts == 100 {
-                    return Err("Failed to enable alarm");
-                }
-                delay.delay_us(500);
-            } else {
-                attempts += 1;
-                self.unlocked_pin = Some(lock_pin);
-                if attempts == 100 {
-                    return Err("Failed to access I2C to enable alarm");
-                }
-                delay.delay_us(500);
-            }
-        }
-    }
-
-    pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), Error> {
-        self.try_attiny_write_command(REG_RP2040_PI_POWER_CTRL, 0x02, delay)
-    }
-
-    fn read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), Error> {
         let mut lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
             let pin = lock_pin.into_pull_type::<PullUp>();
-            let result = self.i2c().write_read(EEPROM_ADDRESS, &[command], payload);
-            self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
-            result
+            Some((pin, self.rtc.take().unwrap()))
         } else {
             self.unlocked_pin = Some(lock_pin);
-            Err(Error::Abort(1))
+            None
         }
+    }
+
+    fn take_i2c_attiny_lock(&mut self) -> Option<(I2cLockedPin, I2CConfig)> {
+        if let Some(device) = self.rtc.take() {
+            let dev = device.destroy();
+            self.i2c = Some(dev);
+        }
+        let mut lock_pin = self.unlocked_pin.take().unwrap();
+        let is_low = lock_pin.is_low().unwrap_or(false);
+        if is_low {
+            let pin = lock_pin.into_pull_type::<PullUp>();
+            Some((pin, self.i2c.take().unwrap()))
+        } else {
+            self.unlocked_pin = Some(lock_pin);
+            None
+        }
+    }
+
+    fn restore_i2c_attiny_lock_pin(&mut self, pin: I2cLockedPin, i2c: I2CConfig) {
+        self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+        self.i2c = Some(i2c);
+    }
+
+    fn with_rtc<SUCCESS>(
+        &mut self,
+        delay: &mut Delay,
+        mut func: impl FnMut(&mut PCF8563<I2CConfig>) -> Result<SUCCESS, &'static str>,
+    ) -> Result<SUCCESS, &'static str> {
+        let mut attempts = 0;
+        loop {
+            let result = if let Some((pin, mut rtc)) = self.take_i2c_rtc_lock() {
+                let result = func(&mut rtc);
+                self.restore_i2c_rtc_lock_pin(pin, rtc);
+                result
+            } else {
+                Err("Failed to get i2c lock")
+            };
+            if result.is_ok() {
+                return result;
+            }
+            if attempts >= DEFAULT_MAX_I2C_ATTEMPTS {
+                return result;
+            }
+            attempts += 1;
+            delay.delay_us(500);
+        }
+    }
+
+    fn with_i2c<SUCCESS>(
+        &mut self,
+        delay: &mut Delay,
+        mut func: impl FnMut(&mut I2CConfig) -> Result<SUCCESS, &'static str>,
+    ) -> Result<SUCCESS, &'static str> {
+        let mut attempts = 0;
+        loop {
+            let result = if let Some((pin, mut i2c)) = self.take_i2c_attiny_lock() {
+                let result = func(&mut i2c);
+                self.restore_i2c_attiny_lock_pin(pin, i2c);
+                result
+            } else {
+                Err("Failed to get i2c lock")
+            };
+            if result.is_ok() {
+                return result;
+            }
+            if attempts >= DEFAULT_MAX_I2C_ATTEMPTS {
+                return result;
+            }
+            attempts += 1;
+            delay.delay_us(500);
+        }
+    }
+
+    pub fn clear_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        self.with_rtc(delay, |rtc| rtc.clear_alarm_flag().map_err(map_rtc_err))
+    }
+
+    pub fn alarm_interrupt_enabled(&mut self, delay: &mut Delay) -> Result<bool, &str> {
+        self.with_rtc(delay, |rtc| {
+            rtc.is_alarm_interrupt_enabled().map_err(map_rtc_err)
+        })
+    }
+
+    pub fn tell_attiny_to_power_down_rp2040(&mut self, delay: &mut Delay) -> Result<(), &str> {
+        self.try_attiny_write_command(delay, REG_RP2040_PI_POWER_CTRL, 0x02)
     }
 
     fn try_read_eeprom_command(
         &mut self,
-        command: u8,
         delay: &mut Delay,
-        attempts: Option<i32>,
+        command: u8,
         payload: &mut [u8],
-    ) -> Result<(), Error> {
-        let max_attempts = attempts.unwrap_or(100);
-        let mut num_attempts = 0;
-        loop {
-            match self.read_eeprom_command(command, payload) {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(e) => {
-                    num_attempts += 1;
-                    if num_attempts == max_attempts {
-                        return Err(e);
-                    }
-                    delay.delay_us(500);
-                }
-            }
-        }
+    ) -> Result<(), &str> {
+        self.with_i2c(delay, |i2c| {
+            i2c.write_read(EEPROM_I2C_ADDRESS, &[command], payload)
+                .map_err(|e| map_i2c_err(e.kind()))
+        })
     }
 
     pub fn check_if_is_audio_device(&mut self, delay: &mut Delay) -> Result<bool, ()> {
         let page_length: usize = 16;
-
-        let mut read_length: usize;
         assert!(EEPROM_LENGTH < usize::from(u8::MAX));
-        let mut eeprom_data = [0u8; EEPROM_LENGTH];
-        for i in (0..EEPROM_LENGTH).step_by(page_length) {
-            read_length = if EEPROM_LENGTH - i < page_length {
-                EEPROM_LENGTH - i
-            } else {
-                page_length
-            };
+        let mut eeprom = Eeprom::from_bytes([0u8; EEPROM_LENGTH]);
+        for (chunk_num, chunk) in eeprom.as_mut().chunks_mut(16).enumerate() {
             #[allow(clippy::cast_possible_truncation)]
-            if let Err(e) = self.try_read_eeprom_command(
-                i as u8,
-                delay,
-                None,
-                &mut eeprom_data[i..read_length + i],
-            ) {
-                warn!("Couldn't read eeprom data {}", e);
-                return Err(());
-            }
-            if i == 0 && eeprom_data[1] == 1 {
-                // don't think any need to parse as it has no audio info
-                info!("Need eeprom version 2 ");
+            if let Err(e) = self.try_read_eeprom_command(delay, chunk_num as u8, chunk) {
+                warn!("Couldn't read eeprom data: {}", e);
                 return Err(());
             }
         }
-        let has_data = eeprom_data.iter().any(|&x| x != 0xff);
-        if !has_data {
-            info!("No EEPROM data");
+        if !eeprom.has_valid_data() {
             return Err(());
         }
-
-        if eeprom_data[0] != 0xCA {
-            info!(
-                "Incorrect first byte got {} should be {}",
-                eeprom_data[0], 0xCA
-            );
-            return Err(());
-        }
-        let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&eeprom_data[..eeprom_data.len() - 2]);
-        let gotcrc = BigEndian::read_u16(&eeprom_data[eeprom_data.len() - 2..]);
-        if gotcrc == crc {
-            return Ok(eeprom_data[14] > 0);
-        }
-        info!("CRC failed expected {} got {}", crc, gotcrc);
-        Err(())
+        Ok(eeprom.audio_only())
     }
 }
 
 const EEPROM_LENGTH: usize = 1 + 1 + 3 * 4 + 1 + 8 + 4 + 2;
-const EEPROM_ADDRESS: u8 = 0x50;
+const EEPROM_I2C_ADDRESS: u8 = 0x50;
 
-//not used to save memory
-// #[derive(Format)]
-// pub struct EEPROM {
-//     pub version: u8,
-//     pub hardware_version: [u8; 3],
-//     pub power_version: [u8; 3],
-//     pub touch_version: [u8; 3],
-//     pub mic_version: [u8; 3],
-//     pub audio_only: bool,
-//     pub id: u64,
-//     pub timestamp: u32,
-// }
+pub struct Eeprom {
+    inner: [u8; EEPROM_LENGTH],
+}
 
-// impl EEPROM {
-//     pub fn new(payload: &[u8]) -> EEPROM {
-//         EEPROM {
-//             version: payload[0],
-//             hardware_version: payload[1..4].try_into().unwrap(),
-//             power_version: payload[4..7].try_into().unwrap(),
-//             touch_version: payload[7..10].try_into().unwrap(),
-//             mic_version: payload[10..13].try_into().unwrap(),
-//             audio_only: payload[13] > 0,
-//             id: BigEndian::read_u64(&payload[4..12]),
-//             timestamp: BigEndian::read_u32(&payload[12..16]),
-//         }
-//     }
-// }
+impl Eeprom {
+    pub fn from_bytes(bytes: [u8; EEPROM_LENGTH]) -> Self {
+        Self { inner: bytes }
+    }
+
+    pub fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.inner
+    }
+
+    pub fn version(&self) -> u8 {
+        self.inner[0]
+    }
+
+    pub fn hardware_version(&self) -> [u8; 3] {
+        self.inner[1..4].try_into().unwrap()
+    }
+
+    pub fn power_version(&self) -> [u8; 3] {
+        self.inner[4..7].try_into().unwrap()
+    }
+
+    pub fn touch_version(&self) -> [u8; 3] {
+        self.inner[7..10].try_into().unwrap()
+    }
+
+    pub fn mic_version(&self) -> [u8; 3] {
+        self.inner[10..13].try_into().unwrap()
+    }
+
+    pub fn audio_only(&self) -> bool {
+        self.inner[13] != 0
+    }
+
+    pub fn id(&self) -> u64 {
+        BigEndian::read_u64(&self.inner[4..12])
+    }
+
+    pub fn timestamp(&self) -> chrono::DateTime<Utc> {
+        // FIXME: If we want to use this, need to know what increments the timestamp was stored in.
+        let timestamp = i64::from(BigEndian::read_u32(&self.inner[12..16]));
+        chrono::DateTime::<Utc>::from_timestamp_micros(timestamp).unwrap()
+    }
+
+    pub fn crc_16(&self) -> u16 {
+        BigEndian::read_u16(&self.inner[self.inner.len() - 2..])
+    }
+
+    pub fn has_valid_data(&self) -> bool {
+        let has_data = self.inner.iter().any(|&x| x != 0xff);
+        if !has_data {
+            info!("No EEPROM data");
+            false
+        } else if self.version() != 0xca {
+            info!(
+                "Incorrect first byte got {} should be {}",
+                self.version(),
+                0xca
+            );
+            false
+        } else if !self.crc_is_valid() {
+            false
+        } else if self.hardware_version()[0] == 1 {
+            info!("Need eeprom version 2");
+            false
+        } else {
+            true
+        }
+    }
+
+    pub fn crc_is_valid(&self) -> bool {
+        let embedded_crc =
+            Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&self.inner[..self.inner.len() - 2]);
+        let calculated_crc = self.crc_16();
+        let valid = embedded_crc == calculated_crc;
+        if !valid {
+            info!(
+                "CRC failed expected {} got {}",
+                calculated_crc, embedded_crc
+            );
+        }
+        valid
+    }
+}

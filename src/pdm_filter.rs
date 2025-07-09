@@ -123,7 +123,8 @@ impl PDMFilter {
                 ((256 - i64::from(self.lp_alpha)) * oldz + i64::from(self.lp_alpha) * old_out) >> 8;
             z = oldz * i64::from(volume);
             z = round_div(z, i64::from(self.div_const));
-            // FIXME: Any reason why this isn't i16::MIN/i16::MAX?
+            // NOTE: Any reason why this isn't i16::MIN/i16::MAX?  We don't really know, it's like
+            //  that in the code this was ported from.
             z = z.clamp(-32700, 32700);
 
             #[allow(clippy::cast_possible_truncation)]

@@ -372,22 +372,19 @@ impl LeptonModule {
                 • If Bit 0 is 0, then the interface is ready for receiving commands.
         */
         info!("=== Init lepton module ===");
-        info!("Disable FFC");
         // NOTE: It's actually quite good if we don't have FFC interrupt the video feed - we can
         //  just discard those frames later based on the telemetry, and this helps with sync.
         let success = self.disable_automatic_ffc();
         if success.is_err() {
-            warn!("{}", success);
+            warn!("Could not disable automatic FFC {}", success);
         }
 
         //let mut t_enabled = false;
-        info!("Enable telemetry");
         let success = self.enable_telemetry();
         if success.is_err() {
-            warn!("{}", success);
+            warn!("Could not enable telemetry? {}", success);
         }
         let telemetry_enabled = self.telemetry_enabled();
-        info!("Telemetry enabled? {}", telemetry_enabled);
         if let Ok(telemetry_enabled) = telemetry_enabled {
             if !telemetry_enabled {
                 panic!("Telemetry disabled");
@@ -396,7 +393,6 @@ impl LeptonModule {
             panic!("Telemetry not set");
         }
         let telemetry_location = self.telemetry_location();
-        info!("Telemetry location? {}", telemetry_location);
         if let Ok(telemetry_location) = telemetry_location {
             if telemetry_location != TelemetryLocation::Header {
                 panic!("Telemetry not in header");
@@ -404,14 +400,11 @@ impl LeptonModule {
         } else {
             panic!("Telemetry not in header");
         }
-
-        info!("Enable post-processing");
         let success = self.enable_post_processing();
         if success.is_err() {
             warn!("{}", success);
         }
         let radiometry_enabled = self.radiometric_mode_enabled();
-        info!("Radiometry enabled? {}", radiometry_enabled);
         if let Ok(radiometry_enabled) = radiometry_enabled {
             if !radiometry_enabled {
                 panic!("Radiometry not enabled");
@@ -420,13 +413,11 @@ impl LeptonModule {
             panic!("Radiometry not enabled");
         }
 
-        info!("Enable vsync");
         let success = self.enable_vsync();
         if success.is_err() {
-            warn!("{}", success);
+            warn!("Could not enable vsync {}", success);
         }
         let vsync_enabled = self.vsync_enabled();
-        info!("Vsync enabled? {}", vsync_enabled);
         if let Ok(vsync_enabled) = vsync_enabled {
             if !vsync_enabled {
                 panic!("Vsync not enabled");
@@ -746,7 +737,6 @@ impl LeptonModule {
         }
     }
 
-    // TODO: Get FFC desired from camera struct.
     pub fn do_ffc(&mut self) -> Result<bool, LeptonError> {
         self.execute_command_non_blocking(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,

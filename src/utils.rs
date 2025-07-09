@@ -7,6 +7,7 @@ pub unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 }
 
 pub fn restart(watchdog: &mut Watchdog) {
+    // Is this long enough to print any message to the terminal about why we're restarting?
     watchdog.start(100.micros());
     loop {
         nop();

@@ -32,7 +32,9 @@ pub fn current_recording_mode(
     let mut is_audio_device = config.is_audio_device();
     let mut is_audio_only_device = config.audio_mode() == AudioMode::AudioOnly;
     if let Ok(audio_only) = i2c.check_if_is_audio_device(delay) {
-        info!("EEPROM audio device: {}", audio_only);
+        if audio_only {
+            info!("Found EEPROM audio-only device");
+        }
         is_audio_only_device = audio_only;
         is_audio_device = is_audio_device || audio_only;
     }
@@ -207,20 +209,20 @@ pub fn get_next_audio_alarm(
         if let Some(audio_alarm) = audio_alarm {
             match alarm_mode {
                 Ok(alarm_mode) => {
-                    // NOTE:
+                    let synced = time.date_time();
+                    let until_alarm = (audio_alarm - synced).num_minutes();
+                    info!(
+                        "Alarm in mode {} already scheduled for {}-{}-{} {}:{} ({}mins from now)",
+                        alarm_mode,
+                        audio_alarm.year(),
+                        audio_alarm.month(),
+                        audio_alarm.day(),
+                        audio_alarm.hour(),
+                        audio_alarm.minute(),
+                        until_alarm
+                    );
                     if alarm_mode == AlarmMode::Audio {
-                        let synced = time.date_time();
-                        let until_alarm = (audio_alarm - synced).num_minutes();
-                        // FIXME: This doesn't seem to handle alarms in the past?
                         if until_alarm <= i64::from(MAX_GAP_MIN) {
-                            info!(
-                                "Audio alarm already scheduled for {}-{}-{} {}:{}",
-                                audio_alarm.year(),
-                                audio_alarm.month(),
-                                audio_alarm.day(),
-                                audio_alarm.hour(),
-                                audio_alarm.minute()
-                            );
                             if check_alarm_still_valid_with_thermal_window(
                                 &audio_alarm,
                                 &synced,
@@ -275,8 +277,6 @@ pub fn maybe_offload_files_and_events_on_startup(
     delay: &mut Delay,
     watchdog: &mut Watchdog,
 ) {
-    warn!("Recording mode {:?}", recording_mode);
-
     let has_files_to_offload = fs.has_recordings_to_offload();
     if has_files_to_offload {
         info!(
@@ -303,10 +303,9 @@ pub fn maybe_offload_files_and_events_on_startup(
         RecordingMode::Thermal => fs.is_too_full_to_start_new_cptv_recordings(),
     };
 
-    info!(
-        "Too full to record? {}",
-        is_too_full_to_record_in_current_mode
-    );
+    if is_too_full_to_record_in_current_mode {
+        warn!("Too full to record in current mode");
+    }
 
     let is_old_file_system = fs.file_start_block_index.is_none();
     let mut offload_wake_reason = WakeReason::Unknown;

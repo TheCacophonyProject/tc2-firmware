@@ -432,6 +432,7 @@ impl OnboardFlash {
         }
 
         assert_ne!(block_index, 0, "No good blocks found for config");
+        // FIXME: audio_block config seems to be unused?
         self.audio_block = Some(block_index);
         block_index = block_index.saturating_sub(1);
         // FIXME: In this instance, we don't have the ability to write the fact that there
@@ -514,8 +515,7 @@ impl OnboardFlash {
             self.config_block.is_some(),
             "Config block has not been initialized, call fs.init()"
         );
-        info!("Reading config from {}", self.config_block);
-        //guess this is the size of the config at the moment
+        // guess this is the size of the config at the moment
         let mut config_bytes = [0u8; 2400 + 105];
 
         let block_index = self.config_block.unwrap();
@@ -584,8 +584,8 @@ impl OnboardFlash {
             }
 
             // If the first byte of a file is 1, it was an audio file.
-            // FIXME: Let's do better and write the type into the user-metadata too - remove the shebang
-            //  check in the next revision.
+            // FIXME: We now do better and write the type into the user-metadata too
+            //  - remove the shebang check in the next revision.
             let is_cptv =
                 self.current_page.user_data()[0] != 1 || self.current_page.is_cptv_recording();
             let is_status = self.current_page.is_status_recording();
@@ -1577,10 +1577,8 @@ impl OnboardFlash {
             bytes[FLASH_SPI_HEADER_SMALL..].copy_from_slice(event_bytes);
             self.spi_write(&bytes);
             self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-            // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
             let status = self.wait_for_ready();
             if status.program_failed() {
-                // FIXME: return error?
                 error!("Programming failed");
             }
             if !status.erase_failed() {

@@ -167,7 +167,7 @@ impl PdmMicrophone {
 
         sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
         info!(
-            "Altered Mic CLock speed {} divider {} fraction {}",
+            "Altered Mic Clock speed {} divider {} fraction {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
             clock_divider as u16,
             clock_divider_fractional

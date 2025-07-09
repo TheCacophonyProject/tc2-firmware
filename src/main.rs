@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![warn(clippy::all, clippy::pedantic)]
+
 mod attiny_rtc_i2c;
 mod audio_task;
 mod bsp;
@@ -62,7 +63,7 @@ use chrono::{DateTime, Utc};
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
-use defmt::{assert, assert_eq, error, info, panic};
+use defmt::{assert, assert_eq, error, info, panic, warn};
 use defmt_rtt as _;
 use device_config::DeviceConfig;
 use fugit::{ExtU32, HertzU32, RateExtU32};
@@ -83,6 +84,7 @@ pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the atti
 // got funny results at 150 for audio seems to work better at 125
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
+const MIN_FCC_INTERVAL_DURING_WARMUP_MS: u32 = 2000;
 
 #[entry]
 #[allow(clippy::too_many_lines)]
@@ -94,9 +96,6 @@ fn main() -> ! {
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let (pio0, sm0, _, _, _) = peripherals.PIO0.split(&mut peripherals.RESETS);
     let mut peripherals = unsafe { Peripherals::steal() };
-
-    // TODO: Check if we can read out alarm time once it has triggered.
-
     let (clocks, rosc) = clock_utils::setup_rosc_as_system_clock(
         peripherals.CLOCKS,
         peripherals.XOSC,
@@ -185,7 +184,6 @@ fn main() -> ! {
     );
 
     // Attiny + RTC comms
-    info!("Initing shared i2c");
     // Early on in development we got strange errors when the raspberry pi was accessing the
     // attiny-provided i2c interface at the same time as we wanted to.  The hacky?/ingenious?
     // solution was to allocate a gpio pin that would determine who has the 'lock' on the i2c bus.
@@ -206,15 +204,27 @@ fn main() -> ! {
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
 
-    info!("Enabled watchdog timer");
     let mut events = EventLogger::new(&mut fs);
     let time = get_synced_time(&mut i2c, &mut delay, &mut events, &mut fs, timer);
 
-    let woken_by_alarm = i2c.alarm_triggered(&mut delay);
+    // FIXME: Try to discover i2c devices and see if we block
+    for i in 0..256 {
+        //let val =
+    }
+
+    // this isn't reliable so use alarm stored in flash
+    let scheduled_alarm = i2c.get_scheduled_alarm_time(&mut delay);
+    info!("Scheduled alarm: {:?}", scheduled_alarm);
+    let woken_by_alarm = i2c.alarm_triggered(&mut delay).unwrap_or_else(|e| {
+        error!("{}", e);
+        false
+    });
     if woken_by_alarm {
         info!("Woken by RTC alarm? {}", woken_by_alarm);
         events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
-        i2c.clear_alarm(&mut delay);
+        if let Err(e) = i2c.clear_alarm(&mut delay) {
+            error!("{}", e);
+        }
     }
 
     let (config, prioritise_frame_preview) = get_device_config(
@@ -253,7 +263,7 @@ fn main() -> ! {
     // Maybe we should use the next_audio_alarm here to help figure out what state we've woken up in?
     let recording_mode = current_recording_mode(&config, &mut i2c, &mut delay, &time);
 
-    info!("Recording mode: {:?}", recording_mode);
+    warn!("Recording mode: {:?}", recording_mode);
 
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
     //  log if we can't get one
@@ -470,12 +480,11 @@ pub fn lepton_core1_task(
         dsp_minor,
         dsp_build,
     } = lepton_firmware_version;
+
     info!(
-        "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}",
-        gpp_major, gpp_minor, gpp_build, dsp_major, dsp_minor, dsp_build
+        "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}, serial #{}",
+        gpp_major, gpp_minor, gpp_build, dsp_major, dsp_minor, dsp_build, lepton_serial
     );
-    info!("Camera serial #{}", lepton_serial);
-    info!("Radiometry enabled? {}", radiometric_mode);
 
     let result = fifo.read_blocking();
     assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
@@ -492,7 +501,6 @@ pub fn lepton_core1_task(
     if result == Core0Task::RequestReset.into() {
         restart(&mut watchdog);
     }
-    // FIXME: Can we receive `Core0Task::HighPowerMode` here instead?
     assert_eq!(result, Core0Task::Ready.into());
     frame_acquisition_loop(
         rosc,
