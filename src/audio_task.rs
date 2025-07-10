@@ -265,6 +265,7 @@ pub fn audio_task(
                 {
                     error!("Failed to clear and set flags {}", e);
                 }
+                info!("Restarting to force user requested recording offload");
                 restart(&mut watchdog);
             } else {
                 // Schedule the next audio recording
@@ -280,7 +281,7 @@ pub fn audio_task(
                         tc2_agent_state::TAKE_AUDIO,
                         Some(tc2_agent_state::THERMAL_MODE),
                     );
-                    info!("Audio taken in thermal window clearing flag");
+                    info!("Audio taken in thermal window clearing flag, restarting");
                     restart(&mut watchdog);
                 }
             }
@@ -360,6 +361,7 @@ fn power_down_or_restart(
                             info!("Alarm is scheduled in {} so not sleeping", until_alarm);
                             if until_alarm <= 0 {
                                 // Alarm is in the past, so reset and try again.
+                                info!("Alarm in past, so restart now to take recording");
                                 restart(&mut watchdog);
                             }
                             continue;
@@ -473,27 +475,28 @@ pub fn schedule_next_recording(
     let mut alarm_mode = AlarmMode::Audio;
     let audio_mode = config.audio_mode();
     if config.records_audio_and_thermal() {
-        let (start, end) = config.next_or_current_recording_window(&current_time);
-        info!(
-            "Checking next alarm {}:{} for rec window start {}:{}",
-            wakeup.hour(),
-            wakeup.minute(),
-            start.hour(),
-            start.minute(),
-        );
-        if wakeup >= start {
-            if start < current_time {
-                if let AudioMode::AudioAndThermal = audio_mode {
-                    //audio recording inside recording window
-                    info!("Scheduling audio inside thermal window");
+        if let Ok((start, end)) = config.next_or_current_recording_window(&current_time) {
+            info!(
+                "Checking next alarm {}:{} for rec window start {}:{}",
+                wakeup.hour(),
+                wakeup.minute(),
+                start.hour(),
+                start.minute(),
+            );
+            if wakeup >= start {
+                if start < current_time {
+                    if let AudioMode::AudioAndThermal = audio_mode {
+                        // audio recording inside recording window
+                        info!("Scheduling audio inside thermal window");
+                    } else {
+                        info!("Already in rec window so restart now");
+                        return Err(());
+                    }
                 } else {
-                    info!("Already in rec window so restart now");
-                    return Err(());
+                    info!("Setting wake up to be start of next thermal recording window");
+                    wakeup = start;
+                    alarm_mode = AlarmMode::Thermal;
                 }
-            } else {
-                info!("Setting wake up to be start of next thermal recording window");
-                wakeup = start;
-                alarm_mode = AlarmMode::Thermal;
             }
         }
     }
@@ -524,9 +527,12 @@ pub fn check_alarm_still_valid_with_thermal_window(
 ) -> bool {
     // config has changed so check if not in audio only that alarm is still going to trigger on rec window start
     if device_config.config().audio_mode != AudioMode::AudioOnly {
-        let (start, end) = device_config.next_or_current_recording_window(now);
-        //alarm before start or we are in rec window
-        return alarm <= &start || now >= &start;
+        return if let Ok((start, end)) = device_config.next_or_current_recording_window(now) {
+            //alarm before start or we are in rec window
+            alarm <= &start || now >= &start
+        } else {
+            false
+        };
     }
     true
 }

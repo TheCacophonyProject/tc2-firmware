@@ -185,15 +185,17 @@ impl LoggerEvent {
     }
 }
 pub const MAX_EVENTS_IN_LOGGER: u16 = 1024;
-//- 4 * 64; //leave last page for config stuff
-
 const EVENT_CODE_LENGTH: u8 = 2;
 const EVENT_TIMESTAMP_LENGTH: u8 = 8;
 const EVENT_PAYLOAD_LENGTH: u8 = 8;
 const EVENT_LENGTH: u8 = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH;
 
-const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 4;
-const FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 1; // Don't erase the saved audio alarm if any
+// Last block = 2047: audio alarm
+// 2043, 2044, 2045, 2046: event log
+// 2041, 2042: device config
+
+const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 5;
+const FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 1; // Don't erase the saved audio alarm if any
 pub struct EventLogger {
     next_event_index: Option<EventIndex>,
 }
@@ -268,7 +270,7 @@ impl EventLogger {
         // Originally events started 64 bytes apart in the first page, but that broke ECC
         let page_offset = (event_index % 4) * 64;
 
-        if block >= FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX {
+        if block >= FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
             None
         } else if fs.read_page(block, page).is_ok() {
             let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
@@ -285,7 +287,7 @@ impl EventLogger {
         // Events need to start at each of the User Main data 0..=3 blocks, otherwise ECC breaks.
         let page_offset = (event_index % 4) * 512;
 
-        if block >= FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX {
+        if block >= FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
             None
         } else if fs.read_page(block, page).is_ok() {
             let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
@@ -307,7 +309,7 @@ impl EventLogger {
     pub fn clear(&mut self, fs: &mut OnboardFlash) {
         if self.has_events_to_offload() {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
-            let end_block_index = FLASH_STORAGE_EVENT_LOG_END_BLOCK_INDEX;
+            let end_block_index = FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX;
             for block_index in start_block_index..end_block_index {
                 if fs.bad_blocks.contains(&block_index) {
                     info!("Skipping erase of bad block {}", block_index);

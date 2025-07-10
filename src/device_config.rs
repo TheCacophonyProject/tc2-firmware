@@ -3,7 +3,7 @@ use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use defmt::{Format, Formatter};
+use defmt::{Format, Formatter, error};
 use embedded_io::Read;
 use pcf8563::DateTime;
 
@@ -102,8 +102,17 @@ impl DeviceConfigInner {
             // info!("Continuous recording mode enabled");
             return true;
         }
-        let (start_time, end_time) =
-            window.unwrap_or(self.next_or_current_recording_window(date_time_utc));
+        let start_time;
+        let end_time;
+        if window.is_some() {
+            start_time = window.unwrap().0;
+            end_time = window.unwrap().1;
+        } else if let Ok((s, e)) = self.next_or_current_recording_window(date_time_utc) {
+            start_time = s;
+            end_time = e;
+        } else {
+            return false;
+        }
         let starts_in = start_time - *date_time_utc;
         let starts_in_hours = starts_in.num_hours();
         let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
@@ -136,7 +145,7 @@ impl DeviceConfigInner {
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &chrono::DateTime<Utc>,
-    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), ()> {
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
 
@@ -197,7 +206,8 @@ impl DeviceConfigInner {
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
                 (Some(yesterday_sunset), Some(today_sunrise))
             } else {
-                panic!("Unable to calculate relative time window");
+                error!("Unable to calculate relative time window");
+                return Err(());
             }
         } else {
             (None, None)
@@ -261,7 +271,7 @@ impl DeviceConfigInner {
                 }
             }
         }
-        (start_time, end_time)
+        Ok((start_time, end_time))
     }
 }
 
@@ -429,8 +439,12 @@ impl DeviceConfig {
     pub fn next_recording_window_start(
         &self,
         now_utc: &chrono::DateTime<Utc>,
-    ) -> chrono::DateTime<Utc> {
-        self.next_or_current_recording_window(now_utc).0
+    ) -> Result<chrono::DateTime<Utc>, ()> {
+        if let Ok((start, ..)) = self.next_or_current_recording_window(now_utc) {
+            Ok(start)
+        } else {
+            Err(())
+        }
     }
 
     pub fn use_low_power_mode(&self) -> bool {
@@ -444,7 +458,7 @@ impl DeviceConfig {
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &chrono::DateTime<Utc>,
-    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), ()> {
         self.config_inner.next_or_current_recording_window(now_utc)
     }
 

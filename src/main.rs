@@ -63,7 +63,7 @@ use chrono::{DateTime, Utc};
 use core::cell::RefCell;
 use cortex_m::delay::Delay;
 use critical_section::Mutex;
-use defmt::{assert, assert_eq, error, info, panic, warn};
+use defmt::{assert, assert_eq, error, info, warn};
 use defmt_rtt as _;
 use device_config::DeviceConfig;
 use fugit::{ExtU32, HertzU32, RateExtU32};
@@ -83,8 +83,7 @@ pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the atti
 
 // got funny results at 150 for audio seems to work better at 125
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
-const FFC_INTERVAL_MS: u32 = 60 * 1000 * 20; // 20 mins between FFCs
-const MIN_FCC_INTERVAL_DURING_WARMUP_MS: u32 = 2000;
+const FFC_INTERVAL_MS: u32 = 60 * 1000 * 10; // 10 mins between FFCs
 
 #[entry]
 #[allow(clippy::too_many_lines)]
@@ -187,8 +186,8 @@ fn main() -> ! {
     // Early on in development we got strange errors when the raspberry pi was accessing the
     // attiny-provided i2c interface at the same time as we wanted to.  The hacky?/ingenious?
     // solution was to allocate a gpio pin that would determine who has the 'lock' on the i2c bus.
-    // This is handled by this `SharedI2C` abstraction which mediates comms with the attiny.
-    let mut i2c = SharedI2C::new(
+    // This is handled by this `SharedI2C` abstraction which mediates comms with the attiny/RTC.
+    let i2c_result = SharedI2C::new(
         I2C::i2c1(
             peripherals.I2C1,
             pins.gpio6.reconfigure(),
@@ -200,34 +199,55 @@ fn main() -> ! {
         pins.gpio3.reconfigure(),
         &mut delay,
     );
+    if let Err(e) = i2c_result {
+        error!("{}", e);
+        restart(&mut watchdog);
+    }
+    let mut i2c = i2c_result.unwrap();
 
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
 
     let mut events = EventLogger::new(&mut fs);
     let time = get_synced_time(&mut i2c, &mut delay, &mut events, &mut fs, timer);
+    if let Err(e) = time {
+        error!("{}", e);
+        restart(&mut watchdog);
+    }
+    let time = time.unwrap();
 
-    // FIXME: Try to discover i2c devices and see if we block
-    for i in 0..256 {
-        //let val =
+    // Scan for I2C devices
+    info!("Scanning I2C bus...");
+    for addr in 0..=127 {
+        if i2c.check_device_present(addr, &mut delay).unwrap_or(false) {
+            info!("I2C device found at address: 0x{:02x}", addr);
+        }
+    }
+
+    if let Err(e) = i2c.set_wakeup_alarm_hours_mins(&mut delay, 3, 17) {
+        error!("I2C set wakeup_alarm_hours_mins failed {}", e);
     }
 
     // this isn't reliable so use alarm stored in flash
     let scheduled_alarm = i2c.get_scheduled_alarm_time(&mut delay);
     info!("Scheduled alarm: {:?}", scheduled_alarm);
-    let woken_by_alarm = i2c.alarm_triggered(&mut delay).unwrap_or_else(|e| {
-        error!("{}", e);
-        false
-    });
-    if woken_by_alarm {
-        info!("Woken by RTC alarm? {}", woken_by_alarm);
-        events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
-        if let Err(e) = i2c.clear_alarm(&mut delay) {
-            error!("{}", e);
+    let woken_by_alarm = match i2c.alarm_triggered(&mut delay) {
+        Ok(woken_by_alarm) => {
+            if woken_by_alarm {
+                info!("Woken by RTC alarm? {}", woken_by_alarm);
+                events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
+                if let Err(e) = i2c.clear_alarm(&mut delay) {
+                    error!("Failed to clear alarm {}", e);
+                }
+            }
+            woken_by_alarm
         }
-    }
-
-    let (config, prioritise_frame_preview) = get_device_config(
+        Err(e) => {
+            error!("{}", e);
+            false
+        }
+    };
+    let dc_result = get_device_config(
         &mut fs,
         &mut i2c,
         &mut delay,
@@ -238,6 +258,11 @@ fn main() -> ! {
         &mut watchdog,
         events.count(),
     );
+    if let Err(e) = dc_result {
+        error!("{}", e);
+        restart(&mut watchdog);
+    }
+    let (config, prioritise_frame_preview) = dc_result.unwrap();
 
     if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
         // Unset the is_recording flag on attiny on startup if still enabled.
@@ -499,6 +524,7 @@ pub fn lepton_core1_task(
 
     let result = fifo.read_blocking();
     if result == Core0Task::RequestReset.into() {
+        info!("Got reset request before frame acquisition startup");
         restart(&mut watchdog);
     }
     assert_eq!(result, Core0Task::Ready.into());

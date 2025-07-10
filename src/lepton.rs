@@ -358,7 +358,7 @@ impl LeptonModule {
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&mut self) -> Result<(), &'static str> {
         /*
             a. Wait 950 milliseconds minimum after power on, clocks applied, and RESET_L de-asserted
                 • If the camera has an attached shutter, the minimum wait period should be
@@ -376,55 +376,56 @@ impl LeptonModule {
         //  just discard those frames later based on the telemetry, and this helps with sync.
         let success = self.disable_automatic_ffc();
         if success.is_err() {
-            warn!("Could not disable automatic FFC {}", success);
+            return Err("Could not disable automatic FFC");
         }
 
         //let mut t_enabled = false;
         let success = self.enable_telemetry();
         if success.is_err() {
-            warn!("Could not enable telemetry? {}", success);
+            warn!("Could not enable telemetry");
         }
         let telemetry_enabled = self.telemetry_enabled();
         if let Ok(telemetry_enabled) = telemetry_enabled {
             if !telemetry_enabled {
-                panic!("Telemetry disabled");
+                return Err("Telemetry not set");
             }
         } else {
-            panic!("Telemetry not set");
+            return Err("Telemetry not set");
         }
         let telemetry_location = self.telemetry_location();
         if let Ok(telemetry_location) = telemetry_location {
             if telemetry_location != TelemetryLocation::Header {
-                panic!("Telemetry not in header");
+                return Err("Telemetry not in header");
             }
         } else {
-            panic!("Telemetry not in header");
+            return Err("Telemetry not in header");
         }
         let success = self.enable_post_processing();
         if success.is_err() {
-            warn!("{}", success);
+            warn!("Could not set post processing");
         }
         let radiometry_enabled = self.radiometric_mode_enabled();
         if let Ok(radiometry_enabled) = radiometry_enabled {
             if !radiometry_enabled {
-                panic!("Radiometry not enabled");
+                return Err("Radiometry not enabled");
             }
         } else {
-            panic!("Radiometry not enabled");
+            return Err("Radiometry not enabled");
         }
 
         let success = self.enable_vsync();
         if success.is_err() {
-            warn!("Could not enable vsync {}", success);
+            warn!("Could not enable vsync");
         }
         let vsync_enabled = self.vsync_enabled();
         if let Ok(vsync_enabled) = vsync_enabled {
             if !vsync_enabled {
-                panic!("Vsync not enabled");
+                return Err("Vsync not enabled");
             }
         } else {
-            panic!("Vsync not enabled");
+            return Err("Vsync not enabled");
         }
+        Ok(())
     }
 
     fn setup_spot_meter_roi(&mut self) -> Result<bool, LeptonError> {
@@ -861,12 +862,14 @@ impl LeptonModule {
             true,
         ));
         if success.is_err() {
-            warn!("Error {}", success);
+            warn!("Error rebooting lepton");
         }
 
         info!("Waiting 5 seconds");
         delay.delay_ms(5000);
-        self.init();
+        while let Err(e) = self.init() {
+            self.reboot(delay);
+        }
         success.is_ok()
     }
 
@@ -915,7 +918,10 @@ impl LeptonModule {
         delay.delay_ms(2000);
         trace!("Wait for ready");
         self.wait_for_ready(false);
-        self.init();
+        while let Err(e) = self.init() {
+            error!("{:?}", e);
+            self.cci_init(delay);
+        }
     }
 
     pub fn power_on_sequence(&mut self, delay: &mut Delay) {

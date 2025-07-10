@@ -29,7 +29,8 @@ pub fn maybe_offload_events(
     if events.has_events_to_offload() {
         let event_indices = events.event_range();
         let total_events = event_indices.end;
-        warn!("Transferring {} events", total_events);
+        let mut transferred_events = 0;
+        warn!("Attempting to transfer {} events", total_events);
         'transfer_all_events: for event_index in event_indices {
             watchdog.feed();
             let event_bytes = EventLogger::get_event_at_index(event_index, fs);
@@ -51,6 +52,7 @@ pub fn maybe_offload_events(
                             None, // FIXME: Do we want progress here?
                         );
                         if did_transfer {
+                            transferred_events += 1;
                             if attempts > 0 {
                                 warn!("File part took multiple attempts: {}", attempts);
                             }

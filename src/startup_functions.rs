@@ -18,7 +18,7 @@ use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use cortex_m::delay::Delay;
-use defmt::{error, info, panic, warn};
+use defmt::{error, info, warn};
 use fugit::HertzU32;
 use rp2040_hal::pac::DMA;
 use rp2040_hal::{Timer, Watchdog};
@@ -138,7 +138,7 @@ pub fn get_device_config(
     dma: &mut DMA,
     watchdog: &mut Watchdog,
     event_count: u16,
-) -> (DeviceConfig, bool) {
+) -> Result<(DeviceConfig, bool), ()> {
     let device_config: Option<DeviceConfig> = DeviceConfig::load_existing_config_from_flash(fs);
     if let Some(device_config) = &device_config {
         info!("Existing config {:#?}", device_config.config());
@@ -161,9 +161,10 @@ pub fn get_device_config(
             event_count,
         );
     match device_config {
-        Some(device_config) => (device_config, prioritise_frame_preview),
+        Some(device_config) => Ok((device_config, prioritise_frame_preview)),
         None => {
-            panic!("Couldn't get config");
+            error!("Couldn't get config");
+            Err(())
         }
     }
 }
@@ -174,21 +175,20 @@ pub fn get_synced_time(
     events: &mut EventLogger,
     fs: &mut OnboardFlash,
     timer: Timer,
-) -> SyncedDateTime {
-    loop {
-        // NOTE: Keep retrying until we get a datetime from RTC.
-        match i2c.get_datetime(delay) {
-            Ok(now) => {
-                info!("Date time {}:{}:{}", now.hours, now.minutes, now.seconds);
-                return SyncedDateTime::new(get_datetime_utc(now), timer);
-            }
-            Err(e) => {
-                // cant get time so use 0 and add a time when tc2-agent uploads
-                events.log_event(LoggerEvent::new_with_unknown_time(Event::RtcCommError), fs);
-
-                warn!("Failed getting date from RTC, retrying");
-                delay.delay_ms(10);
-            }
+) -> Result<SyncedDateTime, ()> {
+    match i2c.get_datetime(delay) {
+        Ok(now) => {
+            info!(
+                "RTC Date time {}:{}:{}",
+                now.hours, now.minutes, now.seconds
+            );
+            Ok(SyncedDateTime::new(get_datetime_utc(now), timer))
+        }
+        Err(e) => {
+            // can't get time so use 0 and add a time when tc2-agent uploads
+            events.log_event(LoggerEvent::new_with_unknown_time(Event::RtcCommError), fs);
+            error!("Failed getting date from RTC");
+            Err(())
         }
     }
 }
@@ -389,6 +389,7 @@ pub fn maybe_offload_files_and_events_on_startup(
                 fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
             ) {
                 // Offload failed, restart and try again.
+                error!("File offload failed, restarting");
                 restart(watchdog);
             }
         } else if prioritise_frame_preview {
@@ -409,6 +410,7 @@ pub fn maybe_offload_files_and_events_on_startup(
                     };
                 } else {
                     // Offload failed, restart and try again.
+                    error!("File offload failed, restarting");
                     restart(watchdog);
                 }
             }
@@ -418,7 +420,7 @@ pub fn maybe_offload_files_and_events_on_startup(
                 fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog,
             ) {
                 // Failed to offload, restart and try again
-                warn!("Offload failed, will restart");
+                error!("File offload failed, restarting");
                 restart(watchdog);
             }
         }

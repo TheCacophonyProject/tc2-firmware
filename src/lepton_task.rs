@@ -5,7 +5,7 @@ use crate::frame_processing::{
 use crate::lepton::{FFCStatus, LeptonModule};
 use crate::lepton_telemetry::Telemetry;
 use crate::utils::restart;
-use crate::{FFC_INTERVAL_MS, MIN_FCC_INTERVAL_DURING_WARMUP_MS, bsp};
+use crate::{FFC_INTERVAL_MS, bsp};
 use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
 use bsp::hal::pac::RESETS;
 use bsp::hal::rosc::RingOscillator;
@@ -75,7 +75,7 @@ pub fn frame_acquisition_loop(
     is_high_power_mode: bool,
 ) -> ! {
     let mut selected_frame_buffer = 0;
-    let mut frame_counter = 0;
+    let mut frame_counter = 0u32;
     let mut unverified_frame_counter = 0;
     let mut prev_frame_counter = 0;
 
@@ -86,7 +86,7 @@ pub fn frame_acquisition_loop(
     let mut prev_segment_was_4 = false;
     let mut scanline_buffer = [0u16; 82];
 
-    let mut has_done_initial_ffc = false;
+    let mut initial_ffc = Some(());
     let mut got_sync = false;
     let mut valid_frame_current_segment_num = 0u16;
     let mut started_segment = false;
@@ -107,8 +107,8 @@ pub fn frame_acquisition_loop(
     // Track the frame segment num including "discard" frames.
     let mut current_segment_num = 0;
     // Do FFC every 20 mins?
-    let mut needs_ffc = false;
-    let mut ffc_requested = false;
+    let mut ffc_requested_frame = None;
+    let mut ffc_pending_time = None;
     let mut safe_to_execute_ffc = true;
     let mut seen_telemetry_revision = [0u8, 0u8];
     let mut times_telemetry_revision_stable = -1;
@@ -153,403 +153,374 @@ pub fn frame_acquisition_loop(
             transferring_prev_frame = true;
             prev_frame_needs_transfer = false;
         }
-        {
-            // Read the next frame
-            let mut prev_packet_id = 0;
-            'scanline: loop {
-                // This is one scanline
-                let packet = lepton.transfer(&mut scanline_buffer).unwrap();
-                let packet_header = packet[0];
-                let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
-                let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
-                if is_discard_packet {
-                    continue 'scanline;
+
+        // Read the next frame
+        let mut prev_packet_id = 0;
+        'scanline: loop {
+            // This is one scanline
+            let packet = lepton.transfer(&mut scanline_buffer).unwrap();
+            let packet_header = packet[0];
+            let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
+            let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
+            if is_discard_packet {
+                continue 'scanline;
+            }
+            let packet_id = usize::from(packet_header & 0x0fff);
+            let is_valid_packet_num = packet_id <= last_packet_id_for_segment;
+
+            if packet_id == 0 {
+                prev_packet_id = 0;
+                started_segment = true;
+                // If we don't know, always start at segment 1 so that things will be
+                // written out.
+                if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
+                    valid_frame_current_segment_num = 1;
                 }
-                let packet_id = usize::from(packet_header & 0x0fff);
-                let is_valid_packet_num = packet_id <= last_packet_id_for_segment;
+                let telemetry = Telemetry::from_bytes(bytemuck::cast_slice(&scanline_buffer[2..]));
+                unverified_frame_counter = telemetry.frame_num;
 
-                if packet_id == 0 {
-                    prev_packet_id = 0;
-                    started_segment = true;
-                    // If we don't know, always start at segment 1 so that things will be
-                    // written out.
-                    if !got_sync || valid_frame_current_segment_num == 0 || prev_segment_was_4 {
-                        valid_frame_current_segment_num = 1;
-                    }
-                    let telemetry =
-                        Telemetry::from_bytes(bytemuck::cast_slice(&scanline_buffer[2..]));
-                    unverified_frame_counter = telemetry.frame_num;
-
-                    if got_sync && valid_frame_current_segment_num == 1 {
-                        // Check if we need an FFC
-                        if unverified_frame_counter == prev_frame_counter + 2
-                            && !needs_ffc
-                            && !is_recording
-                            && telemetry.msec_on != 0
-                            && (telemetry.time_at_last_ffc != 0 || !has_done_initial_ffc)
-                        {
-                            let temperature_shifted_too_much_since_last_ffc =
-                                (telemetry.fpa_temp_c_at_last_ffc - telemetry.fpa_temp_c).abs()
-                                    > 1.5;
-                            let ffc_frame_diff =
-                                telemetry.msec_on.saturating_sub(telemetry.time_at_last_ffc);
-                            let time_for_ffc = ffc_frame_diff > FFC_INTERVAL_MS;
-                            let min_time_between_ffcs_elapsed =
-                                ffc_frame_diff > MIN_FCC_INTERVAL_DURING_WARMUP_MS;
-                            // If time on ms is zero, that indicates a corrupt/invalid frame.
-                            if telemetry.msec_on < telemetry.time_at_last_ffc {
-                                warn!(
-                                    "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
-                                    telemetry.msec_on, telemetry.time_at_last_ffc
-                                );
-                            } else if (time_for_ffc
-                                || (min_time_between_ffcs_elapsed
-                                    && temperature_shifted_too_much_since_last_ffc))
-                                && telemetry.ffc_status != FFCStatus::InProgress
-                            {
-                                if temperature_shifted_too_much_since_last_ffc {
-                                    // NOTE: If the sensor temperature has shifted by >1.5C° since the
-                                    //  previous FFC, we also want to trigger an FFC.
-                                    info!(
-                                        "Temp diff between FFCs {}:{} {}",
-                                        telemetry.fpa_temp_c,
-                                        telemetry.fpa_temp_c_at_last_ffc,
-                                        (telemetry.fpa_temp_c_at_last_ffc - telemetry.fpa_temp_c)
-                                            .abs()
-                                    );
-                                }
-                                needs_ffc = true;
-                                ffc_requested = false;
-                            }
-
-                            // Sometimes the header is invalid, but the frame becomes valid and gets sync.
-                            // Because the telemetry revision is static across frame headers we can detect this
-                            // case and not send the frame, as it may cause false triggers.
-                            if times_telemetry_revision_stable > -1
-                                && times_telemetry_revision_stable <= 2
-                            {
-                                if seen_telemetry_revision[0] == telemetry.revision[0]
-                                    && seen_telemetry_revision[1] == telemetry.revision[1]
-                                {
-                                    times_telemetry_revision_stable += 1;
-                                } else {
-                                    times_telemetry_revision_stable = -1;
-                                }
-                                if times_telemetry_revision_stable > 2 {
-                                    info!(
-                                        "Got stable telemetry revision (core 1) {:?}",
-                                        telemetry.revision
-                                    );
-                                }
-                            }
-                            if times_telemetry_revision_stable == -1 {
-                                // Initialise seen telemetry revision.
-                                seen_telemetry_revision =
-                                    [telemetry.revision[0], telemetry.revision[1]];
-                                times_telemetry_revision_stable += 1;
-                            }
-                            if times_telemetry_revision_stable > 2
-                                && (seen_telemetry_revision[0] != telemetry.revision[0]
-                                    || seen_telemetry_revision[1] != telemetry.revision[1])
-                            {
-                                // We have a misaligned/invalid frame.
-                                warn!("Got misaligned frame header");
-                                got_sync = false;
-                            }
-                        }
-                    }
-                } else if packet_id == packet_id_with_valid_segment_num {
-                    // Packet 20 is the only one that contains a meaningful segment number
-                    let segment_num = packet_header >> 12;
-                    if prev_packet_id == packet_id_with_valid_segment_num - 1 && segment_num == 1 {
-                        prev_frame_counter = frame_counter;
-                        if unverified_frame_counter < prev_frame_counter {
-                            warn!("Frames appear to be out of sync / offset");
-                            got_sync = false;
-                        }
-                        if unverified_frame_counter > frame_counter + 1000 {
-                            warn!("(2) Frames appear to be out of sync / offset");
-                            got_sync = false;
-                        }
-                        frame_counter = unverified_frame_counter;
-                    }
-                    if frames_seen % 9 == 0 {
-                        // FIXME We seem to be able to get into this state, without out of sync ever triggering,
-                        //  and frame_counter is the same each iteration through the loop.
-                        // info!(
-                        //     "Core0 got frame #{} {}, synced {}",
-                        //     frames_seen, frame_counter, got_sync
-                        // );
-                    }
-                    frames_seen += 1;
-
-                    // See if we're starting a frame, or ending it.
-                    if valid_frame_current_segment_num > 1
-                        && valid_frame_current_segment_num < 5
-                        && segment_num != valid_frame_current_segment_num
+                if got_sync && valid_frame_current_segment_num == 1 {
+                    // Check if we need an FFC
+                    if unverified_frame_counter == prev_frame_counter + 2
+                        && ffc_requested_frame.is_none()
+                        && !is_recording
+                        && telemetry.msec_on != 0
+                        && (telemetry.time_at_last_ffc != 0 || initial_ffc.is_some())
                     {
-                        // Segment order mismatch.
-                        warn!(
-                            "Segment order mismatch error: stored {}, this {}",
-                            current_segment_num, segment_num
-                        );
-                        started_segment = false;
-                        prev_segment_was_4 = false;
+                        let temperature_shifted_too_much_since_last_ffc =
+                            (telemetry.fpa_temp_c_at_last_ffc - telemetry.fpa_temp_c).abs() > 1.5;
+                        let ffc_frame_diff =
+                            telemetry.msec_on.saturating_sub(telemetry.time_at_last_ffc);
+                        let time_for_ffc = ffc_frame_diff > FFC_INTERVAL_MS;
+                        // If time on ms is zero, that indicates a corrupt/invalid frame.
+                        if telemetry.msec_on < telemetry.time_at_last_ffc {
+                            warn!(
+                                "Time on less than last FFC: time_on_ms: {}, last_ffc_ms: {}",
+                                telemetry.msec_on, telemetry.time_at_last_ffc
+                            );
+                        } else if (time_for_ffc || temperature_shifted_too_much_since_last_ffc)
+                            && telemetry.ffc_status != FFCStatus::InProgress
+                        {
+                            if temperature_shifted_too_much_since_last_ffc {
+                                // NOTE: If the sensor temperature has shifted by >1.5C° since the
+                                //  previous FFC, we also want to trigger an FFC.
+                                info!(
+                                    "Temp diff between FFCs {}:{} {}",
+                                    telemetry.fpa_temp_c,
+                                    telemetry.fpa_temp_c_at_last_ffc,
+                                    (telemetry.fpa_temp_c_at_last_ffc - telemetry.fpa_temp_c).abs()
+                                );
+                            }
+                            if let Some(pending_frame) = ffc_pending_time {
+                                if frame_counter.saturating_sub(pending_frame) > 20 {
+                                    ffc_pending_time = None;
+                                    ffc_requested_frame = Some(frame_counter);
+                                }
+                            } else {
+                                ffc_requested_frame = Some(frame_counter);
+                            }
+                        }
 
+                        // Sometimes the header is invalid, but the frame becomes valid and gets sync.
+                        // Because the telemetry revision is static across frame headers we can detect this
+                        // case and not send the frame, as it may cause false triggers.
+                        if times_telemetry_revision_stable > -1
+                            && times_telemetry_revision_stable <= 2
+                        {
+                            if seen_telemetry_revision[0] == telemetry.revision[0]
+                                && seen_telemetry_revision[1] == telemetry.revision[1]
+                            {
+                                times_telemetry_revision_stable += 1;
+                            } else {
+                                times_telemetry_revision_stable = -1;
+                            }
+                            if times_telemetry_revision_stable > 2 {
+                                info!(
+                                    "Got stable telemetry revision (core 1) {:?}",
+                                    telemetry.revision
+                                );
+                            }
+                        }
+                        if times_telemetry_revision_stable == -1 {
+                            // Initialise seen telemetry revision.
+                            seen_telemetry_revision =
+                                [telemetry.revision[0], telemetry.revision[1]];
+                            times_telemetry_revision_stable += 1;
+                        }
+                        if times_telemetry_revision_stable > 2
+                            && (seen_telemetry_revision[0] != telemetry.revision[0]
+                                || seen_telemetry_revision[1] != telemetry.revision[1])
+                        {
+                            // We have a misaligned/invalid frame.
+                            warn!("Got misaligned frame header");
+                            got_sync = false;
+                        }
+                    }
+                }
+            } else if packet_id == packet_id_with_valid_segment_num {
+                // Packet 20 is the only one that contains a meaningful segment number
+                let segment_num = packet_header >> 12;
+                if prev_packet_id == packet_id_with_valid_segment_num - 1 && segment_num == 1 {
+                    prev_frame_counter = frame_counter;
+                    if unverified_frame_counter < prev_frame_counter {
+                        warn!("Frames appear to be out of sync / offset");
+                        got_sync = false;
+                    }
+                    if unverified_frame_counter > frame_counter + 1000 {
+                        warn!("(2) Frames appear to be out of sync / offset");
+                        got_sync = false;
+                    }
+                    frame_counter = unverified_frame_counter;
+                }
+                if frames_seen % 9 == 0 {
+                    // FIXME We seem to be able to get into this state, without out of sync ever triggering,
+                    //  and frame_counter is the same each iteration through the loop.
+                    // info!(
+                    //     "Core0 got frame #{} {}, synced {}",
+                    //     frames_seen, frame_counter, got_sync
+                    // );
+                }
+                frames_seen += 1;
+
+                // See if we're starting a frame, or ending it.
+                if valid_frame_current_segment_num > 1
+                    && valid_frame_current_segment_num < 5
+                    && segment_num != valid_frame_current_segment_num
+                {
+                    // Segment order mismatch.
+                    warn!(
+                        "Segment order mismatch error: stored {}, this {}",
+                        current_segment_num, segment_num
+                    );
+                    started_segment = false;
+                    prev_segment_was_4 = false;
+
+                    lepton.wait_for_ready(false);
+                    lepton.reset_spi(
+                        delay,
+                        resets,
+                        peripheral_clock_freq,
+                        LEPTON_SPI_CLOCK_FREQ.Hz(),
+                        true,
+                    );
+                    if !is_recording && initial_ffc.take().is_some() {
+                        let _success = lepton.do_ffc();
+                    }
+                    break 'scanline;
+                }
+                valid_frame_current_segment_num = segment_num;
+                if valid_frame_current_segment_num == 0 {
+                    started_segment = false;
+                    break 'scanline;
+                }
+            }
+
+            let is_valid_segment_num = valid_frame_current_segment_num > 0
+                && valid_frame_current_segment_num <= last_segment_num_for_frame;
+            let packets_are_in_order = packet_id == 0 || packet_id == prev_packet_id + 1;
+            if is_valid_segment_num
+                && is_valid_packet_num
+                && started_segment
+                && packets_are_in_order
+            {
+                if do_crc_check {
+                    let crc = scanline_buffer[1].to_le();
+                    BigEndian::write_u16_into(&scanline_buffer, &mut crc_buffer);
+                    crc_buffer[0] &= 0x0f;
+                    crc_buffer[2] = 0;
+                    crc_buffer[3] = 0;
+                    if crc_check.checksum(&crc_buffer) != crc
+                        && packet_id != 0
+                        && valid_frame_current_segment_num != 1
+                    {
+                        warn!(
+                            "Checksum fail on packet {}, segment {}",
+                            packet_id, current_segment_num
+                        );
+                    }
+                }
+
+                // Copy the line out to the appropriate place in the current segment buffer.
+                critical_section::with(|cs| {
+                    let segment_index =
+                        usize::from(valid_frame_current_segment_num.clamp(1, 4) - 1);
+                    // NOTE: We may be writing the incorrect seg number here initially, but it will always be
+                    //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
+                    let buffer = if selected_frame_buffer == 0 {
+                        frame_buffer_local
+                    } else {
+                        frame_buffer_local_2
+                    };
+
+                    if let Some(buffer) = buffer.borrow_ref_mut(cs).as_mut() {
+                        LittleEndian::write_u16_into(
+                            &scanline_buffer[2..],
+                            buffer.packet(segment_index, packet_id),
+                        );
+                    } else {
+                        defmt::error!("Failed to write to frame buffer");
+                    }
+                });
+
+                let is_last_segment = valid_frame_current_segment_num == 4;
+                prev_segment_was_4 = is_last_segment;
+                if packet_id == last_packet_id_for_segment {
+                    if is_last_segment {
+                        if safe_to_execute_ffc && ffc_requested_frame.take().is_some() {
+                            // FIXME: This sometimes seems to spam the FFC request i2c
+                            //  until the FFC actually happens - but maybe that's okay?
+                            info!("Requesting needed FFC");
+                            let success = lepton.do_ffc();
+                            match success {
+                                Ok(success) => {
+                                    ffc_pending_time = Some(frame_counter);
+                                    info!("Success requesting needed FFC");
+                                }
+                                Err(e) => {
+                                    ffc_requested_frame = Some(frame_counter);
+                                    info!("Failed to request FFC {:?}", e);
+                                }
+                            }
+                        } else if initial_ffc.take().is_some() {
+                            info!("Requesting initial FFC");
+                            let success = lepton.do_ffc();
+                            match success {
+                                Ok(success) => {
+                                    info!("Success requesting initial FFC");
+                                }
+                                Err(e) => {
+                                    initial_ffc = Some(());
+                                    info!("Failed to request FFC {:?}", e);
+                                }
+                            }
+                        }
+                        if !got_sync && frame_counter == prev_frame_counter + 1 {
+                            // Only set got sync if frame_count is = frame_count + 1 from previous frame.
+                            got_sync = true;
+                            current_segment_num = valid_frame_current_segment_num;
+                            warn!(
+                                "Got sync at seg {} frame {} prev frame {}",
+                                current_segment_num, frame_counter, prev_frame_counter
+                            );
+                        }
+
+                        attempt = 0;
+                        prev_frame_needs_transfer = true;
+
+                        if let Some(last_frame_seen) = last_frame_seen {
+                            if got_sync && last_frame_seen != frame_counter - 1 {
+                                warn!("Looks like we lost sync");
+                                got_sync = false;
+                                prev_frame_needs_transfer = false;
+                            }
+                        }
+                        last_frame_seen = Some(frame_counter);
+                    } else {
+                        // Increment in good faith if we're on the last packet of a valid segment
+                        valid_frame_current_segment_num += 1;
+                    }
+                    started_segment = false;
+                    break 'scanline;
+                }
+            }
+
+            // We only mark a segment as started if the packet num was 0 or 20.
+            if started_segment && !packets_are_in_order {
+                if got_sync {
+                    got_sync = false;
+                    warn!(
+                        "Lost sync at seg {}, frame {}, prev frame {}",
+                        current_segment_num, frame_counter, prev_frame_counter
+                    );
+                    current_segment_num = 0;
+                }
+                // Packet order mismatch
+                attempt += 1;
+                valid_frame_current_segment_num = 0;
+                started_segment = false;
+                prev_segment_was_4 = false;
+
+                if attempt > 250 && attempt % 5 == 0 {
+                    if got_sync {
+                        warn!(
+                            "Packet order mismatch current: {}, prev: {}, seg {} #{}",
+                            packet_id, prev_packet_id, current_segment_num, attempt
+                        );
+                    }
+                    if attempt < 500 {
                         lepton.wait_for_ready(false);
                         lepton.reset_spi(
                             delay,
                             resets,
                             peripheral_clock_freq,
                             LEPTON_SPI_CLOCK_FREQ.Hz(),
-                            true,
+                            false,
                         );
-                        if !is_recording && !has_done_initial_ffc {
-                            let _success = lepton.do_ffc();
-                            has_done_initial_ffc = true;
-                        }
-                        break 'scanline;
-                    }
-                    valid_frame_current_segment_num = segment_num;
-                    if valid_frame_current_segment_num == 0 {
-                        started_segment = false;
-                        break 'scanline;
-                    }
-                }
-
-                let is_valid_segment_num = valid_frame_current_segment_num > 0
-                    && valid_frame_current_segment_num <= last_segment_num_for_frame;
-                let packets_are_in_order = packet_id == 0 || packet_id == prev_packet_id + 1;
-                if is_valid_segment_num
-                    && is_valid_packet_num
-                    && started_segment
-                    && packets_are_in_order
-                {
-                    if do_crc_check {
-                        let crc = scanline_buffer[1].to_le();
-                        BigEndian::write_u16_into(&scanline_buffer, &mut crc_buffer);
-                        crc_buffer[0] &= 0x0f;
-                        crc_buffer[2] = 0;
-                        crc_buffer[3] = 0;
-                        if crc_check.checksum(&crc_buffer) != crc
-                            && packet_id != 0
-                            && valid_frame_current_segment_num != 1
-                        {
-                            warn!(
-                                "Checksum fail on packet {}, segment {}",
-                                packet_id, current_segment_num
-                            );
-                        }
-                    }
-
-                    // Copy the line out to the appropriate place in the current segment buffer.
-                    critical_section::with(|cs| {
-                        let segment_index =
-                            usize::from(valid_frame_current_segment_num.clamp(1, 4) - 1);
-                        // NOTE: We may be writing the incorrect seg number here initially, but it will always be
-                        //  set correctly when we reach packet 20, assuming we do manage to write out a full segment.
-                        let buffer = if selected_frame_buffer == 0 {
-                            frame_buffer_local
-                        } else {
-                            frame_buffer_local_2
-                        };
-
-                        if let Some(buffer) = buffer.borrow_ref_mut(cs).as_mut() {
-                            LittleEndian::write_u16_into(
-                                &scanline_buffer[2..],
-                                buffer.packet(segment_index, packet_id),
-                            );
-                        } else {
-                            defmt::error!("Failed to write to frame buffer");
-                        }
-                    });
-
-                    let is_last_segment = valid_frame_current_segment_num == 4;
-                    prev_segment_was_4 = is_last_segment;
-                    if packet_id == last_packet_id_for_segment {
-                        if is_last_segment {
-                            if safe_to_execute_ffc && needs_ffc && !ffc_requested {
-                                ffc_requested = true;
-                                // FIXME: This sometimes seems to spam the FFC request i2c
-                                //  until the FFC actually happens - but maybe that's okay?
-                                info!("Requesting needed FFC");
-                                let success = lepton.do_ffc();
-                                match success {
-                                    Ok(success) => {
-                                        needs_ffc = false;
-                                        info!("Success requesting needed FFC");
-                                    }
-                                    Err(e) => {
-                                        info!("Failed to request FFC {:?}", e);
-                                    }
+                        if initial_ffc.take().is_some() {
+                            info!("Requesting FFC");
+                            let success = lepton.do_ffc();
+                            match success {
+                                Ok(success) => {
+                                    info!("Success requesting FFC");
                                 }
-                            } else if !has_done_initial_ffc {
-                                info!("Requesting initial FFC");
-                                let success = lepton.do_ffc();
-                                match success {
-                                    Ok(success) => {
-                                        has_done_initial_ffc = true;
-                                        info!("Success requesting initial FFC");
-                                    }
-                                    Err(e) => {
-                                        info!("Failed to request FFC {:?}", e);
-                                    }
+                                Err(e) => {
+                                    initial_ffc = Some(());
+                                    info!("Failed to request FFC {:?}", e);
                                 }
                             }
-                            if !got_sync && frame_counter == prev_frame_counter + 1 {
-                                // Only set got sync if frame_count is = frame_count + 1 from previous frame.
-                                got_sync = true;
-                                current_segment_num = valid_frame_current_segment_num;
-                                warn!(
-                                    "Got sync at seg {} frame {} prev frame {}",
-                                    current_segment_num, frame_counter, prev_frame_counter
-                                );
-                            }
-
-                            attempt = 0;
-                            prev_frame_needs_transfer = true;
-
-                            if let Some(last_frame_seen) = last_frame_seen {
-                                if got_sync && last_frame_seen != frame_counter - 1 {
-                                    warn!("Looks like we lost sync");
-                                    got_sync = false;
-                                    prev_frame_needs_transfer = false;
-                                }
-                            }
-                            last_frame_seen = Some(frame_counter);
-                        } else {
-                            // Increment in good faith if we're on the last packet of a valid segment
-                            valid_frame_current_segment_num += 1;
                         }
-                        started_segment = false;
-                        break 'scanline;
-                    }
-                }
-
-                // We only mark a segment as started if the packet num was 0 or 20.
-                if started_segment && !packets_are_in_order {
-                    if got_sync {
-                        got_sync = false;
-                        warn!(
-                            "Lost sync at seg {}, frame {}, prev frame {}",
-                            current_segment_num, frame_counter, prev_frame_counter
-                        );
+                    } else {
+                        initial_ffc = Some(());
                         current_segment_num = 0;
+                        frames_seen = 0;
+                        last_frame_seen = None;
+                        lepton.power_down_sequence(delay);
+                        lepton.power_on_sequence(delay);
                     }
-                    // Packet order mismatch
-                    attempt += 1;
-                    valid_frame_current_segment_num = 0;
-                    started_segment = false;
-                    prev_segment_was_4 = false;
-
-                    if attempt > 250 && attempt % 5 == 0 {
-                        if got_sync {
-                            warn!(
-                                "Packet order mismatch current: {}, prev: {}, seg {} #{}",
-                                packet_id, prev_packet_id, current_segment_num, attempt
-                            );
-                        }
-                        if attempt < 500 {
-                            lepton.wait_for_ready(false);
-                            lepton.reset_spi(
-                                delay,
-                                resets,
-                                peripheral_clock_freq,
-                                LEPTON_SPI_CLOCK_FREQ.Hz(),
-                                false,
-                            );
-                            if !has_done_initial_ffc {
-                                info!("Requesting FFC");
-                                let success = lepton.do_ffc();
-                                match success {
-                                    Ok(success) => {
-                                        info!("Success requesting FFC");
-                                    }
-                                    Err(e) => {
-                                        info!("Failed to request FFC {:?}", e);
-                                    }
-                                }
-                                has_done_initial_ffc = true;
-                            }
-                        } else {
-                            has_done_initial_ffc = false;
-                            current_segment_num = 0;
-                            frames_seen = 0;
-                            last_frame_seen = None;
-                            lepton.power_down_sequence(delay);
-                            lepton.power_on_sequence(delay);
-                        }
-                        break 'scanline;
-                    }
-                    continue 'scanline;
+                    break 'scanline;
                 }
-                prev_packet_id = packet_id;
+                continue 'scanline;
+            }
+            prev_packet_id = packet_id;
 
-                if transferring_prev_frame {
-                    // Could read blocking, but need to increment current_segment_num appropriately?
-
-                    if let Some(message) = sio_fifo.read() {
-                        let mut next_message = None;
+            'message_loop: loop {
+                match sio_fifo.read() {
+                    None => break 'message_loop,
+                    Some(message) => {
                         if message == Core0Task::StartRecording.into() {
                             is_recording = true;
-                            next_message = sio_fifo.read();
                         } else if message == Core0Task::EndRecording.into() {
                             recording_ended = true;
-                            next_message = sio_fifo.read();
                         } else if message == Core0Task::ReadyToSleep.into() {
                             info!("Powering down lepton module");
                             lepton.power_down_sequence(delay);
-                            next_message = sio_fifo.read();
                             sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
                         } else if message == Core0Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;
                             prev_frame_needs_transfer = false;
                         } else if message == Core0Task::RequestReset.into() {
+                            warn!("Request reset");
                             restart(&mut watchdog);
                         }
-                        if let Some(message) = next_message {
-                            if message == Core0Task::FrameProcessingComplete.into() {
-                                transferring_prev_frame = false;
-                                prev_frame_needs_transfer = false;
-                            } else if message == Core0Task::RequestReset.into() {
-                                restart(&mut watchdog);
-                            }
-                        }
                     }
-                    // if !transferring_prev_frame || recording_started {
-                    //     end = timer.get_counter();
-                    //     if recording_started
-                    //         || (is_recording && frame_counter % 10 == 0)
-                    //         || (frame_counter % 10 == 0 && current_segment_num == 3)
-                    //     {
-                    //         info!(
-                    //             "#{} Frame time {}µs, current seg {} (r started {})",
-                    //             frame_counter,
-                    //             (end - start).to_micros(),
-                    //             current_segment_num,
-                    //             recording_started
-                    //         );
-                    //     }
-                    // }
                 }
             }
         }
-        {
-            // This block prevents a frame sync issue when we *end* recording
 
-            // NOTE: If we're not transferring the previous frame, and the current segment is the second
-            //  to last for a real frame, we can go dormant until the next vsync interrupt.
-            if recording_ended {
-                // && !transferring_prev_frame && current_segment_num == 3 {
-                is_recording = false;
-                recording_ended = false;
-            }
-            // if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-            //     rosc =
-            //         go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
-            // } else if current_segment_num == 3 {
-            //     //warn!("Overrunning frame time");
-            // }
+        // This block prevents a frame sync issue when we *end* recording
+
+        // NOTE: If we're not transferring the previous frame, and the current segment is the second
+        //  to last for a real frame, we can go dormant until the next vsync interrupt.
+        if recording_ended {
+            // && !transferring_prev_frame && current_segment_num == 3 {
+            is_recording = false;
+            recording_ended = false;
         }
+        // if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
+        //     rosc =
+        //         go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
+        // } else if current_segment_num == 3 {
+        //     //warn!("Overrunning frame time");
+        // }
     }
 }

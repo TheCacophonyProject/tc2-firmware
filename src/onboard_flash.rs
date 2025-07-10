@@ -19,7 +19,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use chrono::DateTime;
 use core::mem;
 use crc::{CRC_16_XMODEM, Crc};
-use defmt::{Format, error, info, println, warn};
+use defmt::{Format, error, info, warn};
 
 use crate::attiny_rtc_i2c::AudioRecordingType;
 use crate::synced_date_time::SyncedDateTime;
@@ -56,9 +56,11 @@ const FEATURE_DIE_SELECT: u8 = 0xd0;
 const NUM_EVENT_BYTES: usize = 18;
 
 pub const TOTAL_FLASH_BLOCKS: u16 = 2048;
-const CONFIG_BLOCKS: u8 = 2;
-// FIXME: What is 5 here?
-const NUM_RECORDING_BLOCKS: u16 = TOTAL_FLASH_BLOCKS - 5 - CONFIG_BLOCKS as u16; // Leave 1 block between recordings and event logs
+const NUM_CONFIG_BLOCKS: u8 = 2;
+const NUM_ALARM_BLOCKS: u8 = 1;
+const NUM_EVENT_BLOCKS: u8 = 4;
+const NUM_RECORDING_BLOCKS: u16 = TOTAL_FLASH_BLOCKS
+    - (NUM_CONFIG_BLOCKS as u16 + NUM_ALARM_BLOCKS as u16 + NUM_EVENT_BLOCKS as u16);
 const NUM_PAGES_PER_BLOCK: u8 = 64;
 
 pub struct OnboardFlashStatus {
@@ -93,7 +95,6 @@ impl OnboardFlashStatus {
     }
 
     pub fn ecc_status(&self) -> EccStatus {
-        // TODO: return relocation info?
         let ecc_bits = (self.inner >> 4) & 0b0000_0111;
         match ecc_bits {
             0b000 => EccStatus {
@@ -361,7 +362,6 @@ pub struct OnboardFlash {
     pub file_start_block_index: Option<BlockIndex>,
     //could use same block for both but would have to write config every audio change and vice versa
     pub config_block: Option<BlockIndex>,
-    pub audio_block: Option<BlockIndex>,
     system_clock_hz: HertzU32,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
@@ -401,7 +401,6 @@ impl OnboardFlash {
             file_start_block_index: None,
             previous_file_start_block_index: None,
             config_block: None,
-            audio_block: None,
             system_clock_hz,
         }
     }
@@ -422,32 +421,25 @@ impl OnboardFlash {
         self.set_config_block();
     }
 
-    // find last non bad block to use for config
     pub fn set_config_block(&mut self) {
-        // FIXME: Seems like we should restrict this search to a sensible subset of all blocks
-        let mut block_index = NUM_RECORDING_BLOCKS + u16::from(CONFIG_BLOCKS);
-        while self.bad_blocks.contains(&block_index) {
-            block_index = block_index.saturating_sub(1);
-            info!("Bad block {} for audio config", block_index);
-        }
+        // Find last non bad block to use for config.  Note that we need 2 contigous good blocks
+        // to store the device config.
 
-        assert_ne!(block_index, 0, "No good blocks found for config");
-        // FIXME: audio_block config seems to be unused?
-        self.audio_block = Some(block_index);
-        block_index = block_index.saturating_sub(1);
-        // FIXME: In this instance, we don't have the ability to write the fact that there
-        //  are no good blocks found to flash in order to report on it.  Probably can never happen tho?
-        assert_ne!(block_index, 0, "No good blocks found for config");
-        while self.bad_blocks.contains(&block_index) {
+        // FIXME: Should probably follow a similar strategy for events and alarm block
+        //  Also mark page metadata for first page in the block with type.
+        let mut block_index = NUM_RECORDING_BLOCKS;
+        while self.bad_blocks.contains(&block_index) || self.bad_blocks.contains(&(block_index + 1))
+        {
             block_index = block_index.saturating_sub(1);
-            info!("Bad block {} for device config", block_index);
+            info!(
+                "Bad contiguous block set {}/{} for device config",
+                block_index,
+                block_index + 1
+            );
         }
         assert_ne!(block_index, 0, "No good blocks found for config");
+        info!("Using block {} for device config", block_index);
         self.config_block = Some(block_index);
-        info!(
-            "Using {} for audio config and {} for device config",
-            self.audio_block, self.config_block
-        );
     }
 
     pub fn write_device_config(&mut self, device_bytes: &mut [u8]) {
@@ -607,18 +599,7 @@ impl OnboardFlash {
         self.current_block_index = 0;
         let mut last_good_block = None;
         // Find first good free block:
-        {
-            if self.read_page(0, 1).is_err() {
-                error!("Failed to read page 1 at block 0");
-            }
-            self.read_page_metadata(0);
-            self.wait_for_all_ready();
-            if self.current_page.page_is_used() {
-                warn!("Page 1 has data");
-            }
-        }
         let mut good_block = false;
-
         let mut last_file_block_index = u16::MAX;
         let mut num_files = 0;
 
@@ -626,7 +607,6 @@ impl OnboardFlash {
             // TODO: Interleave with random cache read
             // TODO: We can see if this is faster if we just read the column index of the end of the page?
             // For simplicity at the moment, just read the full pages
-
             // in the case of incomplete cptv files page 0 will be empty
             if self.read_page(block_index, 1).is_ok() {
                 self.read_page_metadata(block_index);
@@ -661,16 +641,23 @@ impl OnboardFlash {
                             self.file_start_block_index = self.prev_page.file_start_block_index();
                             self.current_block_index = block_index;
                             self.current_page_index = 0;
-                            println!("Setting next starting block index {}", block_index);
+                            info!("Setting next starting block index {}", block_index);
                         }
                     } else if self.first_used_block_index.is_none() {
                         // This is the starting block of the first file stored.
-                        println!("Storing first used block {}", block_index);
+                        info!("Storing first used block {}", block_index);
                         self.first_used_block_index = Some(block_index);
                     }
                 }
             } else {
                 error!("Failed to read page 1 at block {}", block_index);
+                self.read_page_metadata(block_index);
+                self.wait_for_all_ready();
+                info!(
+                    "Bad metadata, used {} {:?}",
+                    self.current_page.page_is_used(),
+                    self.current_page.user_metadata_1()
+                );
             }
         }
         self.num_files_in_initial_scan = num_files;
@@ -683,7 +670,7 @@ impl OnboardFlash {
 
                 self.current_block_index = last_good_block + 1;
                 self.current_page_index = 0;
-                println!(
+                info!(
                     "Setting next starting block as last good block index {}",
                     self.current_block_index
                 );
@@ -835,7 +822,7 @@ impl OnboardFlash {
     }
 
     pub fn erase_all_blocks(&mut self) {
-        for block_index in 0..NUM_RECORDING_BLOCKS {
+        for block_index in 0..TOTAL_FLASH_BLOCKS {
             if self.bad_blocks.contains(&block_index) {
                 info!("Skipping erase of bad block {}", block_index);
             } else if self.erase_block(block_index).is_err() {
@@ -1062,7 +1049,8 @@ impl OnboardFlash {
             // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
             // that the file spans as temporarily corrupt, so this file doesn't get read and
             // sent to the raspberry pi.  This returns no useful data.
-            Err("unrecoverable data corruption error")
+            // Err("unrecoverable data corruption error")
+            Ok(())
         }
     }
 

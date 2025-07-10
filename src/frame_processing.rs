@@ -279,6 +279,11 @@ pub fn thermal_motion_task(
     }
 
     let current_recording_window = config.next_or_current_recording_window(&time.date_time());
+    if current_recording_window.is_err() {
+        error!("Invalid recording window");
+        request_restart(&mut sio, &mut delay);
+    }
+    let current_recording_window = current_recording_window.unwrap();
     let mut bk = {
         // This might be true if we woke up in thermal mode having been randomly shutdown?
         // FIXME: If the user cancels offload, then we might think we've made a status recording
@@ -762,6 +767,8 @@ pub fn thermal_motion_task(
         //  longer than expected, and cause us to lose sync.
 
         if not_recording_and_every_minute_interval_arrived {
+            // FIXME: Work out what takes the most time in here.
+
             is_daytime = config.time_is_in_daylight(&time.date_time());
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
@@ -772,9 +779,6 @@ pub fn thermal_motion_task(
                 // Once per minute, if we're not currently recording,
                 // tell the RPi it can shut down, as it's not needed in
                 // low-power mode unless it's sending preview frames.
-
-                // FIXME: Keeps tabs on if pi is still awake so that we can not do this i2c
-                //  call if it's already asleep
                 if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
                     && bk.logged_told_rpi_to_sleep.take().is_some()
                 {
@@ -896,9 +900,9 @@ pub fn thermal_motion_task(
             &time,
             &current_recording_window.1,
         ) {
-            info!("Taking audio recording");
-            // make audio rec now
+            // make audio rec no
             if i2c.tc2_agent_take_audio_rec(&mut delay).is_ok() {
+                info!("Taking audio recording");
                 request_restart(&mut sio, &mut delay);
             } else {
                 error!("Failed to write 'take audio recording' flag");
@@ -989,11 +993,20 @@ fn shutdown_rp2040_if_possible(
 
             // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
             //  and ask for the rp2040 to be put to sleep.
+            if !DEV_MODE
+                && config
+                    .next_recording_window_start(&time.date_time())
+                    .is_err()
+            {
+                request_restart(sio, delay);
+            }
             let next_recording_window_start = if DEV_MODE {
                 // In dev mode, we always set the restart alarm for 2 minutes time.
                 time.date_time() + Duration::minutes(2)
             } else {
-                config.next_recording_window_start(&time.date_time())
+                config
+                    .next_recording_window_start(&time.date_time())
+                    .unwrap()
             };
             if i2c.enable_alarm(delay).is_err() {
                 error!("Failed enabling alarm");
@@ -1116,9 +1129,9 @@ fn should_restart_to_make_an_audio_recording(
 }
 
 fn request_restart(sio: &mut Sio, delay: &mut Delay) {
-    // power_down_frame_acquisition(sio);
+    power_down_frame_acquisition(sio);
     // Delay so we actually get to see the shutdown message in the console.
-    delay.delay_ms(50);
+    delay.delay_ms(500);
     sio.fifo.write(Core0Task::RequestReset.into());
     loop {
         // Wait to be reset

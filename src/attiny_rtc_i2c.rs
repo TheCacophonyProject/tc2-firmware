@@ -250,45 +250,27 @@ pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
 impl SharedI2C {
     pub fn new(
         i2c_config: I2CConfig,
-        unlocked_pin: Pin<Gpio3, FunctionSio<SioInput>, PullDown>,
+        unlocked_pin: I2cUnlockedPin,
         delay: &mut Delay,
-    ) -> SharedI2C {
+    ) -> Result<SharedI2C, &str> {
         let mut i2c = SharedI2C {
             unlocked_pin: Some(unlocked_pin),
             i2c: Some(i2c_config),
             rtc: None,
         };
-
-        let mut attempts = 0;
-        loop {
-            match i2c.get_attiny_firmware_version(delay) {
-                Ok(version) => match version {
-                    EXPECTED_ATTINY_FIRMWARE_VERSION => {
-                        break;
-                    }
-                    version => {
-                        error!(
-                            "Mismatched Attiny firmware version – expected {}, got {}",
-                            EXPECTED_ATTINY_FIRMWARE_VERSION, version
-                        );
-                        break;
-                    }
-                },
-                Err(e) => {
-                    warn!("Error communicating with i2c, attempt #{}", attempts);
-                    attempts += 1;
-                    if attempts > 100 {
-                        crate::panic!("Unable to communicate with Attiny over i2c: {:?}", e);
-                    } else {
-                        delay.delay_us(500);
-                    }
-                }
-            }
+        let version = i2c.get_attiny_firmware_version(delay)?;
+        if version != EXPECTED_ATTINY_FIRMWARE_VERSION {
+            error!(
+                "Mismatched Attiny firmware version – expected {}, got {}",
+                EXPECTED_ATTINY_FIRMWARE_VERSION, version
+            );
+            return Err("Mismatched Attiny firmware version");
         }
-        i2c
+        Ok(i2c)
     }
 
-    pub fn free(&mut self) -> (I2CConfig, Pin<Gpio3, FunctionSio<SioInput>, PullDown>) {
+    // Dead code
+    pub fn free(&mut self) -> (I2CConfig, I2cUnlockedPin) {
         if let Some(unlocked_pin) = self.unlocked_pin.take() {
             if let Some(device) = self.rtc.take() {
                 let dev = device.destroy();
@@ -304,16 +286,17 @@ impl SharedI2C {
     }
 
     pub fn get_scheduled_alarm_time(&mut self, delay: &mut Delay) -> (Option<u8>, Option<u8>) {
-        let success = self.with_rtc(delay, |rtc| {
-            let hours = rtc.get_alarm_hours().ok();
-            let mins = rtc.get_alarm_minutes().ok();
-            Ok::<(Option<u8>, Option<u8>), &str>((hours, mins))
+        let result = self.with_rtc(delay, |rtc| {
+            let hours = rtc.get_alarm_hours().map_err(map_rtc_err)?;
+            let mins = rtc.get_alarm_minutes().map_err(map_rtc_err)?;
+            Ok::<(Option<u8>, Option<u8>), &str>((Some(hours), Some(mins)))
         });
-        if let Ok((hours, mins)) = success {
-            (hours, mins)
-        } else {
-            error!("Failed to get scheduled alarm time from RTC");
-            (None, None)
+        match result {
+            Ok((hours, minutes)) => (hours, minutes),
+            Err(e) => {
+                error!("Failed to get scheduled alarm time from RTC: {}", e);
+                (None, None)
+            }
         }
     }
 
@@ -324,7 +307,7 @@ impl SharedI2C {
         value: u8,
     ) -> Result<(), &str> {
         let request_crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command, value]);
-        self.with_i2c(delay, |i2c| {
+        self.with_i2c_retrying(delay, |i2c| {
             let mut payload = [command, value, 0, 0];
             BigEndian::write_u16(&mut payload[2..=3], request_crc);
             // Write the value
@@ -365,6 +348,19 @@ impl SharedI2C {
         })
     }
 
+    pub fn check_device_present(&mut self, addr: u8, delay: &mut Delay) -> Result<bool, &str> {
+        self.with_i2c(
+            delay,
+            |i2c| {
+                let payload = &mut [0];
+                i2c.write_read(addr, &[0], payload)
+                    .map(|v| true)
+                    .map_err(|e| map_i2c_err(e.kind()))
+            },
+            Some(0),
+        )
+    }
+
     fn attiny_write_read_command(
         &mut self,
         delay: &mut Delay,
@@ -372,7 +368,7 @@ impl SharedI2C {
         value: Option<u8>,
         payload: &mut [u8; 3],
     ) -> Result<(), &str> {
-        self.with_i2c(delay, |i2c| {
+        self.with_i2c_retrying(delay, |i2c| {
             if let Some(v) = value {
                 let mut request = [command, v, 0x00, 0x00];
                 let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&request[0..=1]);
@@ -396,7 +392,7 @@ impl SharedI2C {
     ) -> Result<u8, &'static str> {
         let mut payload = [0u8; 3];
         let request_crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[command]);
-        self.with_i2c(delay, |i2c| {
+        self.with_i2c_retrying(delay, |i2c| {
             payload[0] = 0;
             let mut request = [command, 0x00, 0x00];
             BigEndian::write_u16(&mut request[1..=2], request_crc);
@@ -417,7 +413,7 @@ impl SharedI2C {
         })
     }
 
-    pub fn get_attiny_firmware_version(&mut self, delay: &mut Delay) -> Result<u8, &str> {
+    pub fn get_attiny_firmware_version(&mut self, delay: &mut Delay) -> Result<u8, &'static str> {
         self.try_attiny_read_command(delay, REG_VERSION)
     }
 
@@ -497,7 +493,6 @@ impl SharedI2C {
         print: bool,
     ) -> Result<bool, &str> {
         let state = self.try_attiny_read_command(delay, REG_CAMERA_STATE)?;
-        let recorded_camera_state = Some(CameraState::from(state));
         let camera_state = CameraState::from(state);
         let pi_is_awake = match camera_state {
             CameraState::PoweredOn => Ok(true),
@@ -511,9 +506,7 @@ impl SharedI2C {
                 self.tc2_agent_is_ready(delay, print)
             } else {
                 if print {
-                    if let Some(state) = &recorded_camera_state {
-                        info!("Camera state {:?}", state);
-                    }
+                    info!("Camera state {:?}", camera_state);
                 }
                 Ok(false)
             }
@@ -641,50 +634,41 @@ impl SharedI2C {
     }
 
     pub fn get_datetime(&mut self, delay: &mut Delay) -> Result<DateTime, &str> {
-        self.with_rtc(delay, |rtc| match rtc.get_datetime() {
-            Ok(datetime) => {
-                if datetime.day == 0
-                    || datetime.day > 31
-                    || datetime.month == 0
-                    || datetime.month > 12
-                {
-                    Err("Invalid datetime output from RTC")
-                } else {
-                    Ok(datetime)
-                }
+        self.with_rtc(delay, |rtc| {
+            let datetime = rtc.get_datetime().map_err(map_rtc_err)?;
+            if datetime.day == 0 || datetime.day > 31 || datetime.month == 0 || datetime.month > 12
+            {
+                Err("Invalid datetime output from RTC")
+            } else {
+                Ok(datetime)
             }
-            Err(e) => Err(map_rtc_err(e)),
         })
     }
 
     pub fn enable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.with_rtc(delay, |rtc| {
-            let mut success = true;
-            success = success && rtc.clear_alarm_flag().is_ok();
-            success = success && rtc.control_alarm_interrupt(Control::On).is_ok();
-            success = success && rtc.control_alarm_day(Control::Off).is_ok();
-            success = success && rtc.control_alarm_hours(Control::On).is_ok();
-            success = success && rtc.control_alarm_minutes(Control::On).is_ok();
-            success = success && rtc.control_alarm_weekday(Control::Off).is_ok();
-            if success {
-                Ok(())
-            } else {
-                Err("Failed to enable alarm")
-            }
+            // FIXME: Also verify each one of these steps
+            rtc.clear_alarm_flag().map_err(map_rtc_err)?;
+            rtc.control_alarm_interrupt(Control::On)
+                .map_err(map_rtc_err)?;
+            rtc.control_alarm_day(Control::Off).map_err(map_rtc_err)?;
+            rtc.control_alarm_hours(Control::On).map_err(map_rtc_err)?;
+            rtc.control_alarm_minutes(Control::On)
+                .map_err(map_rtc_err)?;
+            rtc.control_alarm_weekday(Control::Off)
+                .map_err(map_rtc_err)?;
+            Ok(())
         })
     }
 
     pub fn disable_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
         self.with_rtc(delay, |rtc| {
-            let mut success = true;
-            success = success && rtc.clear_alarm_flag().is_ok();
-            success = success && rtc.control_alarm_interrupt(Control::Off).is_ok();
-            success = success && rtc.disable_all_alarms().is_ok();
-            if success {
-                Ok(())
-            } else {
-                Err("Failed to disable alarm")
-            }
+            // FIXME: Also verify each one of these steps
+            rtc.clear_alarm_flag().map_err(map_rtc_err)?;
+            rtc.control_alarm_interrupt(Control::Off)
+                .map_err(map_rtc_err)?;
+            rtc.disable_all_alarms().map_err(map_rtc_err)?;
+            Ok(())
         })
     }
 
@@ -697,21 +681,69 @@ impl SharedI2C {
         let wake_hour = datetime_utc.time().hour() as u8;
         #[allow(clippy::cast_possible_truncation)]
         let wake_min = datetime_utc.time().minute() as u8;
+        self.set_wakeup_alarm_hours_mins(delay, wake_hour, wake_min)
+    }
+
+    pub fn set_wakeup_alarm_hours_mins(
+        &mut self,
+        delay: &mut Delay,
+        wake_hour: u8,
+        wake_min: u8,
+    ) -> Result<(), &str> {
         info!("Setting wake alarm for UTC {}:{}", wake_hour, wake_min);
-        let success = self.with_rtc(delay, |rtc| {
-            let mut success = true;
-            success = success && rtc.set_alarm_hours(wake_hour).is_ok();
-            success = success && rtc.set_alarm_minutes(wake_min).is_ok();
-            if success {
-                Ok(())
-            } else {
-                Err("Failed to set wakeup alarm")
-            }
+        // TODO: Get to the bottom of the finicky behaviour we're seeing.
+        //  Maybe just do the alarms etc in terms of our own i2c abstraction.
+
+        // For some reason doing this first seems to prime the alarm so that it actually succeeds!?
+        let result = self.with_i2c_retrying(delay, |i2c| {
+            let mut data = [0];
+            let minute_alarm: u8 = 0x09;
+            let hour_alarm: u8 = 0x0A;
+            i2c.write_read(0x51u8, &[hour_alarm], &mut data)
+                .map_err(|e| map_i2c_err(e.kind()))?;
+            let hours = data[0];
+            i2c.write_read(0x51u8, &[minute_alarm], &mut data)
+                .map_err(|e| map_i2c_err(e.kind()))?;
+            let minutes = data[0];
+            info!("Hours {:08b}, minutes {:08b}", hours, minutes);
+            Ok(())
         });
-        if success.is_ok() {
+
+        // FIXME: Maybe have a separate retry loop for all of these steps?
+        let result = self.with_rtc(delay, |rtc| {
+            rtc.control_alarm_minutes(Control::On)
+                .map_err(map_rtc_err)?;
+            rtc.control_alarm_hours(Control::On).map_err(map_rtc_err)?;
+            let alarm_hours_enabled = rtc.is_alarm_hours_enabled().map_err(map_rtc_err)?;
+            if !alarm_hours_enabled {
+                return Err("alarm hours not enabled");
+            }
+            let alarm_minutes_enabled = rtc.is_alarm_minutes_enabled().map_err(map_rtc_err)?;
+            if !alarm_minutes_enabled {
+                return Err("alarm minutes not enabled");
+            }
+            // let interrupt_enabled = rtc.is_alarm_interrupt_enabled().map_err(map_rtc_err)?;
+            // if !interrupt_enabled {
+            //     return Err("alarm interrupt not enabled");
+            // }
+            rtc.set_alarm_hours(wake_hour).map_err(map_rtc_err)?;
+            rtc.set_alarm_minutes(wake_min).map_err(map_rtc_err)?;
+            let set_hour = rtc.get_alarm_hours().map_err(map_rtc_err)?;
+            if set_hour != wake_hour {
+                return Err("wake hour didn't match set hour");
+            }
+            let set_min = rtc.get_alarm_minutes().map_err(map_rtc_err)?;
+            if set_min != wake_min {
+                return Err("wake minute didn't match set minute");
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            error!("Failed to set wake alarm: {}", e);
+        } else {
             info!("Set alarm {:?}", self.get_scheduled_alarm_time(delay));
         }
-        success
+        result
     }
 
     pub fn alarm_triggered(&mut self, delay: &mut Delay) -> Result<bool, &str> {
@@ -788,8 +820,10 @@ impl SharedI2C {
         &mut self,
         delay: &mut Delay,
         mut func: impl FnMut(&mut I2CConfig) -> Result<SUCCESS, &'static str>,
+        max_attempts: Option<u8>,
     ) -> Result<SUCCESS, &'static str> {
         let mut attempts = 0;
+        let max_attempts = max_attempts.unwrap_or(DEFAULT_MAX_I2C_ATTEMPTS);
         loop {
             let result = if let Some((pin, mut i2c)) = self.take_i2c_attiny_lock() {
                 let result = func(&mut i2c);
@@ -801,12 +835,20 @@ impl SharedI2C {
             if result.is_ok() {
                 return result;
             }
-            if attempts >= DEFAULT_MAX_I2C_ATTEMPTS {
+            if attempts >= max_attempts {
                 return result;
             }
             attempts += 1;
             delay.delay_us(500);
         }
+    }
+
+    fn with_i2c_retrying<SUCCESS>(
+        &mut self,
+        delay: &mut Delay,
+        func: impl FnMut(&mut I2CConfig) -> Result<SUCCESS, &'static str>,
+    ) -> Result<SUCCESS, &'static str> {
+        self.with_i2c(delay, func, None)
     }
 
     pub fn clear_alarm(&mut self, delay: &mut Delay) -> Result<(), &str> {
@@ -829,7 +871,7 @@ impl SharedI2C {
         command: u8,
         payload: &mut [u8],
     ) -> Result<(), &str> {
-        self.with_i2c(delay, |i2c| {
+        self.with_i2c_retrying(delay, |i2c| {
             i2c.write_read(EEPROM_I2C_ADDRESS, &[command], payload)
                 .map_err(|e| map_i2c_err(e.kind()))
         })
@@ -935,8 +977,8 @@ impl Eeprom {
         let calculated_crc = self.crc_16();
         let valid = embedded_crc == calculated_crc;
         if !valid {
-            info!(
-                "CRC failed expected {} got {}",
+            warn!(
+                "Eeprom CRC failed expected {} got {}",
                 calculated_crc, embedded_crc
             );
         }
