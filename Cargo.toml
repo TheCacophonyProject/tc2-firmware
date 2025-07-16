@@ -38,7 +38,6 @@ rp2040-hal = {version = "0.11.0", features = ["defmt"]}
 pio = "0.2.1"
 pio-proc = "0.2.1"
 picorand = "0.1.2"
-log = "0.4.27"
 
 [features]
 # This is the set of features we enable by default

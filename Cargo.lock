@@ -1060,7 +1060,6 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-io",
  "fugit",
- "log",
  "num-traits",
  "panic-probe",
  "picorand",
