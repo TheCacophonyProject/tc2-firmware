@@ -5,7 +5,6 @@ use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use defmt::{Format, Formatter, error};
 use embedded_io::Read;
-use pcf8563::DateTime;
 
 #[derive(PartialEq)]
 pub struct SmallString([u8; 64]);
@@ -91,6 +90,10 @@ impl DeviceConfigInner {
 
     pub fn is_audio_device(&self) -> bool {
         self.audio_mode != AudioMode::Disabled
+    }
+
+    pub fn is_audio_only_device(&self) -> bool {
+        self.audio_mode == AudioMode::AudioOnly
     }
 
     pub fn time_is_in_recording_window(
@@ -413,6 +416,10 @@ impl DeviceConfig {
         self.config_inner.is_audio_device()
     }
 
+    pub fn is_audio_only_device(&self) -> bool {
+        self.config_inner.is_audio_device()
+    }
+
     pub fn audio_seed(&self) -> u32 {
         self.config_inner.audio_seed
     }
@@ -426,6 +433,10 @@ impl DeviceConfig {
             self.audio_mode(),
             AudioMode::AudioAndThermal | AudioMode::AudioOrThermal
         )
+    }
+
+    pub fn records_audio_or_thermal(&self) -> bool {
+        matches!(self.audio_mode(), AudioMode::AudioOrThermal)
     }
 
     pub fn device_name(&self) -> &str {
@@ -500,32 +511,33 @@ impl DeviceConfig {
     }
 }
 
-pub fn get_datetime_utc(datetime: DateTime) -> chrono::DateTime<Utc> {
-    let naive_date = NaiveDate::from_ymd_opt(
-        2000 + i32::from(datetime.year),
-        u32::from(datetime.month),
-        u32::from(datetime.day),
-    );
+pub fn get_datetime_utc(
+    year: u8,
+    month: u8,
+    day: u8,
+    hours: u8,
+    minutes: u8,
+    seconds: u8,
+) -> chrono::DateTime<Utc> {
+    let naive_date =
+        NaiveDate::from_ymd_opt(2000 + i32::from(year), u32::from(month), u32::from(day));
 
     assert!(
         naive_date.is_some(),
         "Couldn't get date for {}, {}, {}",
-        2000 + i32::from(datetime.year),
-        u32::from(datetime.month),
-        u32::from(datetime.day)
+        2000 + i32::from(year),
+        u32::from(month),
+        u32::from(day)
     );
-    let naive_time = NaiveTime::from_hms_opt(
-        u32::from(datetime.hours),
-        u32::from(datetime.minutes),
-        u32::from(datetime.seconds),
-    );
+    let naive_time =
+        NaiveTime::from_hms_opt(u32::from(hours), u32::from(minutes), u32::from(seconds));
 
     assert!(
         naive_time.is_some(),
         "Couldn't get time for {}, {}, {}",
-        u32::from(datetime.hours),
-        u32::from(datetime.minutes),
-        u32::from(datetime.seconds),
+        u32::from(hours),
+        u32::from(minutes),
+        u32::from(seconds),
     );
 
     let naive_datetime = NaiveDateTime::new(naive_date.unwrap(), naive_time.unwrap());

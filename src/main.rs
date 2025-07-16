@@ -28,51 +28,38 @@ mod sun_times;
 mod synced_date_time;
 mod utils;
 
-use crate::attiny_rtc_i2c::{RecordingMode, SharedI2C};
-use crate::audio_task::audio_task;
+use crate::attiny_rtc_i2c::{MainI2C, RecordingMode};
+use crate::audio_task::record_audio;
 use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{
     ExtSpiTransfers, RPI_PAYLOAD_LENGTH, RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH,
 };
-use crate::frame_processing::{Core0Task, FrameBuffer, StaticFrameBuffer, thermal_motion_task};
-use crate::lepton::{LeptonFirmwareInfo, LeptonPins, init_lepton_module};
+use crate::frame_processing::record_thermal;
+use crate::lepton::LeptonPins;
 pub use crate::lepton_task::frame_acquisition_loop;
+use crate::onboard_flash::FLASH_SPI_TOTAL_PAYLOAD_SIZE;
 use crate::onboard_flash::OnboardFlash;
 use crate::onboard_flash::extend_lifetime_generic_mut;
-use crate::onboard_flash::{FLASH_SPI_TOTAL_PAYLOAD_SIZE, extend_lifetime_generic};
 use crate::startup_functions::{
-    current_recording_mode, get_device_config, get_next_audio_alarm, get_synced_time,
-    maybe_offload_files_and_events_on_startup,
+    get_device_config, get_or_schedule_next_alarm, get_synced_time,
+    maybe_offload_files_and_events_on_startup, work_out_recording_mode,
 };
-use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
 use bsp::hal::Timer;
 use bsp::hal::watchdog::Watchdog;
 use bsp::{
     entry,
-    hal::{
-        clocks::Clock,
-        multicore::{Multicore, Stack},
-        pac,
-        sio::Sio,
-    },
+    hal::{clocks::Clock, sio::Sio},
     pac::Peripherals,
 };
-use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Utc};
-use core::cell::RefCell;
-use cortex_m::delay::Delay;
-use critical_section::Mutex;
+use chrono::{Datelike, Timelike, Utc};
 use defmt::{assert, assert_eq, error, info, warn};
 use defmt_rtt as _;
-use device_config::DeviceConfig;
-use fugit::{ExtU32, HertzU32, RateExtU32};
+use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::I2C;
-use rp2040_hal::clocks::ClocksManager;
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::pio::PIOExt;
-use rp2040_hal::rosc::RingOscillator;
 
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
@@ -177,17 +164,9 @@ fn main() -> ! {
     fs.take_spi(peripherals.SPI1, &mut peripherals.RESETS);
     fs.init();
 
-    let mut delay = Delay::new(
-        pac::CorePeripherals::take().unwrap().SYST,
-        system_clock_freq.to_Hz(),
-    );
-
-    // Attiny + RTC comms
-    // Early on in development we got strange errors when the raspberry pi was accessing the
-    // attiny-provided i2c interface at the same time as we wanted to.  The hacky?/ingenious?
-    // solution was to allocate a gpio pin that would determine who has the 'lock' on the i2c bus.
-    // This is handled by this `SharedI2C` abstraction which mediates comms with the attiny/RTC.
-    let i2c_result = SharedI2C::new(
+    watchdog.pause_on_debug(true);
+    watchdog.start(8_388_607.micros());
+    let i2c_result = MainI2C::new(
         I2C::i2c1(
             peripherals.I2C1,
             pins.gpio6.reconfigure(),
@@ -197,7 +176,7 @@ fn main() -> ! {
             &clocks.system_clock,
         ),
         pins.gpio3.reconfigure(),
-        &mut delay,
+        timer,
     );
     if let Err(e) = i2c_result {
         error!("{}", e);
@@ -205,52 +184,48 @@ fn main() -> ! {
     }
     let mut i2c = i2c_result.unwrap();
 
-    watchdog.pause_on_debug(true);
-    watchdog.start(8_388_607.micros());
-
     let mut events = EventLogger::new(&mut fs);
-    let time = get_synced_time(&mut i2c, &mut delay, &mut events, &mut fs, timer);
-    if let Err(e) = time {
-        error!("{}", e);
-        restart(&mut watchdog);
-    }
-    let time = time.unwrap();
-
-    // Scan for I2C devices
-    info!("Scanning I2C bus...");
-    for addr in 0..=127 {
-        if i2c.check_device_present(addr, &mut delay).unwrap_or(false) {
-            info!("I2C device found at address: 0x{:02x}", addr);
-        }
-    }
-
-    if let Err(e) = i2c.set_wakeup_alarm_hours_mins(&mut delay, 3, 17) {
-        error!("I2C set wakeup_alarm_hours_mins failed {}", e);
-    }
-
-    // this isn't reliable so use alarm stored in flash
-    let scheduled_alarm = i2c.get_scheduled_alarm_time(&mut delay);
-    info!("Scheduled alarm: {:?}", scheduled_alarm);
-    let woken_by_alarm = match i2c.alarm_triggered(&mut delay) {
-        Ok(woken_by_alarm) => {
-            if woken_by_alarm {
-                info!("Woken by RTC alarm? {}", woken_by_alarm);
+    let time = get_synced_time(&mut i2c, &mut events, &mut fs, &mut watchdog, timer).unwrap();
+    let scheduled_alarm = i2c.get_scheduled_alarm(&time);
+    if let Some(scheduled_alarm) = &scheduled_alarm {
+        if scheduled_alarm.has_triggered() {
+            // Make sure the reason we woke was the trigger - if now != alarm time,
+            // we missed the alarm, and were woken up for some other reason.
+            if scheduled_alarm.time().hour() != time.date_time().hour()
+                || scheduled_alarm.time().minute() != time.date_time().minute()
+            {
+                // Missed alarm
+                warn!("Missed alarm");
+            } else {
+                info!("Woken by RTC alarm");
                 events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
-                if let Err(e) = i2c.clear_alarm(&mut delay) {
-                    error!("Failed to clear alarm {}", e);
-                }
             }
-            woken_by_alarm
+            // Clear the alarm flag:
+            if let Err(e) = i2c.clear_and_disable_alarm(&time) {
+                error!("{}", e);
+                restart(&mut watchdog);
+            }
         }
-        Err(e) => {
-            error!("{}", e);
-            false
-        }
-    };
+    } else {
+        // FIXME: If there's nothing scheduled, schedule a new alarm and restart.
+    }
+    if let Some(alarm) = &scheduled_alarm
+        && alarm.is_audio_alarm()
+    {
+        warn!(
+            "Next audio alarm scheduled in {}mins (at {} {}:{})",
+            (alarm.time() - time.date_time()).num_minutes(),
+            alarm.time().day(),
+            alarm.time().hour(),
+            alarm.time().minute(),
+        );
+    }
+
+    info!("Scheduled alarm: {}", scheduled_alarm);
     let dc_result = get_device_config(
         &mut fs,
         &mut i2c,
-        &mut delay,
+        timer,
         &mut pi_spi,
         system_clock_freq,
         &mut peripherals.RESETS,
@@ -264,7 +239,18 @@ fn main() -> ! {
     }
     let (config, prioritise_frame_preview) = dc_result.unwrap();
 
-    if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
+    // If the current schedule is good, use it, otherwise reschedule and restart
+    let missed_audio_alarm = get_or_schedule_next_alarm(
+        &config,
+        &mut fs,
+        &time,
+        &mut i2c,
+        &mut events,
+        &scheduled_alarm,
+        &mut watchdog,
+    );
+
+    if let Ok(is_recording) = i2c.get_is_recording() {
         // Unset the is_recording flag on attiny on startup if still enabled.
         // If it was still set, that suggests a previous recording was interrupted.
         if is_recording {
@@ -272,39 +258,22 @@ fn main() -> ! {
                 error!("Still had recording bit set, but last recording seems to be complete");
             }
             events.log(Event::RecordingNotFinished, &time, &mut fs);
-            if let Err(e) = i2c.stopped_recording(&mut delay) {
+            if let Err(e) = i2c.stopped_recording() {
                 error!("Error unsetting recording flag on attiny: {}", e);
             }
         }
     }
 
-    let next_audio_alarm =
-        get_next_audio_alarm(&config, &mut fs, &time, &mut delay, &mut i2c, &mut events);
-
-    // FIXME: Test audio recording doesn't work.
-    // FIXME: Pi doesn't respond to startup handshake with new config, or can't get mask regions structure.
-    // FIXME: Startup status recording doesn't end after 18 frames, keeps going.
-
-    // Maybe we should use the next_audio_alarm here to help figure out what state we've woken up in?
-    let recording_mode = current_recording_mode(&config, &mut i2c, &mut delay, &time);
-
+    let recording_mode = work_out_recording_mode(
+        &scheduled_alarm,
+        prioritise_frame_preview,
+        &mut i2c,
+        &config,
+        &time,
+    );
     warn!("Recording mode: {:?}", recording_mode);
-
     // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
     //  log if we can't get one
-
-    // There are a number of reasons we may or may not want to offload files and events on startup.
-
-    // If the rPi is already awake, we want to offload
-    // - if the flash is full
-    // - if we're not in a recording window, or it has been more than 24hrs since the previous offload.
-    // - if an audio recording is not scheduled imminently?
-    // - AND the user is not interacting with the device via sidekick.
-
-    // Maybe offload files and events:
-    // Offloads can be interrupted by a user via tc2-agent, and can also be deferred as much as
-    // possible (also via tc2-agent) if there is a user interacting with side-kick, in which
-    // case we try to prioritise getting frames sent.
     maybe_offload_files_and_events_on_startup(
         recording_mode,
         prioritise_frame_preview,
@@ -316,32 +285,44 @@ fn main() -> ! {
         &mut peripherals.DMA,
         &mut i2c,
         &mut pi_spi,
-        &mut delay,
         &mut watchdog,
     );
 
-    let record_audio_now = if let RecordingMode::Audio(audio_recording_type) = recording_mode {
-        if prioritise_frame_preview && !audio_recording_type.is_user_requested() {
+    if recording_mode == RecordingMode::None {
+        // FIXME: Maybe the power down should happen in startup if there's not a recording to be made.
+        // crate::audio_task::power_down_or_restart(
+        //     alarm_date_time,
+        //     time,
+        //     config,
+        //     watchdog,
+        //     i2c,
+        //     events,
+        //     fs,
+        // )
+    }
+
+    let record_audio_now = if let RecordingMode::Audio(recording_request_type) = recording_mode {
+        if prioritise_frame_preview && !recording_request_type.is_user_requested() {
             // We're not trying to make a test audio recording, and the user is interacting
             // with sidekick.
             false
         } else {
+            // missed_audio recordings will hit this case.
             true
         }
     } else {
         false
     };
 
-    if record_audio_now && let RecordingMode::Audio(audio_recording_type) = recording_mode {
+    if record_audio_now && let RecordingMode::Audio(recording_request_type) = recording_mode {
         let (pio1, _, sm1, _, _) = peripherals.PIO1.split(&mut peripherals.RESETS);
-        audio_task(
+        record_audio(
             i2c,
             system_clock_freq,
             pins.gpio0,
             pins.gpio1,
             watchdog,
-            woken_by_alarm,
-            audio_recording_type,
+            recording_request_type,
             &config,
             fs,
             events,
@@ -349,14 +330,8 @@ fn main() -> ! {
             &time,
             pio1,
             sm1,
-            delay,
         );
     } else {
-        let disabled_alarm = i2c.disable_alarm(&mut delay);
-        if disabled_alarm.is_err() {
-            error!("{}", disabled_alarm.unwrap());
-        }
-
         let lepton_pins = LeptonPins {
             tx: pins.gpio23.into_function(),
             rx: pins.gpio20.into_function(),
@@ -371,173 +346,19 @@ fn main() -> ! {
             clk_disable: pins.gpio27.into_push_pull_output(),
             master_clk: pins.gpio26.into_floating_input(),
         };
-        thermal_code(
+        record_thermal(
             i2c,
             pi_spi,
             fs,
             lepton_pins,
             watchdog,
             system_clock_freq,
-            delay,
             &clocks,
             rosc,
             &config,
             events,
             time,
-            next_audio_alarm,
+            scheduled_alarm,
         );
     }
-}
-
-/// # Panics
-///
-/// TODO
-pub fn thermal_code(
-    i2c: SharedI2C,
-    pi_spi: ExtSpiTransfers,
-    onboard_flash: OnboardFlash,
-    lepton_pins: LeptonPins,
-    watchdog: Watchdog,
-    system_clock_freq: HertzU32,
-    delay: Delay,
-    clocks: &ClocksManager,
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
-    config: &DeviceConfig,
-    events: EventLogger,
-    time: SyncedDateTime,
-    next_audio_alarm: Option<DateTime<Utc>>,
-) -> ! {
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let mut sio = Sio::new(peripherals.SIO);
-    let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
-
-    let cores = mc.cores();
-    let core_1 = &mut cores[1];
-    // NOTE: We're allocating the stack memory for core1 on our core0 stack rather than using
-    //  a `static` var so that the memory isn't used when we're in the audio mode code-path.
-    let core1_stack: Stack<470> = Stack::new();
-    let mut fb0 = FrameBuffer::new();
-    let mut fb1 = FrameBuffer::new();
-
-    let frame_buffer_a = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb0)
-    })));
-    let frame_buffer_b = Mutex::new(RefCell::new(Some(unsafe {
-        extend_lifetime_generic_mut(&mut fb1)
-    })));
-    let static_frame_buffer_a = unsafe { extend_lifetime_generic(&frame_buffer_a) };
-    let static_frame_buffer_b = unsafe { extend_lifetime_generic(&frame_buffer_b) };
-    let peripheral_clock_freq = clocks.peripheral_clock.freq();
-
-    watchdog.feed();
-    watchdog.disable();
-    let is_high_power_mode = config.use_high_power_mode();
-    let _ = core_1.spawn(core1_stack.take().unwrap(), move || {
-        lepton_core1_task(
-            lepton_pins,
-            watchdog,
-            system_clock_freq,
-            peripheral_clock_freq,
-            &rosc,
-            static_frame_buffer_a,
-            static_frame_buffer_b,
-            is_high_power_mode,
-        );
-    });
-
-    thermal_motion_task(
-        delay,
-        sio,
-        peripherals.DMA,
-        i2c,
-        pi_spi,
-        onboard_flash,
-        static_frame_buffer_a,
-        static_frame_buffer_b,
-        config,
-        events,
-        time,
-        next_audio_alarm,
-    );
-}
-
-pub fn lepton_core1_task(
-    lepton_pins: LeptonPins,
-    mut watchdog: Watchdog,
-    system_clock_freq: HertzU32,
-    peripheral_clock_freq: HertzU32,
-    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
-    static_frame_buffer_a: StaticFrameBuffer,
-    static_frame_buffer_b: StaticFrameBuffer,
-    is_high_power_mode: bool,
-) -> ! {
-    // This task runs on the second core, so we need to steal the peripherals.
-    // Core peripherals are per core, so we can just take our copy (but the current cortex-m API
-    // makes us steal it anyway)
-
-    let mut peripherals = unsafe { Peripherals::steal() };
-    let sio = Sio::new(peripherals.SIO);
-    let mut fifo = sio.fifo;
-    let mut delay = Delay::new(
-        unsafe { pac::CorePeripherals::steal().SYST },
-        system_clock_freq.to_Hz(),
-    );
-
-    let mut lepton = init_lepton_module(
-        peripherals.SPI0,
-        peripherals.I2C0,
-        system_clock_freq,
-        &mut peripherals.RESETS,
-        &mut delay,
-        lepton_pins,
-    );
-
-    let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
-    let lepton_serial = lepton.get_camera_serial().map_or(0, |x| x);
-    let lepton_firmware_version = lepton
-        .get_firmware_version()
-        .map_or(LeptonFirmwareInfo::default(), |x| x);
-    let LeptonFirmwareInfo {
-        gpp_major,
-        gpp_minor,
-        gpp_build,
-        dsp_major,
-        dsp_minor,
-        dsp_build,
-    } = lepton_firmware_version;
-
-    info!(
-        "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}, serial #{}",
-        gpp_major, gpp_minor, gpp_build, dsp_major, dsp_minor, dsp_build, lepton_serial
-    );
-
-    let result = fifo.read_blocking();
-    assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
-    let main_lepton_firmware = LittleEndian::read_u32(&[gpp_major, gpp_minor, gpp_build, 0]);
-    let dsp_lepton_firmware = LittleEndian::read_u32(&[dsp_major, dsp_minor, dsp_build, 0]);
-    fifo.write_blocking(Core0Task::SendIntercoreArray.into());
-    fifo.write_blocking(4);
-    fifo.write_blocking(if radiometric_mode { 2 } else { 1 });
-    fifo.write_blocking(lepton_serial);
-    fifo.write_blocking(main_lepton_firmware);
-    fifo.write_blocking(dsp_lepton_firmware);
-
-    let result = fifo.read_blocking();
-    if result == Core0Task::RequestReset.into() {
-        info!("Got reset request before frame acquisition startup");
-        restart(&mut watchdog);
-    }
-    assert_eq!(result, Core0Task::Ready.into());
-    frame_acquisition_loop(
-        rosc,
-        &mut lepton,
-        &mut fifo,
-        peripheral_clock_freq,
-        &mut delay,
-        &mut peripherals.RESETS,
-        static_frame_buffer_a,
-        static_frame_buffer_b,
-        watchdog,
-        is_high_power_mode,
-    );
 }

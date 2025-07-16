@@ -1,33 +1,41 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::attiny_rtc_i2c::SharedI2C;
-use crate::bsp::pac::DMA;
+use crate::attiny_rtc_i2c::{AlarmMode, MainI2C, ScheduledAlarmTime};
+use crate::bsp::pac::{DMA, Peripherals};
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::DeviceConfig;
-use crate::event_logger::{Event, EventLogger, WakeReason};
+use crate::event_logger::{Event, EventLogger, LoggerEvent, WakeReason};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER_HEADER_LENGTH};
-use crate::lepton::FFCStatus;
+use crate::lepton::{FFCStatus, LeptonPins};
 use crate::motion_detector::{MotionTracking, track_motion};
-use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
+use crate::onboard_flash::{
+    OnboardFlash, RecordingFileType, RecordingFileTypeDetails, extend_lifetime_generic,
+    extend_lifetime_generic_mut,
+};
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use core::cell::RefCell;
 
 use crate::bsp;
 use crate::frame_processing::Core0Task::LeptonReadyToSleep;
+use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
-use crate::rpi_power::{advise_raspberry_pi_it_may_shutdown, wake_raspberry_pi};
+use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use cortex_m::asm::nop;
-use cortex_m::delay::Delay;
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
 use defmt::{Format, error, info, warn};
+use embedded_hal::delay::DelayNs;
+use fugit::HertzU32;
+use rp2040_hal::clocks::ClocksManager;
+use rp2040_hal::multicore::{Multicore, Stack};
 use rp2040_hal::pac::RESETS;
-use rp2040_hal::{Sio, Timer};
+use rp2040_hal::rosc::RingOscillator;
+use rp2040_hal::{Clock, Sio, Timer, Watchdog};
 
 pub const NUM_LEPTON_SEGMENTS: usize = 4;
 pub const NUM_LINES_PER_LEPTON_SEGMENT: usize = 61;
@@ -126,8 +134,8 @@ pub struct BookkeepingState {
     made_startup_status_recording: bool,
     making_status_recording: bool,
     lost_frame_count: u32,
-    next_audio_alarm: Option<DateTime<Utc>>,
     low_power_mode: bool,
+    scheduled_alarm: Option<ScheduledAlarmTime>,
 
     logged_frame_transfer: Option<()>,
     logged_told_rpi_to_sleep: Option<()>,
@@ -181,12 +189,83 @@ fn send_camera_connect_info(
     }
 }
 
+/// # Panics
+///
+/// TODO
+pub fn record_thermal(
+    i2c: MainI2C,
+    pi_spi: ExtSpiTransfers,
+    onboard_flash: OnboardFlash,
+    lepton_pins: LeptonPins,
+    watchdog: Watchdog,
+    system_clock_freq: HertzU32,
+    clocks: &ClocksManager,
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    config: &DeviceConfig,
+    events: EventLogger,
+    time: SyncedDateTime,
+    scheduled_alarm: Option<ScheduledAlarmTime>,
+) -> ! {
+    let mut peripherals = unsafe { Peripherals::steal() };
+    let mut sio = Sio::new(peripherals.SIO);
+    let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
+
+    let cores = mc.cores();
+    let core_1 = &mut cores[1];
+    // NOTE: We're allocating the stack memory for core1 on our core0 stack rather than using
+    //  a `static` var so that the memory isn't used when we're in the audio mode code-path.
+    let core1_stack: Stack<470> = Stack::new();
+    let mut fb0 = FrameBuffer::new();
+    let mut fb1 = FrameBuffer::new();
+
+    let frame_buffer_a = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb0)
+    })));
+    let frame_buffer_b = Mutex::new(RefCell::new(Some(unsafe {
+        extend_lifetime_generic_mut(&mut fb1)
+    })));
+    let static_frame_buffer_a = unsafe { extend_lifetime_generic(&frame_buffer_a) };
+    let static_frame_buffer_b = unsafe { extend_lifetime_generic(&frame_buffer_b) };
+    let peripheral_clock_freq = clocks.peripheral_clock.freq();
+
+    watchdog.feed();
+    watchdog.disable();
+    let is_high_power_mode = config.use_high_power_mode();
+    let timer = time.get_timer();
+    let _ = core_1.spawn(core1_stack.take().unwrap(), move || {
+        lepton_core1_task(
+            lepton_pins,
+            watchdog,
+            system_clock_freq,
+            peripheral_clock_freq,
+            &rosc,
+            static_frame_buffer_a,
+            static_frame_buffer_b,
+            is_high_power_mode,
+            timer,
+        );
+    });
+
+    thermal_motion_task(
+        sio,
+        peripherals.DMA,
+        i2c,
+        pi_spi,
+        onboard_flash,
+        static_frame_buffer_a,
+        static_frame_buffer_b,
+        config,
+        events,
+        time,
+        scheduled_alarm,
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn thermal_motion_task(
-    mut delay: Delay,
     mut sio: Sio,
     mut dma: DMA,
-    mut i2c: SharedI2C,
+    mut i2c: MainI2C,
     mut pi_spi: ExtSpiTransfers,
     mut fs: OnboardFlash,
     static_frame_buffer_a: StaticFrameBuffer,
@@ -194,7 +273,7 @@ pub fn thermal_motion_task(
     config: &DeviceConfig,
     mut events: EventLogger,
     mut time: SyncedDateTime,
-    next_audio_alarm: Option<DateTime<Utc>>,
+    scheduled_alarm: Option<ScheduledAlarmTime>,
 ) -> ! {
     info!("=== Core 0 Thermal Motion start ===");
     if DEV_MODE {
@@ -202,8 +281,8 @@ pub fn thermal_motion_task(
     } else {
         warn!("FIELD MODE");
     }
-    let timer = time.get_timer();
-    let mut peripherals = unsafe { bsp::pac::Peripherals::steal() };
+    let mut timer = time.get_timer();
+    let mut peripherals = unsafe { Peripherals::steal() };
 
     // TODO: Do we want to have a max recording length timeout, or just pause recording if a
     //  subject stays in the frame but doesn't move for a while?  Maybe if a subject is stationary
@@ -211,7 +290,6 @@ pub fn thermal_motion_task(
     //  If the night ends in this way, we end the recording then.
     //  In continuous recording mode we'd have a really long timeout perhaps?  Needs more thought.
     //  Also consider the case where we have a mask region to ignore or pay attention to.
-
     events.log(Event::ThermalMode, &time, &mut fs);
     let startup_date_time_utc = time.date_time();
 
@@ -268,20 +346,10 @@ pub fn thermal_motion_task(
 
     let has_cptv_files_saved = fs.has_cptv_files();
 
-    if let Some(audio_alarm) = next_audio_alarm {
-        warn!(
-            "Alarm scheduled for {} {}:{} (in {}mins)",
-            audio_alarm.day(),
-            audio_alarm.hour(),
-            audio_alarm.minute(),
-            (audio_alarm - time.date_time()).num_minutes()
-        );
-    }
-
     let current_recording_window = config.next_or_current_recording_window(&time.date_time());
     if current_recording_window.is_err() {
         error!("Invalid recording window");
-        request_restart(&mut sio, &mut delay);
+        request_restart(&mut sio, timer);
     }
     let current_recording_window = current_recording_window.unwrap();
     let mut bk = {
@@ -303,7 +371,7 @@ pub fn thermal_motion_task(
             making_status_recording: false,
             lost_frame_count: 0,
             made_startup_status_recording,
-            next_audio_alarm,
+            scheduled_alarm,
             low_power_mode: config.use_low_power_mode(),
 
             logged_frame_transfer: Some(()),
@@ -418,8 +486,9 @@ pub fn thermal_motion_task(
         let current_raw_frame =
             &bytemuck::cast_slice(&frame_buffer[640..])[0..FRAME_WIDTH * FRAME_HEIGHT];
 
-        let too_close_to_ffc_event =
-            telemetry.msec_since_last_ffc < 20000 || telemetry.ffc_status == FFCStatus::InProgress;
+        let too_close_to_ffc_event = frame_is_valid
+            && (telemetry.msec_since_last_ffc < 20000
+                || telemetry.ffc_status == FFCStatus::InProgress);
         let mut ended_recording = false;
         let mut should_start_new_recording = false;
         if too_close_to_ffc_event && motion_detection.is_some() {
@@ -427,14 +496,17 @@ pub fn thermal_motion_task(
             frames_seen = 0;
             motion_detection = None;
         }
-        let frame_output_stable = frames_seen >= WAIT_N_FRAMES_FOR_STABLE;
+        let frame_output_stable = telemetry.msec_since_last_ffc > 5000;
         // NOTE: In low power mode, don't try to start recordings/motion detection
         //  until frames have stabilised.
         let should_record_to_flash =
             frame_output_stable && config.use_low_power_mode() && frame_is_valid;
         let past_ffc_event = !too_close_to_ffc_event;
+
         // FIXME: What happens if we're in the middle of recording a cptv file and
         //  we get an invalid frame header?  Maybe this doesn't happen in practice?
+        //  At least now we don't reset motion detection as if for an FFC event, but
+        //  maybe we should reset motion detection, or stop recording?
 
         if should_record_to_flash {
             if past_ffc_event {
@@ -519,14 +591,6 @@ pub fn thermal_motion_task(
                         should_start_new_recording && is_inside_recording_window;
                     if is_inside_recording_window {
                         // Should we make a 2-second status recording at the beginning or end of the window?
-                        // if !made_startup_status_recording && !motion_detection_triggered_this_frame
-                        // {
-                        //     warn!("Make startup status recording");
-                        //     made_startup_status_recording = true;
-                        //     making_status_recording = true;
-                        // } else {
-                        //     // We're making a shutdown recording.
-                        // }
                     } else if !bk.making_status_recording {
                         info!("Would start recording, but outside recording window");
                     } else if bk.made_startup_status_recording && !bk.made_shutdown_status_recording
@@ -603,7 +667,7 @@ pub fn thermal_motion_task(
                         prev_frame_2.fill(0);
 
                         ended_recording = true;
-                        if let Err(e) = i2c.stopped_recording(&mut delay) {
+                        if let Err(e) = i2c.stopped_recording() {
                             error!("Error clearing recording flag on attiny: {}", e);
                         }
 
@@ -655,7 +719,7 @@ pub fn thermal_motion_task(
             // dropping a frame. Cache the current frame and tell core1 to keep getting
             // lepton frames, this will spread the initial load over the first 2 frames.
             // TIME to set started_recording flag: < 1-2ms
-            if let Err(e) = i2c.started_recording(&mut delay) {
+            if let Err(e) = i2c.started_recording() {
                 error!("Error setting recording flag on attiny: {}", e);
             }
 
@@ -744,9 +808,7 @@ pub fn thermal_motion_task(
             info!("Send end recording message to core0");
             sio.fifo.write(Core0Task::EndRecording.into());
         }
-        // FIXME: Are we logging dropped/skipped frames anywhere still?
-
-        if frames_seen % (10 * 9) == 0 && frame_is_valid {
+        if frames_seen % (30 * 9) == 0 && frame_is_valid {
             info!("Got frame #{}", telemetry.frame_num);
         }
 
@@ -767,25 +829,22 @@ pub fn thermal_motion_task(
         //  longer than expected, and cause us to lose sync.
 
         if not_recording_and_every_minute_interval_arrived {
-            // FIXME: Work out what takes the most time in here.
-
             is_daytime = config.time_is_in_daylight(&time.date_time());
             let sync_rtc_start = timer.get_counter();
             // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
             //  since the change in frame times can affect our frame sync.
             //  It's fine to call this repeatedly, the RPi will shut down when it wants to.
-
             if config.use_low_power_mode() {
                 // Once per minute, if we're not currently recording,
                 // tell the RPi it can shut down, as it's not needed in
                 // low-power mode unless it's sending preview frames.
-                if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
+                if i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
                     && bk.logged_told_rpi_to_sleep.take().is_some()
                 {
                     events.log(Event::ToldRpiToSleep, &time, &mut fs);
                 }
             }
-            time.resync_with_rtc(&mut i2c, &mut delay, &mut events, &mut fs);
+            time.resync_with_rtc(&mut i2c, &mut events, &mut fs);
 
             // NOTE: In continuous recording mode, the device will only shut down briefly
             //  when the flash storage is nearly full, and it needs to offload files.
@@ -804,8 +863,7 @@ pub fn thermal_motion_task(
                     events.log(Event::FlashStorageNearlyFull, &time, &mut fs);
                 }
                 // Request restart to offload.
-                warn!("Flash storage nearly full, request restart");
-                request_restart(&mut sio, &mut delay);
+                request_restart(&mut sio, timer);
             }
 
             if is_outside_recording_window
@@ -816,14 +874,12 @@ pub fn thermal_motion_task(
                     // Trigger a restart now via the watchdog timer, so that flash storage will
                     // be offloaded during the startup sequence.
                     warn!("Recording window ended with files to offload, request restart");
-                    request_restart(&mut sio, &mut delay);
+                    request_restart(&mut sio, timer);
                 }
-                let pi_is_awake = i2c
-                    .pi_is_awake_and_tc2_agent_is_ready(&mut delay, false)
-                    .is_ok_and(|val| val);
-                if bk.use_high_power_mode() && pi_is_awake {
-                    // Tell rPi it is outside its recording window in high-power mode, and can go to sleep.
-                    if advise_raspberry_pi_it_may_shutdown(&mut i2c, &mut delay).is_ok()
+                if bk.use_high_power_mode() {
+                    // Tell rPi it is outside its recording window in high-power
+                    // mode, and can go to sleep.
+                    if i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
                         && bk.logged_told_rpi_to_sleep.take().is_some()
                     {
                         events.log(Event::ToldRpiToSleep, &time, &mut fs);
@@ -835,7 +891,6 @@ pub fn thermal_motion_task(
                     &time,
                     &mut fs,
                     &mut events,
-                    &mut delay,
                     &mut bk,
                     config,
                     &mut sio,
@@ -845,15 +900,17 @@ pub fn thermal_motion_task(
                 // but is essentially instant if it is already awake and ready.
                 // Even if we send the wake signal, we'll probably get killed by
                 // the watchdog timer on the frame acquisition thread here.
-                if wake_raspberry_pi(&mut i2c, &mut delay, None) {
-                    // Not sure that we can actually get here without being restarted first
-                    // during bring-up of tc2-agent
-                    events.log(
-                        Event::ToldRpiToWake(WakeReason::ThermalHighPower),
-                        &time,
+                // FIXME: Maybe rework the flow of this wake function?
+                let _wait_for_wake = wake_raspberry_pi(
+                    &mut i2c,
+                    timer,
+                    None,
+                    Some((
                         &mut fs,
-                    );
-                }
+                        &mut events,
+                        LoggerEvent::new(Event::ToldRpiToWake(WakeReason::ThermalHighPower), &time),
+                    )),
+                );
             } else if is_outside_recording_window && !bk.made_shutdown_status_recording {
                 bk.making_status_recording = true;
                 // force shutdown recording outside of window
@@ -869,7 +926,7 @@ pub fn thermal_motion_task(
                     "Additional wait after RTC sync {}µs, total sync time {}",
                     additional_wait, sync_time
                 );
-                delay.delay_us(additional_wait);
+                timer.delay_us(additional_wait);
             } else {
                 warn!("I2C messages took {}µs", sync_time);
             }
@@ -877,7 +934,7 @@ pub fn thermal_motion_task(
             advance_time_by_n_frames(&telemetry, &prev_telemetry, &mut time, frame_is_valid);
             // Spend the same time as we would otherwise use querying the RTC to keep frame-times
             // about the same
-            delay.delay_us(expected_rtc_sync_time_us);
+            timer.delay_us(expected_rtc_sync_time_us);
         }
 
         // if in high power mode need to check thermal-recorder isn't recording
@@ -885,7 +942,7 @@ pub fn thermal_motion_task(
             // only check status every ~20 seconds
             // NOTE: This might be better to replace with the non retry version, so we don't
             //  loop too long doing i2c
-            if let Ok(is_recording) = i2c.get_is_recording(&mut delay) {
+            if let Ok(is_recording) = i2c.get_is_recording() {
                 if !is_recording {
                     safe_to_execute_ffc = true;
                 }
@@ -900,10 +957,10 @@ pub fn thermal_motion_task(
             &time,
             &current_recording_window.1,
         ) {
-            // make audio rec no
-            if i2c.tc2_agent_take_audio_rec(&mut delay).is_ok() {
+            // FIXME: We can just rely on the alarm trigger.
+            if i2c.tc2_agent_take_audio_rec().is_ok() {
                 info!("Taking audio recording");
-                request_restart(&mut sio, &mut delay);
+                request_restart(&mut sio, timer);
             } else {
                 error!("Failed to write 'take audio recording' flag");
             }
@@ -964,20 +1021,18 @@ fn advance_time_by_n_frames(
 // FIXME: This has similarities with the audio shutdown function, can we share logic?
 fn shutdown_rp2040_if_possible(
     timer: &Timer,
-    i2c: &mut SharedI2C,
+    i2c: &mut MainI2C,
     time: &SyncedDateTime,
     fs: &mut OnboardFlash,
     events: &mut EventLogger,
-    delay: &mut Delay,
     bk: &mut BookkeepingState,
     config: &DeviceConfig,
     sio: &mut Sio,
 ) {
-    let check_power_down_state_start = timer.get_counter();
-    if let Ok(pi_is_powered_down) = i2c.pi_is_powered_down(delay, true) {
-        if pi_is_powered_down {
+    if let Ok(state) = i2c.get_camera_state() {
+        if state.pi_is_powered_off() {
             if bk.logged_pi_powered_down.take().is_some() {
-                info!("Pi is now powered down: {}", pi_is_powered_down);
+                info!("Pi is now powered down");
                 events.log(Event::GotRpiPoweredDown, time, fs);
             }
 
@@ -988,7 +1043,7 @@ fn shutdown_rp2040_if_possible(
                 // Since there is no alarm set, the audio branch should then set an alarm
                 // without taking a recording, and then go to sleep.
                 info!("Reset as thermal finished and time for audio");
-                request_restart(sio, delay);
+                request_restart(sio, *timer);
             }
 
             // NOTE: Calculate the start of the next recording window, set the RTC wake-up alarm,
@@ -998,7 +1053,7 @@ fn shutdown_rp2040_if_possible(
                     .next_recording_window_start(&time.date_time())
                     .is_err()
             {
-                request_restart(sio, delay);
+                request_restart(sio, *timer);
             }
             let next_recording_window_start = if DEV_MODE {
                 // In dev mode, we always set the restart alarm for 2 minutes time.
@@ -1008,34 +1063,23 @@ fn shutdown_rp2040_if_possible(
                     .next_recording_window_start(&time.date_time())
                     .unwrap()
             };
-            if i2c.enable_alarm(delay).is_err() {
-                error!("Failed enabling alarm");
-                events.log(Event::RtcCommError, time, fs);
-            }
             if i2c
-                .set_wakeup_alarm(&next_recording_window_start, delay)
+                .set_wakeup_alarm(&next_recording_window_start, AlarmMode::Thermal, time)
                 .is_ok()
             {
-                let alarm_enabled = i2c.alarm_interrupt_enabled(delay).unwrap_or(false);
-                info!("Wake up alarm interrupt enabled {}", alarm_enabled);
-                if alarm_enabled {
-                    events.log(
-                        Event::SetAlarm(next_recording_window_start.timestamp_micros()),
-                        time,
-                        fs,
-                    );
-                    power_down_frame_acquisition(sio);
-                    info!("Ask Attiny to power down rp2040");
-                    events.log(Event::Rp2040Sleep, time, fs);
-                    if i2c.tell_attiny_to_power_down_rp2040(delay).is_ok() {
-                        info!("Sleeping");
-                    } else {
-                        error!("Failed sending sleep request to attiny");
-                        events.log(Event::AttinyCommError, time, fs);
-                    }
+                events.log(
+                    Event::SetThermalAlarm(next_recording_window_start.timestamp_micros()),
+                    time,
+                    fs,
+                );
+                power_down_frame_acquisition(sio);
+                info!("Ask Attiny to power down rp2040");
+                events.log(Event::Rp2040Sleep, time, fs);
+                if i2c.tell_attiny_to_power_down_rp2040().is_ok() {
+                    info!("Sleeping");
                 } else {
-                    error!("Alarm was not properly enabled");
-                    events.log(Event::RtcCommError, time, fs);
+                    error!("Failed sending sleep request to attiny");
+                    events.log(Event::AttinyCommError, time, fs);
                 }
                 // Now we can put ourselves to sleep.
             } else {
@@ -1048,10 +1092,10 @@ fn shutdown_rp2040_if_possible(
     } else {
         warn!("Failed to get Pi powered down state from Attiny");
     }
-    warn!(
-        "Check pi power down state took {}µs",
-        (timer.get_counter() - check_power_down_state_start).to_micros()
-    );
+    // warn!(
+    //     "Check pi power down state took {}µs",
+    //     (timer.get_counter() - check_power_down_state_start).to_micros()
+    // );
 }
 
 fn power_down_frame_acquisition(sio: &mut Sio) {
@@ -1070,15 +1114,11 @@ fn power_down_frame_acquisition(sio: &mut Sio) {
     }
 }
 
-fn check_if_rpi_is_recording_in_high_power_mode(
-    bk: &mut BookkeepingState,
-    i2c: &mut SharedI2C,
-    delay: &mut Delay,
-) {
+fn check_if_rpi_is_recording_in_high_power_mode(bk: &mut BookkeepingState, i2c: &mut MainI2C) {
     if bk.use_high_power_mode() {
         // If i2c comms fail, assume we're not recording on the pi
         bk.is_recording_on_rpi = i2c
-            .get_is_recording(delay)
+            .get_is_recording()
             .is_ok_and(|is_recording| is_recording);
     }
 }
@@ -1089,17 +1129,19 @@ fn should_restart_to_make_an_audio_recording(
     time: &SyncedDateTime,
     window_end: &DateTime<Utc>,
 ) -> bool {
-    if let Some(next_audio_alarm) = bk.next_audio_alarm {
+    if let Some(scheduled_alarm) = &bk.scheduled_alarm
+        && scheduled_alarm.is_audio_alarm()
+    {
         if !bk.audio_pending {
             let current_time = time.date_time();
-            bk.audio_pending = current_time > next_audio_alarm;
+            bk.audio_pending = current_time > scheduled_alarm.time();
             if bk.audio_pending {
                 info!(
                     "Audio recording is pending because time {}:{} is after {}:{} ",
                     current_time.hour(),
                     current_time.minute(),
-                    next_audio_alarm.hour(),
-                    next_audio_alarm.minute()
+                    scheduled_alarm.time().hour(),
+                    scheduled_alarm.time().minute()
                 );
             }
         }
@@ -1128,7 +1170,7 @@ fn should_restart_to_make_an_audio_recording(
     }
 }
 
-fn request_restart(sio: &mut Sio, delay: &mut Delay) {
+fn request_restart(sio: &mut Sio, mut delay: Timer) {
     power_down_frame_acquisition(sio);
     // Delay so we actually get to see the shutdown message in the console.
     delay.delay_ms(500);

@@ -1,9 +1,7 @@
-use crate::attiny_rtc_i2c::SharedI2C;
-use crate::device_config::get_datetime_utc;
+use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{Event, EventLogger};
 use crate::onboard_flash::OnboardFlash;
 use chrono::{DateTime, Duration, Utc};
-use cortex_m::delay::Delay;
 use defmt::error;
 use rp2040_hal::Timer;
 use rp2040_hal::timer::Instant;
@@ -39,16 +37,15 @@ impl SyncedDateTime {
 
     pub fn resync_with_rtc(
         &mut self,
-        i2c: &mut SharedI2C,
-        delay: &mut Delay,
+        i2c: &mut MainI2C,
         events: &mut EventLogger,
         fs: &mut OnboardFlash,
     ) {
-        match i2c.get_datetime(delay) {
-            Ok(now) => self.set(get_datetime_utc(now)),
-            Err(err_str) => {
+        match i2c.get_datetime(self.timer) {
+            Ok(new_time) => *self = new_time,
+            Err(e) => {
                 events.log(Event::RtcCommError, self, fs);
-                error!("Unable to get DateTime from RTC: {}", err_str);
+                error!("Unable to get DateTime from RTC: {}", e);
             }
         }
     }

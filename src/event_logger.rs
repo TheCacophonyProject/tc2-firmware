@@ -1,11 +1,9 @@
-use crate::onboard_flash::{BlockIndex, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
+use crate::onboard_flash::{OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
+use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use core::ops::Range;
 use defmt::{Format, error, info, warn};
-
-use crate::audio_task::AlarmMode;
-use crate::synced_date_time::SyncedDateTime;
 
 #[repr(u8)]
 #[derive(Format, Copy, Clone)]
@@ -21,6 +19,8 @@ pub enum WakeReason {
     EventsTooFull = 8,
     OffloadTestRecording = 9,
     OffloadOnUserDemand = 10,
+    RtcTimeCompromised = 11,
+    OpportunisticOffload = 12,
 }
 
 impl From<WakeReason> for u8 {
@@ -48,7 +48,8 @@ pub enum Event {
     GotRpiPoweredOn,
     ToldRpiToWake(WakeReason),
     LostSync,
-    SetAlarm(i64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
+    SetThermalAlarm(i64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
+    SetAudioAlarm(i64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
     GotPowerOnTimeout,
     WouldDiscardAsFalsePositive,
     StartedGettingFrames,
@@ -69,6 +70,7 @@ pub enum Event {
     CorruptFile,
     LostFrames(u64),
     FileOffloadInterruptedByUser,
+    RtcVoltageLowError,
 }
 
 impl From<Event> for u16 {
@@ -87,7 +89,7 @@ impl From<Event> for u16 {
             GotRpiPoweredOn => 9,
             ToldRpiToWake(_) => 10,
             LostSync => 11,
-            SetAlarm(_) => 12,
+            SetAudioAlarm(_) => 12,
             GotPowerOnTimeout => 13,
             WouldDiscardAsFalsePositive => 14,
             StartedGettingFrames => 15,
@@ -108,6 +110,8 @@ impl From<Event> for u16 {
             CorruptFile => 30,
             LostFrames(_) => 31,
             FileOffloadInterruptedByUser => 32,
+            RtcVoltageLowError => 33,
+            SetThermalAlarm(_) => 34,
         }
     }
 }
@@ -130,7 +134,7 @@ impl TryFrom<u16> for Event {
             9 => Ok(GotRpiPoweredOn),
             10 => Ok(ToldRpiToWake(WakeReason::Unknown)),
             11 => Ok(LostSync),
-            12 => Ok(SetAlarm(0)),
+            12 => Ok(SetAudioAlarm(0)),
             13 => Ok(GotPowerOnTimeout),
             14 => Ok(WouldDiscardAsFalsePositive),
             15 => Ok(StartedGettingFrames),
@@ -151,6 +155,8 @@ impl TryFrom<u16> for Event {
             30 => Ok(CorruptFile),
             31 => Ok(LostFrames(0)),
             32 => Ok(FileOffloadInterruptedByUser),
+            33 => Ok(RtcVoltageLowError),
+            34 => Ok(SetThermalAlarm(0)),
             _ => Err(()),
         }
     }
@@ -184,18 +190,17 @@ impl LoggerEvent {
         DateTime::from_timestamp_micros(self.timestamp)
     }
 }
-pub const MAX_EVENTS_IN_LOGGER: u16 = 1024;
+pub const MAX_EVENTS_IN_LOGGER: u16 = 1280;
 const EVENT_CODE_LENGTH: u8 = 2;
 const EVENT_TIMESTAMP_LENGTH: u8 = 8;
 const EVENT_PAYLOAD_LENGTH: u8 = 8;
 const EVENT_LENGTH: u8 = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH;
 
-// Last block = 2047: audio alarm
-// 2043, 2044, 2045, 2046: event log
+// 2043, 2044, 2045, 2046, 2047: event log
 // 2041, 2042: device config
 
 const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 5;
-const FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 1; // Don't erase the saved audio alarm if any
+const FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS;
 pub struct EventLogger {
     next_event_index: Option<EventIndex>,
 }
@@ -385,7 +390,9 @@ impl EventLogger {
                 LittleEndian::write_i64(&mut event_data[2..10], event.timestamp);
                 let ext_data = &mut event_data[10..18];
                 match event.kind {
-                    Event::SetAlarm(alarm_time) | Event::Rp2040MissedAudioAlarm(alarm_time) => {
+                    Event::SetThermalAlarm(alarm_time)
+                    | Event::SetAudioAlarm(alarm_time)
+                    | Event::Rp2040MissedAudioAlarm(alarm_time) => {
                         LittleEndian::write_i64(ext_data, alarm_time);
                     }
                     Event::LostFrames(data) => {
@@ -409,40 +416,5 @@ impl EventLogger {
         } else {
             warn!("Event log full");
         }
-    }
-}
-
-//write some audio config into flash storage instead of rp240 flash
-//rp2040 flash was causing some slow downs in the code after every write
-const AUDIO_BLOCK: BlockIndex = 2047;
-const AUDIO_PAGE: PageIndex = 0;
-pub fn clear_audio_alarm(fs: &mut OnboardFlash) {
-    let _ = fs.erase_block(AUDIO_BLOCK);
-}
-
-// write audio alarm into last block of event storage
-// byte 0 is alarm mode 0 for audio 1 for thermal
-// bytes 1-9 is millisecond timestamp of the alarm
-pub fn write_audio_alarm(fs: &mut OnboardFlash, alarm_dt: DateTime<Utc>, mode: AlarmMode) {
-    let _ = fs.erase_block(AUDIO_BLOCK);
-    let page_offset = 0u16;
-    let mut event_data = [0u8; 18];
-    event_data[0] = mode as u8;
-    LittleEndian::write_i64(&mut event_data[1..9], alarm_dt.timestamp_millis());
-    fs.write_event(&event_data, AUDIO_BLOCK, AUDIO_PAGE, page_offset);
-}
-
-pub fn get_audio_alarm(fs: &mut OnboardFlash) -> (Result<AlarmMode, &str>, Option<DateTime<Utc>>) {
-    let page_offset = 0u16;
-    // FIXME: Would be better for consistency to use the "page used" bits.
-    if fs.read_page(AUDIO_BLOCK, AUDIO_PAGE).is_ok() {
-        let event = fs.read_event_from_cache_at_column_offset_spi(AUDIO_BLOCK, page_offset);
-        if event[0..9].iter().all(|x: &u8| *x == u8::MAX) {
-            return (Err("audio mode not set"), None);
-        }
-        let dt = DateTime::from_timestamp_millis(LittleEndian::read_i64(&event[1..9]));
-        (AlarmMode::try_from(event[0]), dt)
-    } else {
-        (Err("audio mode page read failed"), None)
     }
 }

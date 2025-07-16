@@ -21,7 +21,7 @@ use core::mem;
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Format, error, info, warn};
 
-use crate::attiny_rtc_i2c::AudioRecordingType;
+use crate::attiny_rtc_i2c::RecordingRequestType;
 use crate::synced_date_time::SyncedDateTime;
 use cortex_m::prelude::*;
 use embedded_hal::digital::OutputPin;
@@ -57,10 +57,9 @@ const NUM_EVENT_BYTES: usize = 18;
 
 pub const TOTAL_FLASH_BLOCKS: u16 = 2048;
 const NUM_CONFIG_BLOCKS: u8 = 2;
-const NUM_ALARM_BLOCKS: u8 = 1;
-const NUM_EVENT_BLOCKS: u8 = 4;
-const NUM_RECORDING_BLOCKS: u16 = TOTAL_FLASH_BLOCKS
-    - (NUM_CONFIG_BLOCKS as u16 + NUM_ALARM_BLOCKS as u16 + NUM_EVENT_BLOCKS as u16);
+const NUM_EVENT_BLOCKS: u8 = 5;
+const NUM_RECORDING_BLOCKS: u16 =
+    TOTAL_FLASH_BLOCKS - (NUM_CONFIG_BLOCKS as u16 + NUM_EVENT_BLOCKS as u16);
 const NUM_PAGES_PER_BLOCK: u8 = 64;
 
 pub struct OnboardFlashStatus {
@@ -797,7 +796,7 @@ impl OnboardFlash {
     #[allow(clippy::cast_sign_loss)]
     pub fn is_too_full_to_start_new_audio_recordings(
         &self,
-        recording_type: &AudioRecordingType,
+        recording_type: &RecordingRequestType,
     ) -> bool {
         // Lets us know when we should end the current recording.
         // Need about 43 blocks for a 60 seconds recording at 48khz
@@ -996,15 +995,7 @@ impl OnboardFlash {
         while status.operation_in_progress() || status.cache_read_busy() {
             status = self.get_status();
         }
-        self.get_status();
-        status
-    }
-
-    pub fn wait_for_cache_ready(&mut self) -> OnboardFlashStatus {
-        let mut status = self.get_status();
-        while status.cache_read_busy() {
-            status = self.get_status();
-        }
+        status = self.get_status();
         status
     }
 
@@ -1017,6 +1008,8 @@ impl OnboardFlash {
 
     #[allow(clippy::unnecessary_wraps)]
     pub fn read_page(&mut self, block: BlockIndex, page: PageIndex) -> Result<(), &str> {
+        // FIXME: Handle logging of ECC errors and results of read page properly.
+
         assert!(block < 2048, "Invalid block");
         assert!(page < 64, "Invalid page");
         let address = OnboardFlash::get_address(block, page);

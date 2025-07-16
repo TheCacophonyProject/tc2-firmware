@@ -1,6 +1,6 @@
 use crate::lepton::FFCStatus;
 use byteorder::{ByteOrder, LittleEndian};
-use defmt::{Format, info, warn};
+use defmt::{Format, warn};
 
 #[derive(Debug, Format)]
 pub struct Telemetry {
@@ -56,9 +56,6 @@ impl Telemetry {
                 telemetry_revision_stable.1 += 1;
             } else {
                 telemetry_revision_stable.1 = -1;
-            }
-            if telemetry_revision_stable.1 > 2 {
-                info!("Got stable telemetry revision (core 0) {:?}", self.revision);
             }
         }
         if telemetry_revision_stable.1 == -1 {

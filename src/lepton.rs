@@ -10,13 +10,13 @@ use crate::utils::any_as_u8_slice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
 use core::mem;
-use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
-use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
+use cortex_m::prelude::*;
 use defmt::{Format, trace};
 use defmt::{error, info, panic, warn};
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::Timer;
 use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
 use rp2040_hal::gpio::{
     FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, PullUp, SioInput, SioOutput,
@@ -232,6 +232,7 @@ pub struct LeptonModule {
     clk_disable: ClkDisable,
     master_clk: MasterClk,
     is_powered_on: bool,
+    timer: Timer,
 }
 
 #[repr(C)]
@@ -343,6 +344,7 @@ impl LeptonModule {
         reset: Pin<Gpio29, FunctionSio<SioOutput>, PullDown>,
         clk_disable: Pin<Gpio27, FunctionSio<SioOutput>, PullDown>,
         master_clk: Pin<Gpio26, FunctionSio<SioInput>, PullNone>,
+        timer: Timer,
     ) -> LeptonModule {
         LeptonModule {
             spi: Some(spi),
@@ -355,6 +357,7 @@ impl LeptonModule {
             master_clk,
             cci: i2c,
             is_powered_on: false,
+            timer,
         }
     }
 
@@ -371,7 +374,6 @@ impl LeptonModule {
                 • If Bit 0 is 1, then the interface is busy, poll until Bit 0 becomes 0
                 • If Bit 0 is 0, then the interface is ready for receiving commands.
         */
-        info!("=== Init lepton module ===");
         // NOTE: It's actually quite good if we don't have FFC interrupt the video feed - we can
         //  just discard those frames later based on the telemetry, and this helps with sync.
         let success = self.disable_automatic_ffc();
@@ -535,7 +537,6 @@ impl LeptonModule {
 
     pub fn reset_spi(
         &mut self,
-        delay: &mut Delay,
         resets: &mut RESETS,
         freq: HertzU32,
         baudrate: HertzU32,
@@ -551,7 +552,7 @@ impl LeptonModule {
         let mut sck = sck.into_push_pull_output();
         cs.set_high().unwrap();
         sck.set_high().unwrap(); // SCK is high when idle
-        delay.delay_ms(200);
+        self.timer.delay_ms(200);
         cs.set_low().unwrap();
         sck.set_low().unwrap();
         self.cs = Some(cs.into_function::<FunctionSpi>());
@@ -568,7 +569,7 @@ impl LeptonModule {
         self.spi.as_mut().unwrap().transfer(words)
     }
 
-    pub fn wait_for_ffc_status_ready(&mut self, delay: &mut Delay) -> bool {
+    pub fn wait_for_ffc_status_ready(&mut self) -> bool {
         loop {
             match self.get_attribute(lepton_command(
                 LEPTON_SUB_SYSTEM_SYS,
@@ -579,7 +580,7 @@ impl LeptonModule {
                 Ok((ffc_state, length)) => {
                     let ffc_state = BigEndian::read_i32(&ffc_state[..((length * 2) as usize)]);
                     info!("FFC state {}", ffc_state);
-                    delay.delay_ms(1);
+                    self.timer.delay_ms(1);
                     if ffc_state == 0 {
                         return true;
                     }
@@ -853,7 +854,7 @@ impl LeptonModule {
         ))
     }
 
-    pub fn reboot(&mut self, delay: &mut Delay) -> bool {
+    pub fn reboot(&mut self) -> bool {
         warn!("Rebooting lepton module");
         let success = self.execute_command(lepton_command(
             LEPTON_SUB_SYSTEM_OEM,
@@ -866,9 +867,9 @@ impl LeptonModule {
         }
 
         info!("Waiting 5 seconds");
-        delay.delay_ms(5000);
+        self.timer.delay_ms(5000);
         while let Err(e) = self.init() {
-            self.reboot(delay);
+            self.reboot();
         }
         success.is_ok()
     }
@@ -877,13 +878,13 @@ impl LeptonModule {
         self.is_powered_on
     }
 
-    pub fn power_down_sequence(&mut self, delay: &mut Delay) {
+    pub fn power_down_sequence(&mut self) {
         // Putting lepton into standby mode, uses about 5mW in standby mode.
         trace!("power down asserted");
         self.power_down.set_low().unwrap();
 
         // Datasheet says to wait at least 100ms before turning off clock after power down.
-        delay.delay_ms(100);
+        self.timer.delay_ms(100);
         trace!("clk disabled");
         self.clk_disable.set_low().unwrap();
 
@@ -891,43 +892,43 @@ impl LeptonModule {
         trace!("power off");
         self.power_enable.set_low().unwrap();
         self.is_powered_on = false;
-        delay.delay_ms(200);
+        self.timer.delay_ms(200);
     }
 
-    pub fn power_on(&mut self, delay: &mut Delay) {
+    pub fn power_on(&mut self) {
         self.power_enable.set_low().unwrap();
-        delay.delay_ms(100);
+        self.timer.delay_ms(100);
         self.clk_disable.set_low().unwrap();
         self.power_enable.set_high().unwrap();
-        delay.delay_ms(100);
+        self.timer.delay_ms(100);
     }
 
     // Page 18 https://www.flir.com/globalassets/imported-assets/document/flir-lepton-engineering-datasheet.pdf
-    pub fn start_up_sequence(&mut self, delay: &mut Delay) {
+    pub fn start_up_sequence(&mut self) {
         self.power_down.set_high().unwrap();
-        delay.delay_ms(1);
+        self.timer.delay_ms(1);
         self.reset.set_low().unwrap();
-        delay.delay_ms(1);
+        self.timer.delay_ms(1);
         self.clk_disable.set_high().unwrap();
-        delay.delay_ms(1);
+        self.timer.delay_ms(1);
         self.reset.set_high().unwrap();
     }
 
-    pub fn cci_init(&mut self, delay: &mut Delay) {
+    pub fn cci_init(&mut self) {
         trace!("de-assert reset");
-        delay.delay_ms(2000);
+        self.timer.delay_ms(2000);
         trace!("Wait for ready");
         self.wait_for_ready(false);
         while let Err(e) = self.init() {
             error!("{:?}", e);
-            self.cci_init(delay);
+            self.cci_init();
         }
     }
 
-    pub fn power_on_sequence(&mut self, delay: &mut Delay) {
-        self.power_on(delay);
-        self.start_up_sequence(delay);
-        self.cci_init(delay);
+    pub fn power_on_sequence(&mut self) {
+        self.power_on();
+        self.start_up_sequence();
+        self.cci_init();
         self.is_powered_on = true;
     }
 
@@ -1317,7 +1318,7 @@ pub fn init_lepton_module(
     ic2_peripheral: I2C0,
     system_clock_freq_hz: HertzU32,
     resets: &mut RESETS,
-    delay: &mut Delay,
+    timer: Timer,
     pins: LeptonPins,
 ) -> LeptonModule {
     let spi = Spi::new(spi_peripheral, (pins.tx, pins.rx, pins.clk)).init(
@@ -1343,6 +1344,7 @@ pub fn init_lepton_module(
         pins.reset,
         pins.clk_disable,
         pins.master_clk,
+        timer,
     );
 
     // TODO: When going dormant, can we make sure we don't have any gpio pins in a pullup/down mode.
@@ -1350,8 +1352,8 @@ pub fn init_lepton_module(
         .vsync
         .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     info!("Lepton startup sequence");
-    lepton.power_down_sequence(delay);
-    lepton.power_on_sequence(delay);
+    lepton.power_down_sequence();
+    lepton.power_on_sequence();
     // Set wake from dormant on vsync
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
     lepton

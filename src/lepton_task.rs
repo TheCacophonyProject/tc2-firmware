@@ -1,8 +1,9 @@
+use crate::bsp::pac::Peripherals;
 use crate::cptv_encoder::FRAME_WIDTH;
 use crate::frame_processing::{
-    Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT,
+    Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT, StaticFrameBuffer,
 };
-use crate::lepton::{FFCStatus, LeptonModule};
+use crate::lepton::{FFCStatus, LeptonFirmwareInfo, LeptonModule, LeptonPins, init_lepton_module};
 use crate::lepton_telemetry::Telemetry;
 use crate::utils::restart;
 use crate::{FFC_INTERVAL_MS, bsp};
@@ -12,11 +13,11 @@ use bsp::hal::rosc::RingOscillator;
 use bsp::hal::sio::SioFifo;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
-use cortex_m::delay::Delay;
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
 use defmt::{info, warn};
-use fugit::{ExtU32, HertzU32, RateExtU32};
+use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::{Sio, Timer, Watchdog};
 
 pub type FramePacketData = [u8; FRAME_WIDTH];
 pub type FrameSegments = [[FramePacketData; NUM_LINES_PER_LEPTON_SEGMENT]; NUM_LEPTON_SEGMENTS];
@@ -58,6 +59,83 @@ fn go_dormant_until_woken<T: PinId>(
     initialized_rosc
 }
 
+pub fn lepton_core1_task(
+    lepton_pins: LeptonPins,
+    mut watchdog: Watchdog,
+    system_clock_freq: HertzU32,
+    peripheral_clock_freq: HertzU32,
+    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
+    static_frame_buffer_a: StaticFrameBuffer,
+    static_frame_buffer_b: StaticFrameBuffer,
+    is_high_power_mode: bool,
+    timer: Timer,
+) -> ! {
+    // This task runs on the second core, so we need to steal the peripherals.
+    // Core peripherals are per core, so we can just take our copy (but the current cortex-m API
+    // makes us steal it anyway)
+
+    let mut peripherals = unsafe { Peripherals::steal() };
+    let sio = Sio::new(peripherals.SIO);
+    let mut fifo = sio.fifo;
+
+    let mut lepton = init_lepton_module(
+        peripherals.SPI0,
+        peripherals.I2C0,
+        system_clock_freq,
+        &mut peripherals.RESETS,
+        timer,
+        lepton_pins,
+    );
+
+    let radiometric_mode = lepton.radiometric_mode_enabled().unwrap_or(false);
+    let lepton_serial = lepton.get_camera_serial().map_or(0, |x| x);
+    let lepton_firmware_version = lepton
+        .get_firmware_version()
+        .map_or(LeptonFirmwareInfo::default(), |x| x);
+    let LeptonFirmwareInfo {
+        gpp_major,
+        gpp_minor,
+        gpp_build,
+        dsp_major,
+        dsp_minor,
+        dsp_build,
+    } = lepton_firmware_version;
+
+    info!(
+        "Camera firmware versions: main: {}.{}.{}, dsp: {}.{}.{}, serial #{}",
+        gpp_major, gpp_minor, gpp_build, dsp_major, dsp_minor, dsp_build, lepton_serial
+    );
+
+    let result = fifo.read_blocking();
+    defmt::assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
+    let main_lepton_firmware = LittleEndian::read_u32(&[gpp_major, gpp_minor, gpp_build, 0]);
+    let dsp_lepton_firmware = LittleEndian::read_u32(&[dsp_major, dsp_minor, dsp_build, 0]);
+    fifo.write_blocking(Core0Task::SendIntercoreArray.into());
+    fifo.write_blocking(4);
+    fifo.write_blocking(if radiometric_mode { 2 } else { 1 });
+    fifo.write_blocking(lepton_serial);
+    fifo.write_blocking(main_lepton_firmware);
+    fifo.write_blocking(dsp_lepton_firmware);
+
+    let result = fifo.read_blocking();
+    if result == Core0Task::RequestReset.into() {
+        info!("Got reset request before frame acquisition startup");
+        restart(&mut watchdog);
+    }
+    defmt::assert_eq!(result, Core0Task::Ready.into());
+    frame_acquisition_loop(
+        rosc,
+        &mut lepton,
+        &mut fifo,
+        peripheral_clock_freq,
+        &mut peripherals.RESETS,
+        static_frame_buffer_a,
+        static_frame_buffer_b,
+        watchdog,
+        is_high_power_mode,
+    );
+}
+
 /// # Panics
 ///
 /// Does not panic, spi read is actually infallible
@@ -67,11 +145,10 @@ pub fn frame_acquisition_loop(
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,
-    delay: &mut Delay,
     resets: &mut RESETS,
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    mut watchdog: bsp::hal::Watchdog,
+    mut watchdog: Watchdog,
     is_high_power_mode: bool,
 ) -> ! {
     let mut selected_frame_buffer = 0;
@@ -115,8 +192,6 @@ pub fn frame_acquisition_loop(
     let mut frames_seen = 0;
     let mut last_frame_seen = None;
 
-    watchdog.pause_on_debug(true);
-    watchdog.start(8_388_607.micros());
     // should not feed watchdog if we dont receive a message and are in low power mode
     'frame_loop: loop {
         if got_sync || is_recording {
@@ -234,12 +309,6 @@ pub fn frame_acquisition_loop(
                             } else {
                                 times_telemetry_revision_stable = -1;
                             }
-                            if times_telemetry_revision_stable > 2 {
-                                info!(
-                                    "Got stable telemetry revision (core 1) {:?}",
-                                    telemetry.revision
-                                );
-                            }
                         }
                         if times_telemetry_revision_stable == -1 {
                             // Initialise seen telemetry revision.
@@ -297,7 +366,6 @@ pub fn frame_acquisition_loop(
 
                     lepton.wait_for_ready(false);
                     lepton.reset_spi(
-                        delay,
                         resets,
                         peripheral_clock_freq,
                         LEPTON_SPI_CLOCK_FREQ.Hz(),
@@ -367,14 +435,14 @@ pub fn frame_acquisition_loop(
                 if packet_id == last_packet_id_for_segment {
                     if is_last_segment {
                         if safe_to_execute_ffc && ffc_requested_frame.take().is_some() {
-                            // FIXME: This sometimes seems to spam the FFC request i2c
-                            //  until the FFC actually happens - but maybe that's okay?
                             info!("Requesting needed FFC");
-                            let success = lepton.do_ffc();
-                            match success {
+                            match lepton.do_ffc() {
                                 Ok(success) => {
-                                    ffc_pending_time = Some(frame_counter);
-                                    info!("Success requesting needed FFC");
+                                    if success {
+                                        ffc_pending_time = Some(frame_counter);
+                                    } else {
+                                        info!("Failed to request FFC (i2c err)");
+                                    }
                                 }
                                 Err(e) => {
                                     ffc_requested_frame = Some(frame_counter);
@@ -384,14 +452,9 @@ pub fn frame_acquisition_loop(
                         } else if initial_ffc.take().is_some() {
                             info!("Requesting initial FFC");
                             let success = lepton.do_ffc();
-                            match success {
-                                Ok(success) => {
-                                    info!("Success requesting initial FFC");
-                                }
-                                Err(e) => {
-                                    initial_ffc = Some(());
-                                    info!("Failed to request FFC {:?}", e);
-                                }
+                            if let Err(e) = lepton.do_ffc() {
+                                initial_ffc = Some(());
+                                info!("Failed to request FFC {:?}", e);
                             }
                         }
                         if !got_sync && frame_counter == prev_frame_counter + 1 {
@@ -450,7 +513,6 @@ pub fn frame_acquisition_loop(
                     if attempt < 500 {
                         lepton.wait_for_ready(false);
                         lepton.reset_spi(
-                            delay,
                             resets,
                             peripheral_clock_freq,
                             LEPTON_SPI_CLOCK_FREQ.Hz(),
@@ -474,8 +536,8 @@ pub fn frame_acquisition_loop(
                         current_segment_num = 0;
                         frames_seen = 0;
                         last_frame_seen = None;
-                        lepton.power_down_sequence(delay);
-                        lepton.power_on_sequence(delay);
+                        lepton.power_down_sequence();
+                        lepton.power_on_sequence();
                     }
                     break 'scanline;
                 }
@@ -493,7 +555,7 @@ pub fn frame_acquisition_loop(
                             recording_ended = true;
                         } else if message == Core0Task::ReadyToSleep.into() {
                             info!("Powering down lepton module");
-                            lepton.power_down_sequence(delay);
+                            lepton.power_down_sequence();
                             sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
                         } else if message == Core0Task::FrameProcessingComplete.into() {
                             transferring_prev_frame = false;

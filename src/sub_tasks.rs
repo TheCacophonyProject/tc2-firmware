@@ -1,16 +1,15 @@
 use crate::FIRMWARE_VERSION;
-use crate::attiny_rtc_i2c::SharedI2C;
+use crate::attiny_rtc_i2c::MainI2C;
 use crate::bsp;
 use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
-use crate::event_logger::{Event, EventLogger};
+use crate::event_logger::{Event, EventLogger, LoggerEvent};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::{FilePartReturn, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
-use cortex_m::delay::Delay;
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{info, unreachable, warn};
 use fugit::HertzU32;
@@ -19,7 +18,6 @@ pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    delay: &mut Delay,
     events: &mut EventLogger,
     fs: &mut OnboardFlash,
     time: &SyncedDateTime,
@@ -90,15 +88,12 @@ pub fn offload_latest_recording(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    i2c: &mut SharedI2C,
-    delay: &mut Delay,
+    i2c: &mut MainI2C,
     events: &mut EventLogger,
     time: &SyncedDateTime,
     watchdog: &mut Watchdog,
 ) -> bool {
-    offload_recordings_and_events(
-        fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog, true,
-    )
+    offload_recordings_and_events(fs, pi_spi, resets, dma, i2c, events, time, watchdog, true)
 }
 
 pub fn offload_all_recordings_and_events(
@@ -106,15 +101,13 @@ pub fn offload_all_recordings_and_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    i2c: &mut SharedI2C,
-    delay: &mut Delay,
+    i2c: &mut MainI2C,
+
     events: &mut EventLogger,
     time: &SyncedDateTime,
     watchdog: &mut Watchdog,
 ) -> bool {
-    offload_recordings_and_events(
-        fs, pi_spi, resets, dma, i2c, delay, events, time, watchdog, false,
-    )
+    offload_recordings_and_events(fs, pi_spi, resets, dma, i2c, events, time, watchdog, false)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -123,19 +116,21 @@ fn offload_recordings_and_events(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    i2c: &mut SharedI2C,
-    delay: &mut Delay,
+    i2c: &mut MainI2C,
     events: &mut EventLogger,
     time: &SyncedDateTime,
     watchdog: &mut Watchdog,
     only_last_file: bool,
 ) -> bool {
     warn!("There are files to offload!");
-    if wake_raspberry_pi(i2c, delay, Some(watchdog)) {
-        events.log(Event::GotRpiPoweredOn, time, fs);
-    }
+    let _wait_for_wake = wake_raspberry_pi(
+        i2c,
+        time.get_timer(),
+        Some(watchdog),
+        Some((fs, events, LoggerEvent::new(Event::GotRpiPoweredOn, time))),
+    );
     if !only_last_file {
-        maybe_offload_events(pi_spi, resets, dma, delay, events, fs, time, watchdog);
+        maybe_offload_events(pi_spi, resets, dma, events, fs, time, watchdog);
     }
 
     let mut has_file = fs.begin_offload_reverse();
@@ -144,7 +139,7 @@ fn offload_recordings_and_events(
         info!("Has file to offload");
     }
 
-    if has_file && i2c.begin_offload(delay).is_err() {
+    if has_file && i2c.begin_offload().is_err() {
         warn!("Failed setting offload-in-progress flag");
     }
 
@@ -156,7 +151,7 @@ fn offload_recordings_and_events(
 
     let mut interrupted_by_user = false;
     while has_file {
-        if let Ok(offload_flag_set) = i2c.offload_flag_is_set(delay) {
+        if let Ok(offload_flag_set) = i2c.offload_flag_is_set() {
             if !offload_flag_set {
                 warn!("Offload interrupted by user");
                 // We were interrupted by the rPi,
@@ -288,7 +283,7 @@ fn offload_recordings_and_events(
         has_file = fs.begin_offload_reverse();
     }
 
-    if !interrupted_by_user && i2c.end_offload(delay).is_err() {
+    if !interrupted_by_user && i2c.end_offload().is_err() {
         warn!("Failed un-setting offload-in-progress flag");
     }
 
