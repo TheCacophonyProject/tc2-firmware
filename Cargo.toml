@@ -33,7 +33,7 @@ crc = "3.3.0"
 chrono = { version  = "0.4.41", default-features = false }
 num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 
-rp2040-hal = {version = "0.11.0", features = ["defmt"]}
+rp2040-hal = "0.11.0"
 
 pio = "0.2.1"
 pio-proc = "0.2.1"
@@ -41,7 +41,7 @@ picorand = "0.1.2"
 
 [features]
 # This is the set of features we enable by default
-default = ["boot2", "rt", "critical-section-impl", "rom-func-cache"]
+default = ["boot2", "rt", "critical-section-impl", "rom-func-cache", "defmt", "rom-v2-intrinsics"]
 
 # critical section that is safe for multicore use
 critical-section-impl = ["rp2040-hal/critical-section-impl"]
@@ -51,6 +51,8 @@ boot2 = ["rp2040-boot2"]
 
 # Minimal startup / runtime for Cortex-M microcontrollers
 rt = ["cortex-m-rt","rp2040-hal/rt"]
+
+defmt = ["rp2040-hal/defmt"]
 
 # This enables a fix for USB errata 5: USB device fails to exit RESET state on busy USB bus.
 # Only required for RP2040 B0 and RP2040 B1, but it also works for RP2040 B2 and above
