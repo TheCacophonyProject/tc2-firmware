@@ -125,22 +125,22 @@ impl DeviceConfigInner {
         let window = end_time - start_time;
         let window_hours = window.num_hours();
         let window_mins = window.num_minutes() - (window_hours * 60);
-        if start_time > *date_time_utc && end_time > *date_time_utc {
-            // info!(
-            //     "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
-            //     starts_in_hours,
-            //     starts_in_mins,
-            //     ends_in_hours,
-            //     ends_in_mins,
-            //     window_hours,
-            //     window_mins
-            // );
-        } else if end_time > *date_time_utc {
-            // info!(
-            //     "Recording will end in {}h{}m, window duration {}h{}m",
-            //     ends_in_hours, ends_in_mins, window_hours, window_mins
-            // );
-        }
+        // if start_time > *date_time_utc && end_time > *date_time_utc {
+        //     info!(
+        //         "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
+        //         starts_in_hours,
+        //         starts_in_mins,
+        //         ends_in_hours,
+        //         ends_in_mins,
+        //         window_hours,
+        //         window_mins
+        //     );
+        // } else if end_time > *date_time_utc {
+        //     info!(
+        //         "Recording will end in {}h{}m, window duration {}h{}m",
+        //         ends_in_hours, ends_in_mins, window_hours, window_mins
+        //     );
+        // }
         *date_time_utc >= start_time && *date_time_utc <= end_time
     }
 
@@ -149,6 +149,7 @@ impl DeviceConfigInner {
         &self,
         now_utc: &chrono::DateTime<Utc>,
     ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), ()> {
+        // NOTE: This is an expensive function on rp2040, taking ~6ms, so don't call it in a hot loop.
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
 

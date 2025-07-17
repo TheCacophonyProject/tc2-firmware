@@ -144,7 +144,7 @@ fn offload_recordings_and_events(
     }
 
     // do some offloading.
-    let mut file_count = None;
+    let mut file_count = 0;
     let mut success: bool = true;
     // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
     //  Probably doesn't matter though.
@@ -254,10 +254,7 @@ fn offload_recordings_and_events(
 
             part_count += 1;
             if is_last_page_for_file {
-                if file_count.is_none() {
-                    file_count = Some(0);
-                }
-                *file_count.as_mut().unwrap() += 1;
+                file_count += 1;
                 info!("Offloaded {} file(s)", file_count);
                 watchdog.feed();
                 let _ = fs.erase_last_file();
@@ -291,13 +288,15 @@ fn offload_recordings_and_events(
     if success {
         if interrupted_by_user {
             events.log(Event::FileOffloadInterruptedByUser, time, fs);
-            fs.scan();
         }
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
-        file_count.is_none() || file_count.unwrap() != 0
+
+        // Always rescan to update what kinds of files we have
+        fs.scan();
+        file_count != 0
     } else {
         events.log(Event::FileOffloadFailed, time, fs);
         fs.scan();

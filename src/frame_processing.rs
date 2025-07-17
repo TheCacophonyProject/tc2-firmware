@@ -12,7 +12,7 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER
 use crate::lepton::{FFCStatus, LeptonPins};
 use crate::motion_detector::{MotionTracking, track_motion};
 use crate::onboard_flash::{
-    OnboardFlash, RecordingFileType, RecordingFileTypeDetails, extend_lifetime_generic,
+    FileType, OnboardFlash, RecordingFileType, RecordingFileTypeDetails, extend_lifetime_generic,
     extend_lifetime_generic_mut,
 };
 use byteorder::{ByteOrder, LittleEndian};
@@ -130,8 +130,6 @@ const WAIT_N_FRAMES_FOR_STABLE: usize = 45;
 pub struct BookkeepingState {
     audio_pending: bool,
     is_recording_on_rpi: bool,
-    made_shutdown_status_recording: bool,
-    made_startup_status_recording: bool,
     making_status_recording: bool,
     lost_frame_count: u32,
     low_power_mode: bool,
@@ -284,6 +282,9 @@ pub fn thermal_motion_task(
     let mut timer = time.get_timer();
     let mut peripherals = unsafe { Peripherals::steal() };
 
+    // FIXME: Do we want to make startup recordings at the beginning of the window, or also
+    //  when the pi is started by a user, and we're outside the window?
+
     // TODO: Do we want to have a max recording length timeout, or just pause recording if a
     //  subject stays in the frame but doesn't move for a while?  Maybe if a subject is stationary
     //  for 1 minute, we pause, and only resume recording if there is new movement, or it moves again?
@@ -358,8 +359,14 @@ pub fn thermal_motion_task(
         //  this session when we actually haven't?
         //  Maybe we also write the current time to the metadata of written files,
         //  then we can see when they were made?
-        let made_shutdown_status_recording = !config
-            .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
+
+        // FIXME: Check that startup/shutdown were made in current window?
+
+        // The last recorded CPTV file should be a shutdown status.
+        // It's fine to scan for this on startup.
+
+        // If it's made a startup status recording, that would be the first recording
+        // in the fs.  Opportunistic offloading breaks this logic though.
 
         // NOTE: Assume that if we have any cptv files saved we're in the active window
         //  recording session, and therefore we've already made a startup recording in this session.
@@ -367,10 +374,8 @@ pub fn thermal_motion_task(
         BookkeepingState {
             audio_pending: false,
             is_recording_on_rpi: false,
-            made_shutdown_status_recording,
             making_status_recording: false,
             lost_frame_count: 0,
-            made_startup_status_recording,
             scheduled_alarm,
             low_power_mode: config.use_low_power_mode(),
 
@@ -381,7 +386,7 @@ pub fn thermal_motion_task(
         }
     };
     // FIXME: Put into bk, model as state machine transitions.
-    let mut status_recording_state = if bk.made_startup_status_recording {
+    let mut status_recording_state = if fs.file_types_found.has_type(FileType::CptvStartup) {
         StatusRecording::NotPending
     } else {
         StatusRecording::StartupStatus
@@ -408,14 +413,14 @@ pub fn thermal_motion_task(
     let mut is_daytime = config.time_is_in_daylight(&time.date_time());
     info!(
         "Current time is in recording window? {}",
-        config.time_is_in_configured_recording_window(&time.date_time())
+        config.time_is_in_supplied_recording_window(&time.date_time(), current_recording_window)
     );
 
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
     info!(
         "Entering recording loop.  Made start up status recording: {}",
-        bk.made_startup_status_recording
+        fs.file_types_found.has_type(FileType::CptvStartup)
     );
     #[allow(unused_labels)]
     'recording_loop: loop {
@@ -523,8 +528,8 @@ pub fn thermal_motion_task(
                     && this_frame_motion_detection.got_new_trigger()
                     && cptv_stream.is_none();
 
-                if bk.made_startup_status_recording
-                    && !bk.made_shutdown_status_recording
+                if fs.file_types_found.has_type(FileType::CptvStartup)
+                    && !fs.file_types_found.has_type(FileType::CptvShutdown)
                     && status_recording_state.is_not_pending()
                 {
                     if DEV_MODE {
@@ -550,6 +555,10 @@ pub fn thermal_motion_task(
                     should_start_new_recording = true;
                     bk.making_status_recording = true;
                 }
+                let is_startup_status = bk.making_status_recording
+                    && !fs.file_types_found.has_type(FileType::CptvStartup);
+                let is_shutdown_status = bk.making_status_recording
+                    && fs.file_types_found.has_type(FileType::CptvShutdown);
 
                 let should_end_current_recording = if cptv_stream.is_some() {
                     let (recording_is_max_length, storage_insufficient, motion_ended) =
@@ -593,7 +602,8 @@ pub fn thermal_motion_task(
                         // Should we make a 2-second status recording at the beginning or end of the window?
                     } else if !bk.making_status_recording {
                         info!("Would start recording, but outside recording window");
-                    } else if bk.made_startup_status_recording && !bk.made_shutdown_status_recording
+                    } else if fs.file_types_found.has_type(FileType::CptvStartup)
+                        && !fs.file_types_found.has_type(FileType::CptvShutdown)
                     {
                         should_start_new_recording = true;
                         // force shutdown status recording even outside of window
@@ -607,6 +617,7 @@ pub fn thermal_motion_task(
                     if let Some(cptv_stream) = &mut cptv_stream {
                         warn_on_duplicate_frames(&prev_telemetry, &telemetry);
                         let ps_start = timer.get_counter();
+
                         // 37ms
                         cptv_stream.push_frame(
                             current_raw_frame,
@@ -615,7 +626,8 @@ pub fn thermal_motion_task(
                             &mut fs,
                             RecordingFileType::Cptv(RecordingFileTypeDetails {
                                 user_requested: false,
-                                status: bk.making_status_recording,
+                                startup_status: is_startup_status,
+                                shutdown_status: is_shutdown_status,
                             }),
                         );
                         let ps_end = timer.get_counter();
@@ -644,7 +656,8 @@ pub fn thermal_motion_task(
                                 &mut fs,
                                 RecordingFileType::Cptv(RecordingFileTypeDetails {
                                     user_requested: false,
-                                    status: bk.making_status_recording,
+                                    startup_status: is_startup_status,
+                                    shutdown_status: is_shutdown_status,
                                 }),
                                 &time,
                             );
@@ -673,17 +686,6 @@ pub fn thermal_motion_task(
 
                         if bk.making_status_recording {
                             bk.making_status_recording = false;
-                            match status_recording_state {
-                                StatusRecording::StartupStatus => {
-                                    bk.made_startup_status_recording = true;
-                                    // only make a shutdown if we made a startup
-                                    bk.made_shutdown_status_recording = false;
-                                }
-                                StatusRecording::ShutdownStatus => {
-                                    bk.made_shutdown_status_recording = true;
-                                }
-                                StatusRecording::NotPending => {}
-                            }
                             status_recording_state = StatusRecording::NotPending;
                         }
                     }
@@ -722,6 +724,10 @@ pub fn thermal_motion_task(
             if let Err(e) = i2c.started_recording() {
                 error!("Error setting recording flag on attiny: {}", e);
             }
+            let is_startup_status =
+                bk.making_status_recording && !fs.file_types_found.has_type(FileType::CptvStartup);
+            let is_shutdown_status =
+                bk.making_status_recording && fs.file_types_found.has_type(FileType::CptvStartup);
 
             error!("Starting new recording, {:?}", &telemetry);
             let mut cptv_streamer = CptvStream::new(
@@ -733,14 +739,17 @@ pub fn thermal_motion_task(
                 &mut fs,
                 &huffman_table,
                 &crc_table,
-                bk.making_status_recording,
+                is_startup_status,
+                is_shutdown_status,
+                false, // TODO: is user-requested
             );
             cptv_streamer.init_gzip_stream(
                 &mut fs,
                 false,
                 RecordingFileType::Cptv(RecordingFileTypeDetails {
                     user_requested: false,
-                    status: bk.making_status_recording,
+                    startup_status: is_startup_status,
+                    shutdown_status: is_shutdown_status,
                 }),
             );
 
@@ -752,7 +761,8 @@ pub fn thermal_motion_task(
                 &mut fs,
                 RecordingFileType::Cptv(RecordingFileTypeDetails {
                     user_requested: false,
-                    status: bk.making_status_recording,
+                    startup_status: is_startup_status,
+                    shutdown_status: is_shutdown_status,
                 }),
             );
             frames_written += 1;
@@ -785,7 +795,8 @@ pub fn thermal_motion_task(
                 &mut fs,
                 RecordingFileType::Cptv(RecordingFileTypeDetails {
                     user_requested: false,
-                    status: bk.making_status_recording,
+                    startup_status: is_startup_status,
+                    shutdown_status: is_shutdown_status,
                 }),
             );
             frames_written += 1;
@@ -812,8 +823,7 @@ pub fn thermal_motion_task(
             info!("Got frame #{}", telemetry.frame_num);
         }
 
-        // FIXME: Check these time estimates
-        let expected_rtc_sync_time_us = 4200u32; // using slower clock speed
+        let expected_rtc_sync_time_us = 2000u32; // using slower clock speed
         let not_recording_and_every_minute_interval_arrived =
             (frames_seen > 1 && frames_seen % (60 * 9) == 0) && cptv_stream.is_none();
         // INFO RTC Sync time took 1350µs
@@ -845,17 +855,28 @@ pub fn thermal_motion_task(
                 }
             }
             time.resync_with_rtc(&mut i2c, &mut events, &mut fs);
-
             // NOTE: In continuous recording mode, the device will only shut down briefly
             //  when the flash storage is nearly full, and it needs to offload files.
             //  Or, in the case of high-power-mode, it will  never shut down.
+
             let is_outside_recording_window = if DEV_MODE {
                 let is_inside_recording_window =
                     time.date_time() < startup_date_time_utc + Duration::minutes(5);
                 !is_inside_recording_window
             } else {
-                !config.time_is_in_configured_recording_window(&time.date_time())
+                // Wow, 8ms!
+                //if current_recording_window.0 {
+                // Check if we need to update the current recording window?
+                //}
+                // !config.time_is_in_configured_recording_window(&time.date_time(), Some(timer))
+                // FIXME: Does this need to be re-calculating the window if it's stale, or is the
+                //  originally calculated window fine?
+                !config.time_is_in_supplied_recording_window(
+                    &time.date_time(),
+                    current_recording_window,
+                )
             };
+
             let is_inside_recording_window = !is_outside_recording_window;
 
             if fs.is_too_full_to_start_new_cptv_recordings() {
@@ -865,9 +886,9 @@ pub fn thermal_motion_task(
                 // Request restart to offload.
                 request_restart(&mut sio, timer);
             }
-
             if is_outside_recording_window
-                && (bk.use_high_power_mode() || bk.made_shutdown_status_recording)
+                && (bk.use_high_power_mode()
+                    || fs.file_types_found.has_type(FileType::CptvShutdown))
             {
                 if fs.has_recordings_to_offload() {
                     // If we're now outside the recording window,
@@ -911,21 +932,22 @@ pub fn thermal_motion_task(
                         LoggerEvent::new(Event::ToldRpiToWake(WakeReason::ThermalHighPower), &time),
                     )),
                 );
-            } else if is_outside_recording_window && !bk.made_shutdown_status_recording {
+            } else if is_outside_recording_window
+                && !fs.file_types_found.has_type(FileType::CptvShutdown)
+            {
+                // FIXME: Only if we have a startup recording on flash?
+                // FIXME: This doesn't actually work unless we're still in the window
+                //  Should we have an override?
+                info!("Should make shutdown recording");
                 bk.making_status_recording = true;
                 // force shutdown recording outside of window
             }
-
             // Make sure timing is as close as possible to the non-sync case
             let sync_rtc_end = timer.get_counter();
             #[allow(clippy::cast_possible_truncation)]
             let sync_time = (sync_rtc_end - sync_rtc_start).to_micros() as u32;
             let additional_wait = expected_rtc_sync_time_us.saturating_sub(sync_time);
             if additional_wait > 0 {
-                warn!(
-                    "Additional wait after RTC sync {}µs, total sync time {}",
-                    additional_wait, sync_time
-                );
                 timer.delay_us(additional_wait);
             } else {
                 warn!("I2C messages took {}µs", sync_time);
@@ -956,6 +978,7 @@ pub fn thermal_motion_task(
             cptv_stream.is_some() || recording_in_high_power_mode,
             &time,
             &current_recording_window.1,
+            &fs,
         ) {
             // FIXME: We can just rely on the alarm trigger.
             if i2c.tc2_agent_take_audio_rec().is_ok() {
@@ -1128,6 +1151,7 @@ fn should_restart_to_make_an_audio_recording(
     is_recording_cptv: bool,
     time: &SyncedDateTime,
     window_end: &DateTime<Utc>,
+    fs: &OnboardFlash,
 ) -> bool {
     if let Some(scheduled_alarm) = &bk.scheduled_alarm
         && scheduled_alarm.is_audio_alarm()
@@ -1153,7 +1177,7 @@ fn should_restart_to_make_an_audio_recording(
             // If within 2 minutes of the window end, make status before doing audio recording:
             // this ensures we always make the status recording.
             let need_to_make_shutdown_status_recording = bk.use_low_power_mode()
-                && !bk.made_shutdown_status_recording
+                && !fs.file_types_found.has_type(FileType::CptvShutdown)
                 && duration_until_window_end <= Duration::minutes(2);
 
             if need_to_make_shutdown_status_recording {

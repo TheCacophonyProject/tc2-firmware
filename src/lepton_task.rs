@@ -472,7 +472,7 @@ pub fn frame_acquisition_loop(
 
                         if let Some(last_frame_seen) = last_frame_seen {
                             if got_sync && last_frame_seen != frame_counter - 1 {
-                                warn!("Looks like we lost sync");
+                                warn!("Lost sync");
                                 got_sync = false;
                                 prev_frame_needs_transfer = false;
                             }

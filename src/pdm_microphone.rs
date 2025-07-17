@@ -324,7 +324,8 @@ impl PdmMicrophone {
                                 data_size,
                                 RecordingFileType::Audio(RecordingFileTypeDetails {
                                     user_requested: user_requested_test_recording,
-                                    status: false,
+                                    shutdown_status: false,
+                                    startup_status: false,
                                 }),
                                 time,
                             ) {
@@ -336,7 +337,8 @@ impl PdmMicrophone {
                             data_size,
                             RecordingFileType::Audio(RecordingFileTypeDetails {
                                 user_requested: user_requested_test_recording,
-                                status: false,
+                                shutdown_status: false,
+                                startup_status: false,
                             }),
                         ) {
                             warn!("Error writing bytes to flash ending rec early {}", e);
@@ -364,7 +366,8 @@ impl PdmMicrophone {
                             data_size,
                             RecordingFileType::Audio(RecordingFileTypeDetails {
                                 user_requested: user_requested_test_recording,
-                                status: false,
+                                shutdown_status: false,
+                                startup_status: false,
                             }),
                         ) {
                             warn!("Error writing bytes to flash ending rec early {}", e);

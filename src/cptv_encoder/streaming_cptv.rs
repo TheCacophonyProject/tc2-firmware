@@ -5,7 +5,9 @@ use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_HEIGHT_U32, FRAME_WIDTH, FRAME_WIDTH_U32};
 use crate::device_config::DeviceConfig;
 use crate::lepton_telemetry::Telemetry;
-use crate::onboard_flash::{BlockIndex, OnboardFlash, RecordingFileType};
+use crate::onboard_flash::{
+    BlockIndex, FileType, OnboardFlash, RecordingFileType, RecordingFileTypeDetails,
+};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
@@ -404,7 +406,9 @@ impl<'a> CptvStream<'a> {
         fs: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
         crc_table: &'a [u32; 256],
-        is_status_recording: bool,
+        is_startup_status_recording: bool,
+        is_shutdown_status_recording: bool,
+        is_user_requested_recording: bool,
     ) -> CptvStream<'a> {
         let starting_block_index = fs.start_file(1);
 
@@ -415,7 +419,9 @@ impl<'a> CptvStream<'a> {
             lepton_serial,
             lepton_firmware_version,
             device_config,
-            is_status_recording,
+            is_startup_status_recording,
+            is_shutdown_status_recording,
+            is_user_requested_recording,
         );
         CptvStream {
             cursor: BitCursor::new(),
@@ -716,6 +722,23 @@ impl<'a> CptvStream<'a> {
             self.push_byte(byte, fs, recording_file_type);
         }
         self.write_gzip_trailer(fs, true, recording_file_type, Some(time));
+
+        if let RecordingFileType::Cptv(RecordingFileTypeDetails {
+            user_requested,
+            startup_status,
+            shutdown_status,
+        }) = recording_file_type
+        {
+            if user_requested {
+                fs.file_types_found.add_type(FileType::CptvUserRequested);
+            } else if shutdown_status {
+                fs.file_types_found.add_type(FileType::CptvShutdown);
+            } else if startup_status {
+                fs.file_types_found.add_type(FileType::CptvStartup);
+            } else {
+                fs.file_types_found.add_type(FileType::CptvScheduled);
+            }
+        }
     }
 }
 
@@ -889,7 +912,9 @@ impl Cptv2Header {
         lepton_serial: u32,
         lepton_firmware_version: ((u8, u8, u8), (u8, u8, u8)),
         config: &DeviceConfig,
-        is_status_recording: bool,
+        is_startup_status_recording: bool,
+        is_shutdown_status_recording: bool,
+        is_user_requested: bool,
     ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
@@ -903,13 +928,23 @@ impl Cptv2Header {
             "{m_major}.{m_minor}.{m_build}:{d_major}.{d_minor}.{d_build}:{FIRMWARE_VERSION}",
         );
 
-        let status_recording = if is_status_recording {
-            let status = MaybeZeroTerminatedString::new_with_bytes("status: true".as_bytes());
-            info!("Creating status recording");
-            Some(status)
-        } else {
-            None
-        };
+        let status_recording =
+            if is_startup_status_recording || is_shutdown_status_recording || is_user_requested {
+                let status = if is_startup_status_recording {
+                    info!("Creating startup status recording");
+                    MaybeZeroTerminatedString::new_with_bytes("status: startup".as_bytes())
+                } else if is_shutdown_status_recording {
+                    info!("Creating shutdown status recording");
+                    MaybeZeroTerminatedString::new_with_bytes("status: shutdown".as_bytes())
+                } else {
+                    info!("Creating user requested test recording");
+                    MaybeZeroTerminatedString::new_with_bytes("test: true".as_bytes())
+                };
+
+                Some(status)
+            } else {
+                None
+            };
 
         let (lat, lng) = config.config().location;
         Cptv2Header {

@@ -78,7 +78,8 @@ pub type PageIndex = u8;
 #[derive(Copy, Clone)]
 pub struct RecordingFileTypeDetails {
     pub user_requested: bool,
-    pub status: bool,
+    pub startup_status: bool,
+    pub shutdown_status: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -231,19 +232,27 @@ impl Page {
     }
 
     pub fn is_user_requested_test_recording(&self) -> bool {
-        self.user_metadata_1()[4] >> 1 & 0x1 == 1
+        self.user_metadata_1()[4] & 0b011 == 0b010
     }
 
     pub fn is_status_recording(&self) -> bool {
-        self.user_metadata_1()[4] & 0x1 == 1
+        self.user_metadata_1()[4] & 0b001 == 0b001
+    }
+
+    pub fn is_startup_status_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b011 == 0b001
+    }
+
+    pub fn is_shutdown_status_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b011 == 0b011
     }
 
     pub fn is_cptv_recording(&self) -> bool {
-        self.user_metadata_1()[4] >> 2 == 1
+        self.user_metadata_1()[4] & 0b100 == 0b100
     }
 
     pub fn is_audio_recording(&self) -> bool {
-        self.user_metadata_1()[4] >> 2 == 0
+        self.user_metadata_1()[4] & 0b100 == 0b000
     }
 
     // NOTE: File written time is only available in the metadata section of the *first page* in a file.
@@ -340,6 +349,31 @@ type SpiEnabledPeripheral = Spi<
     8,
 >;
 
+#[repr(u8)]
+pub enum FileType {
+    CptvScheduled = 1 << 0,
+    CptvUserRequested = 1 << 1,
+    CptvStartup = 1 << 2,
+    CptvShutdown = 1 << 3,
+    AudioScheduled = 1 << 4,
+    AudioUserRequested = 1 << 5,
+    AudioStartup = 1 << 6,
+    AudioShutdown = 1 << 7,
+}
+
+#[derive(Default)]
+pub struct FileTypes(u8);
+
+impl FileTypes {
+    pub(crate) fn add_type(&mut self, file_type: FileType) {
+        self.0 |= file_type as u8;
+    }
+
+    pub(crate) fn has_type(&self, file_type: FileType) -> bool {
+        (self.0 & file_type as u8) != 0
+    }
+}
+
 pub struct OnboardFlash {
     pub spi: Option<SpiEnabledPeripheral>,
     cs: Pin<Gpio9, FunctionSio<SioOutput>, PullDown>,
@@ -362,6 +396,7 @@ pub struct OnboardFlash {
     //could use same block for both but would have to write config every audio change and vice versa
     pub config_block: Option<BlockIndex>,
     system_clock_hz: HertzU32,
+    pub file_types_found: FileTypes,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -401,6 +436,7 @@ impl OnboardFlash {
             previous_file_start_block_index: None,
             config_block: None,
             system_clock_hz,
+            file_types_found: FileTypes::default(),
         }
     }
     pub fn init(&mut self) {
@@ -592,6 +628,7 @@ impl OnboardFlash {
 
     pub fn scan(&mut self) {
         let mut bad_blocks = [u16::MAX; 40];
+        self.file_types_found = FileTypes::default();
         self.first_used_block_index = None;
         self.last_used_block_index = None;
         self.current_page_index = 0;
@@ -629,6 +666,28 @@ impl OnboardFlash {
                     {
                         last_file_block_index = block_index;
                         num_files += 1;
+
+                        if self.current_page.is_cptv_recording() {
+                            if self.current_page.is_startup_status_recording() {
+                                self.file_types_found.add_type(FileType::CptvStartup);
+                            } else if self.current_page.is_shutdown_status_recording() {
+                                self.file_types_found.add_type(FileType::CptvShutdown);
+                            } else if self.current_page.is_user_requested_test_recording() {
+                                self.file_types_found.add_type(FileType::CptvUserRequested);
+                            } else {
+                                self.file_types_found.add_type(FileType::CptvScheduled);
+                            }
+                        } else if self.current_page.is_audio_recording() {
+                            if self.current_page.is_startup_status_recording() {
+                                self.file_types_found.add_type(FileType::AudioStartup);
+                            } else if self.current_page.is_shutdown_status_recording() {
+                                self.file_types_found.add_type(FileType::AudioShutdown);
+                            } else if self.current_page.is_user_requested_test_recording() {
+                                self.file_types_found.add_type(FileType::AudioUserRequested);
+                            } else {
+                                self.file_types_found.add_type(FileType::AudioScheduled);
+                            }
+                        }
                     }
 
                     if !self.current_page.page_is_used() {
@@ -1436,26 +1495,32 @@ impl OnboardFlash {
             let recording_type_bits = match recording_file_type {
                 RecordingFileType::Cptv(RecordingFileTypeDetails {
                     user_requested,
-                    status,
+                    shutdown_status,
+                    startup_status,
                 }) => {
                     if user_requested {
                         0b110
-                    } else if status {
+                    } else if startup_status {
                         0b101
+                    } else if shutdown_status {
+                        0b111
                     } else {
                         0b100
                     }
                 }
                 RecordingFileType::Audio(RecordingFileTypeDetails {
                     user_requested,
-                    status,
+                    shutdown_status,
+                    startup_status,
                 }) =>
                 {
                     #[allow(clippy::bool_to_int_with_if)]
                     if user_requested {
                         0b010
-                    } else if status {
+                    } else if startup_status {
                         0b001
+                    } else if shutdown_status {
+                        0b011
                     } else {
                         0b000
                     }
@@ -1499,6 +1564,23 @@ impl OnboardFlash {
             }
         }
         if is_last {
+            if let RecordingFileType::Audio(RecordingFileTypeDetails {
+                user_requested,
+                startup_status,
+                shutdown_status,
+            }) = recording_file_type
+            {
+                if user_requested {
+                    self.file_types_found.add_type(FileType::AudioUserRequested);
+                } else if shutdown_status {
+                    self.file_types_found.add_type(FileType::AudioShutdown);
+                } else if startup_status {
+                    self.file_types_found.add_type(FileType::AudioStartup);
+                } else {
+                    self.file_types_found.add_type(FileType::AudioScheduled);
+                }
+            }
+
             warn!("Ending file at {}:{}", block, page);
         }
         // PROGRAM_LOAD
