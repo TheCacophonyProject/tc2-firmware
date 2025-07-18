@@ -531,7 +531,6 @@ pub fn audio_task(
             }
         }
     }
-    let mut should_sleep = device_config.config().use_low_power_mode;
     let mut alarm_time: Option<NaiveDateTime>;
     if reschedule {
         watchdog.feed();
@@ -568,12 +567,13 @@ pub fn audio_task(
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => true,
         _ => false,
     };
+    let mut should_sleep = true;
+
     let in_window = device_config.config().audio_mode == AudioMode::AudioAndThermal
         && device_config
             .time_is_in_recording_window(&synced_date_time.get_adjusted_dt(timer), &None);
-
     loop {
-        if should_sleep {
+        if device_config.config().use_low_power_mode {
             advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
         }
         if !logged_power_down {
@@ -660,7 +660,6 @@ pub fn audio_task(
             info!("Alarm triggered after taking a recording reseeting rp2040");
             restart(watchdog);
         }
-
         delay.delay_ms(5 * 1000);
         watchdog.feed();
     }
