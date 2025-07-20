@@ -159,6 +159,16 @@ pub fn audio_task(
         }
     }
 
+    if !device_config.use_low_power_mode() && wake_raspberry_pi(&mut shared_i2c, &mut delay) {
+        event_logger.log_event(
+            LoggerEvent::new(
+                LoggerEventKind::ToldRpiToWake(WakeReason::ThermalHighPower),
+                synced_date_time.get_timestamp_micros(&timer),
+            ),
+            &mut flash_storage,
+        );
+    }
+
     if alarm_triggered {
         event_logger.log_event(
             LoggerEvent::new(
@@ -575,16 +585,16 @@ pub fn audio_task(
     loop {
         if device_config.config().use_low_power_mode {
             advise_raspberry_pi_it_may_shutdown(&mut shared_i2c, &mut delay);
-        }
-        if !logged_power_down {
-            event_logger.log_event(
-                LoggerEvent::new(
-                    LoggerEventKind::ToldRpiToSleep,
-                    synced_date_time.get_timestamp_micros(&timer),
-                ),
-                &mut flash_storage,
-            );
-            logged_power_down = true;
+            if !logged_power_down {
+                event_logger.log_event(
+                    LoggerEvent::new(
+                        LoggerEventKind::ToldRpiToSleep,
+                        synced_date_time.get_timestamp_micros(&timer),
+                    ),
+                    &mut flash_storage,
+                );
+                logged_power_down = true;
+            }
         }
 
         watchdog.feed();
@@ -789,7 +799,7 @@ pub fn schedule_audio_rec(
         AudioMode::AudioAndThermal | AudioMode::AudioOrThermal => {
             let (start, end) = device_config.next_or_current_recording_window(&current_time);
             info!(
-                "Checking next alarm {}:{} for rec window start{}:{}",
+                "Checking next alarm {}:{} for rec window start {}:{}",
                 wakeup.hour(),
                 wakeup.minute(),
                 start.hour(),
