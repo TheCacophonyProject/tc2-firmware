@@ -1,9 +1,13 @@
-use crate::bsp::pac::RESETS;
-use crate::bsp::pac::{PIO1, SPI1};
-use crate::{bsp, onboard_flash};
+use crate::bsp;
+use crate::bsp::pac::PIO1;
+use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
+use crate::pdm_filter::PDMFilter;
+use crate::synced_date_time::SyncedDateTime;
 use cortex_m::prelude::*;
 use defmt::{info, warn};
 use fugit::HertzU32;
+
+use crate::utils::extend_lifetime_generic_mut;
 use rp2040_hal::dma::Channel;
 use rp2040_hal::dma::{CH3, CH4, double_buffer};
 use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
@@ -13,7 +17,7 @@ use rp2040_hal::pio::{
 };
 
 const PDM_DECIMATION: usize = 64;
-const SAMPLE_RATE: usize = 48000;
+const _SAMPLE_RATE: usize = 48000;
 const WARMUP_RATE: usize = 28000;
 
 const WARMUP_CYCLES: usize = 400;
@@ -22,19 +26,12 @@ struct RecordingStatus {
     total_samples: usize,
     samples_taken: usize,
 }
-use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
-use onboard_flash::extend_lifetime_generic_mut;
-
-use crc::{CRC_16_XMODEM, Crc};
 
 impl RecordingStatus {
     pub fn is_complete(&self) -> bool {
         self.total_samples <= self.samples_taken
     }
 }
-
-use crate::pdm_filter::PDMFilter;
-use crate::synced_date_time::SyncedDateTime;
 
 type RunningStateMachine<P, S> = (StateMachine<(P, S), Running>, Tx<(P, S)>);
 
@@ -48,7 +45,6 @@ pub struct PdmMicrophone {
     pio_rx: Option<Rx<(PIO1, SM1)>>,
     system_clock_hz: HertzU32,
     pio: PIO<PIO1>,
-    current_recording: Option<RecordingStatus>,
 }
 
 const VOLUME: u8 = 10;
@@ -70,7 +66,6 @@ impl PdmMicrophone {
             pio_rx: None,
             pio,
             state_machine_1_uninit: Some(state_machine_1_uninit),
-            current_recording: None,
         }
     }
 
@@ -151,6 +146,7 @@ impl PdmMicrophone {
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
+    #[allow(dead_code)]
     pub fn alter_samplerate(&mut self, sample_rate: usize) -> f32 {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
 
@@ -209,7 +205,7 @@ impl PdmMicrophone {
     }
 
     pub fn disable(&mut self) {
-        let (sm, tx) = self.state_machine_1_running.take().unwrap();
+        let (sm, _tx) = self.state_machine_1_running.take().unwrap();
         sm.stop();
         // let rx = self.pio_rx.take().unwrap();
         // let (sm, _program) = sm.uninit(rx, tx);
@@ -217,7 +213,6 @@ impl PdmMicrophone {
 
         self.data_disabled = Some(self.data.take().unwrap().into_function().into_pull_type());
         self.clk_disabled = Some(self.clk.take().unwrap().into_function().into_pull_type());
-        // self.state_machine_1_uninit = Some(sm);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -226,8 +221,6 @@ impl PdmMicrophone {
         num_seconds: usize,
         ch3: Channel<CH3>,
         ch4: Channel<CH4>,
-        resets: &mut RESETS,
-        spi: &SPI1,
         fs: &mut OnboardFlash,
         timestamp: i64,
         watchdog: &mut bsp::hal::Watchdog,
@@ -250,7 +243,7 @@ impl PdmMicrophone {
         #[allow(clippy::cast_possible_truncation)]
         let adjusted_sample_rate = self.alter_mic_clock(3.072) as u32;
         info!(
-            "Adjusted sr becomes {} clock {}",
+            "Adjusted sample rate becomes {}, system clock {}",
             adjusted_sample_rate,
             self.system_clock_hz.to_MHz()
         );
@@ -262,7 +255,6 @@ impl PdmMicrophone {
             total_samples: adjusted_sample_rate as usize * PDM_DECIMATION * num_seconds,
             samples_taken: 0,
         };
-        let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
         let mut recorded_successfully = false;
         // Pull out more samples via dma double_buffering.
         if let Some(pio_rx) = self.pio_rx.take() {
@@ -355,10 +347,9 @@ impl PdmMicrophone {
                     if current_recording.is_complete() {
                         watchdog.feed();
                         info!(
-                            "Recording done took {} ms",
+                            "Recording done, took {} ms",
                             (timer.get_counter() - start).to_millis(),
                         );
-                        let start = time.date_time();
                         let data_size = (audio_buffer.index - 2) * 2;
                         let payload = audio_buffer.as_u8_slice();
                         if let Err(e) = fs.append_last_recording_bytes(

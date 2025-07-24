@@ -1,12 +1,11 @@
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1, interrupt};
-use crate::onboard_flash::{FLASH_USER_PAGE_SIZE, extend_lifetime};
-
+use crate::onboard_flash::FLASH_USER_PAGE_SIZE;
+use crate::utils::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
-use cortex_m::prelude::*;
 use critical_section::Mutex;
 use defmt::{Format, info, warn};
 use fugit::MicrosDurationU32;
@@ -22,6 +21,7 @@ use rp2040_hal::pio::{
 };
 use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
+
 #[repr(u8)]
 #[derive(Copy, Clone, Format, PartialEq)]
 pub enum ExtTransferMessage {
@@ -191,8 +191,7 @@ impl ExtSpiTransfers {
             self.spi = Some(spi);
         }
     }
-    pub fn ping(&mut self, timer: &mut Timer, pi_is_awake: bool, timeout: Option<u32>) -> bool {
-        let start = timer.get_counter();
+    pub fn ping(&mut self, timer: &mut Timer, timeout: Option<u32>) -> bool {
         let ping_pin = self.ping.take().unwrap().into_pull_up_input();
         ping_pin.set_interrupt_enabled(LevelLow, true);
         let mut alarm = timer.alarm_0().unwrap();
@@ -223,8 +222,6 @@ impl ExtSpiTransfers {
 
         pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
         pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
-
-        let ping_time = (timer.get_counter() - start).to_micros();
         let (ping_pin, mut alarm) = critical_section::with(|cs| {
             (
                 GLOBAL_PING_PIN.borrow(cs).take().unwrap(),
@@ -237,13 +234,6 @@ impl ExtSpiTransfers {
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
         self.ping = Some(ping_pin.into_pull_down_input());
-        // FIXME - Can we print this when we think the Pi should be awake?
-        if finished && pi_is_awake {
-            //warn!("Alarm triggered, ping took {}", ping_time);
-        }
-        // else if pi_is_awake {
-        //     warn!("Pi responded, ping took {}", ping_time);
-        // }
         !finished
     }
 
@@ -251,7 +241,6 @@ impl ExtSpiTransfers {
         &mut self,
         message_type: ExtTransferMessage,
         payload: &mut [u8],
-        crc: u16,
         is_recording: bool,
         dma_peripheral: &mut DMA,
     ) -> Option<(PioDmaTransfer, u32, u32)> {
@@ -288,7 +277,7 @@ impl ExtSpiTransfers {
                 }
             }
             let mut timer = self.timer;
-            if self.ping(&mut timer, false, None) {
+            if self.ping(&mut timer, None) {
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
@@ -424,7 +413,6 @@ impl ExtSpiTransfers {
         payload: &[u8],
         crc: u16,
         dma_peripheral: &mut DMA,
-        resets: &mut RESETS,
         progress_block: Option<u16>,
     ) -> bool {
         // The transfer header contains the transfer type (2x)
@@ -439,7 +427,6 @@ impl ExtSpiTransfers {
         {
             let transfer_header =
                 &mut self.payload_buffer.as_mut().unwrap()[..RPI_TRANSFER_HEADER_LENGTH];
-            let header_len = transfer_header.len() as u32;
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
             LittleEndian::write_u32(&mut transfer_header[2..6], payload_length);
@@ -461,10 +448,8 @@ impl ExtSpiTransfers {
         let mut finished_transfer = false;
         let mut timer = self.timer;
         while !transmit_success {
-            if self.ping(&mut timer, true, Some(3000)) {
+            if self.ping(&mut timer, Some(3000)) {
                 finished_transfer = true;
-                let start = timer.get_counter();
-
                 let transfer = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     self.payload_buffer.take().unwrap(),
@@ -503,7 +488,7 @@ impl ExtSpiTransfers {
                         .read()
                         .bits();
 
-                    let aborted = maybe_abort_dma_transfer(
+                    let _aborted = maybe_abort_dma_transfer(
                         dma_peripheral,
                         transfer_read_address + return_length,
                         transfer_read_address,
@@ -573,18 +558,6 @@ impl ExtSpiTransfers {
         } else {
             None
         }
-    }
-
-    pub fn write(&mut self, bytes: &[u8]) {
-        self.spi.as_mut().unwrap().write(bytes).unwrap();
-    }
-
-    pub fn transfer<'a>(&mut self, bytes: &'a mut [u8]) -> &'a [u8] {
-        self.spi.as_mut().unwrap().transfer(bytes).unwrap()
-    }
-
-    pub fn is_busy(&self) -> bool {
-        self.spi.as_ref().unwrap().is_busy()
     }
 }
 
@@ -669,22 +642,5 @@ fn maybe_abort_dma_transfer(
         true
     } else {
         false
-    }
-}
-
-fn abort_dma(dma: &mut DMA, channel: usize) {
-    if dma.ch(channel).ch_ctrl_trig().read().busy().bit_is_set() {
-        let inte0 = dma.inte0().read().bits();
-        let inte1 = dma.inte1().read().bits();
-        let mask = (1u32 << channel).reverse_bits();
-        dma.inte0().write(|w| unsafe { w.bits(inte0 & mask) });
-        dma.inte1().write(|w| unsafe { w.bits(inte1 & mask) });
-        // Abort all dma transfers
-        dma.chan_abort().write(|w| unsafe { w.bits(1 << channel) });
-
-        while dma.ch(channel).ch_ctrl_trig().read().busy().bit_is_set() {}
-
-        dma.inte0().write(|w| unsafe { w.bits(inte0) });
-        dma.inte1().write(|w| unsafe { w.bits(inte1) });
     }
 }

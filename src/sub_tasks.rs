@@ -5,14 +5,14 @@ use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{Event, EventLogger, LoggerEvent};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
-use crate::onboard_flash::{FilePartReturn, OnboardFlash};
+use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use crc::{CRC_16_XMODEM, Crc};
-use defmt::{info, unreachable, warn};
-use fugit::HertzU32;
+use defmt::{Formatter, info, unreachable, warn};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -27,7 +27,6 @@ pub fn maybe_offload_events(
     if events.has_events_to_offload() {
         let event_indices = events.event_range();
         let total_events = event_indices.end;
-        let mut transferred_events = 0;
         warn!("Attempting to transfer {} events", total_events);
         'transfer_all_events: for event_index in event_indices {
             watchdog.feed();
@@ -46,11 +45,9 @@ pub fn maybe_offload_events(
                             &event_bytes,
                             current_crc,
                             dma,
-                            resets,
                             None, // FIXME: Do we want progress here?
                         );
                         if did_transfer {
-                            transferred_events += 1;
                             if attempts > 0 {
                                 warn!("File part took multiple attempts: {}", attempts);
                             }
@@ -110,6 +107,19 @@ pub fn offload_all_recordings_and_events(
     offload_recordings_and_events(fs, pi_spi, resets, dma, i2c, events, time, watchdog, false)
 }
 
+pub struct FormattedTime(pub DateTime<Utc>);
+impl defmt::Format for FormattedTime {
+    fn format(&self, fmt: Formatter) {
+        defmt::write!(
+            fmt,
+            "DateTime: {} {}:{}:00",
+            self.0.day(),
+            self.0.hour(),
+            self.0.minute(),
+        );
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn offload_recordings_and_events(
     fs: &mut OnboardFlash,
@@ -122,6 +132,8 @@ fn offload_recordings_and_events(
     watchdog: &mut Watchdog,
     only_last_file: bool,
 ) -> bool {
+    // Fixme, make the return a result rather than a boolean
+
     warn!("There are files to offload!");
     let _wait_for_wake = wake_raspberry_pi(
         i2c,
@@ -141,6 +153,10 @@ fn offload_recordings_and_events(
 
     if has_file && i2c.begin_offload().is_err() {
         warn!("Failed setting offload-in-progress flag");
+    }
+
+    if !has_file {
+        return true;
     }
 
     // do some offloading.
@@ -179,6 +195,8 @@ fn offload_recordings_and_events(
                 page,
                 is_last_page_for_file,
                 spi,
+                metadata,
+                timestamp,
             } = file_part;
             watchdog.feed();
             pi_spi.enable(spi, resets);
@@ -203,10 +221,48 @@ fn offload_recordings_and_events(
             }
 
             if file_start {
-                info!("Offload start is {}:{}", block, page);
+                let cptv_recording = metadata == FileType::CptvStartup
+                    || metadata == FileType::CptvShutdown
+                    || metadata == FileType::CptvScheduled
+                    || metadata == FileType::CptvUserRequested;
+                let audio_recording = metadata == FileType::AudioStartup
+                    || metadata == FileType::AudioShutdown
+                    || metadata == FileType::AudioUserRequested
+                    || metadata == FileType::AudioScheduled;
+                if let Some(timestamp) = timestamp {
+                    info!(
+                        "First file part at {}:{}, written at {}",
+                        block,
+                        page,
+                        FormattedTime(timestamp)
+                    );
+                } else {
+                    info!("First file part at {}:{}", block, page,);
+                }
+                if cptv_recording {
+                    if metadata == FileType::CptvStartup {
+                        info!("Offloading CPTV startup status recording");
+                    } else if metadata == FileType::CptvShutdown {
+                        info!("Offloading CPTV shutdown status recording");
+                    } else if metadata == FileType::CptvUserRequested {
+                        info!("Offloading CPTV test recording");
+                    } else {
+                        info!("Offloading scheduled CPTV recording");
+                    }
+                } else if audio_recording {
+                    if metadata == FileType::AudioStartup {
+                        info!("Offloading audio startup status recording");
+                    } else if metadata == FileType::AudioShutdown {
+                        info!("Offloading audio shutdown status recording");
+                    } else if metadata == FileType::AudioUserRequested {
+                        info!("Offloading test audio recording");
+                    } else {
+                        info!("Offloading scheduled audio recording");
+                    }
+                }
             }
             if is_last_page_for_file {
-                info!("Got last file {}:{}", block, page);
+                info!("Got last file part at {}:{}", block, page);
             }
             let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
             let current_crc = crc_check.checksum(part);
@@ -220,14 +276,8 @@ fn offload_recordings_and_events(
             let mut attempts = 0;
             'transfer_part: loop {
                 watchdog.feed();
-                let did_transfer = pi_spi.send_message_over_spi(
-                    transfer_type,
-                    part,
-                    current_crc,
-                    dma,
-                    resets,
-                    progress,
-                );
+                let did_transfer =
+                    pi_spi.send_message_over_spi(transfer_type, part, current_crc, dma, progress);
                 if did_transfer {
                     if attempts > 0 {
                         warn!("File part took multiple attempts: {}", attempts);
@@ -270,7 +320,7 @@ fn offload_recordings_and_events(
                 fs.file_start_block_index
             );
             watchdog.feed();
-            if let Err(e) = fs.erase_last_file() {
+            if fs.erase_last_file().is_err() {
                 events.log(Event::ErasePartialOrCorruptRecording, time, fs);
             }
         }
@@ -312,7 +362,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     pi_spi: &mut ExtSpiTransfers,
     resets: &mut RESETS,
     dma: &mut DMA,
-    clock_freq: HertzU32,
     existing_config: Option<DeviceConfig>,
     event_count: u16,
 ) -> (Option<DeviceConfig>, bool, bool) {
@@ -339,7 +388,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             &payload,
             crc,
             dma,
-            resets,
             None,
         ) {
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
@@ -367,7 +415,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 &payload,
                                 crc,
                                 dma,
-                                resets,
                                 None,
                             ) {
                                 if let Some(piece_bytes) = pi_spi.return_payload() {

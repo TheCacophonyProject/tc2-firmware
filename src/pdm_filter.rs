@@ -152,12 +152,15 @@ fn round_div(a: i64, b: i64) -> i64 {
 fn filter_table_mono_64(lut: &[u32], data: &[u8], s: usize) -> u32 {
     let s_offset = s * 256 * 8;
     let lut = &lut[s_offset..];
-    let mut out = 0;
     let dec = PDM_DECIMATION / 8;
-    for (index, byte) in data.iter().enumerate() {
-        out += unsafe { lut.get_unchecked(*byte as usize * dec + index) }
-    }
-    out
+    lut[data[3] as usize * dec]
+        + lut[data[2] as usize * dec + 1]
+        + lut[data[1] as usize * dec + 2]
+        + lut[data[0] as usize * dec + 3]
+        + lut[data[7] as usize * dec + 4]
+        + lut[data[6] as usize * dec + 5]
+        + lut[data[5] as usize * dec + 6]
+        + lut[data[4] as usize * dec + 7]
 }
 fn convolve(
     signal: &[u16],

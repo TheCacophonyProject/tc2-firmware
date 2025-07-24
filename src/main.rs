@@ -1,7 +1,5 @@
 #![no_std]
 #![no_main]
-#![allow(dead_code)]
-#![allow(unused_variables)]
 #![warn(clippy::all, clippy::pedantic)]
 
 mod attiny_rtc_i2c;
@@ -34,17 +32,16 @@ use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{
     ExtSpiTransfers, RPI_PAYLOAD_LENGTH, RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH,
 };
-use crate::frame_processing::record_thermal;
+use crate::frame_processing::{THERMAL_DEV_MODE, record_thermal};
 use crate::lepton::LeptonPins;
 pub use crate::lepton_task::frame_acquisition_loop;
-use crate::onboard_flash::FLASH_SPI_TOTAL_PAYLOAD_SIZE;
-use crate::onboard_flash::OnboardFlash;
-use crate::onboard_flash::extend_lifetime_generic_mut;
+use crate::onboard_flash::{FLASH_SPI_TOTAL_PAYLOAD_SIZE, OnboardFlash};
+use crate::rpi_power::wake_raspberry_pi;
 use crate::startup_functions::{
-    get_device_config, get_or_schedule_next_alarm, get_synced_time,
-    maybe_offload_files_and_events_on_startup, work_out_recording_mode,
+    get_device_config, get_synced_time, maybe_offload_files_and_events_on_startup,
+    validate_scheduled_alarm, work_out_recording_mode,
 };
-use crate::utils::restart;
+use crate::utils::{extend_lifetime_generic_mut, restart};
 use bsp::hal::Timer;
 use bsp::hal::watchdog::Watchdog;
 use bsp::{
@@ -52,7 +49,8 @@ use bsp::{
     hal::{clocks::Clock, sio::Sio},
     pac::Peripherals,
 };
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, Duration, Timelike, Utc};
+use cortex_m::asm::nop;
 use defmt::{assert, assert_eq, error, info, warn};
 use defmt_rtt as _;
 use fugit::{ExtU32, RateExtU32};
@@ -109,6 +107,38 @@ fn main() -> ! {
         &mut peripherals.RESETS,
     );
 
+    let i2c_result = MainI2C::new(
+        I2C::i2c1(
+            peripherals.I2C1,
+            pins.gpio6.reconfigure(),
+            pins.gpio7.reconfigure(),
+            400.kHz(),
+            &mut peripherals.RESETS,
+            &clocks.system_clock,
+        ),
+        pins.gpio3.reconfigure(),
+        timer,
+    );
+    if let Err(e) = i2c_result {
+        // FIXME: Basically we'll be in a restart loop if the attiny version is not
+        //  what we expect.  Is this unrecoverable?
+        error!("{}", e);
+        restart(&mut watchdog);
+    }
+    let mut i2c = i2c_result.unwrap();
+
+    if let Err(e) = i2c.attiny_keep_alive() {
+        error!("Failed to send keep alive: {}", e);
+    }
+
+    // If the pi is powering up, wait for it to restart us when tc2-agent is ready.
+    if i2c.get_camera_state().is_ok_and(|s| s.pi_is_powering_on()) {
+        warn!("Waiting for pi to power on");
+        loop {
+            nop();
+        }
+    }
+
     // init flash
     // Create double buffers which are used for DMA transfers to the onboard flash module.
     // These need to live for the life of the program, so creating them here makes sense?
@@ -130,7 +160,6 @@ fn main() -> ! {
             flash_page_buf_2,
             dma_channels.ch1,
             dma_channels.ch2,
-            None,
             system_clock_freq,
         )
     };
@@ -160,74 +189,21 @@ fn main() -> ! {
             timer,
         )
     };
-
-    fs.take_spi(peripherals.SPI1, &mut peripherals.RESETS);
-    fs.init();
+    fs.init(peripherals.SPI1, &mut peripherals.RESETS);
 
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
-    let i2c_result = MainI2C::new(
-        I2C::i2c1(
-            peripherals.I2C1,
-            pins.gpio6.reconfigure(),
-            pins.gpio7.reconfigure(),
-            400.kHz(),
-            &mut peripherals.RESETS,
-            &clocks.system_clock,
-        ),
-        pins.gpio3.reconfigure(),
-        timer,
-    );
-    if let Err(e) = i2c_result {
-        error!("{}", e);
-        restart(&mut watchdog);
-    }
-    let mut i2c = i2c_result.unwrap();
 
     let mut events = EventLogger::new(&mut fs);
     let time = get_synced_time(&mut i2c, &mut events, &mut fs, &mut watchdog, timer).unwrap();
-    let scheduled_alarm = i2c.get_scheduled_alarm(&time);
-    if let Some(scheduled_alarm) = &scheduled_alarm {
-        if scheduled_alarm.has_triggered() {
-            // Make sure the reason we woke was the trigger - if now != alarm time,
-            // we missed the alarm, and were woken up for some other reason.
-            if scheduled_alarm.time().hour() != time.date_time().hour()
-                || scheduled_alarm.time().minute() != time.date_time().minute()
-            {
-                // Missed alarm
-                warn!("Missed alarm");
-            } else {
-                info!("Woken by RTC alarm");
-                events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
-            }
-            // Clear the alarm flag:
-            if let Err(e) = i2c.clear_and_disable_alarm(&time) {
-                error!("{}", e);
-                restart(&mut watchdog);
-            }
-        }
-    } else {
-        // FIXME: If there's nothing scheduled, schedule a new alarm and restart.
-    }
-    if let Some(alarm) = &scheduled_alarm
-        && alarm.is_audio_alarm()
-    {
-        warn!(
-            "Next audio alarm scheduled in {}mins (at {} {}:{})",
-            (alarm.time() - time.date_time()).num_minutes(),
-            alarm.time().day(),
-            alarm.time().hour(),
-            alarm.time().minute(),
-        );
-    }
 
-    info!("Scheduled alarm: {}", scheduled_alarm);
+    //let _ = i2c.clear_and_disable_alarm(&time);
+
     let dc_result = get_device_config(
         &mut fs,
         &mut i2c,
         timer,
         &mut pi_spi,
-        system_clock_freq,
         &mut peripherals.RESETS,
         &mut peripherals.DMA,
         &mut watchdog,
@@ -237,10 +213,44 @@ fn main() -> ! {
         error!("{}", e);
         restart(&mut watchdog);
     }
-    let (config, prioritise_frame_preview) = dc_result.unwrap();
+    let (config, prioritise_frame_preview, config_was_updated) = dc_result.unwrap();
+    if config.use_high_power_mode()
+        && !i2c
+            .get_camera_state()
+            .is_ok_and(|s| s.pi_is_waking_or_awake())
+    {
+        info!("Waking pi for high power mode");
+        let _ = wake_raspberry_pi(&mut i2c, timer, Some(&mut watchdog), None);
+    }
 
-    // If the current schedule is good, use it, otherwise reschedule and restart
-    let missed_audio_alarm = get_or_schedule_next_alarm(
+    let scheduled_alarm = if config_was_updated {
+        // If the config was updated, create a new alarm and restart
+        None
+    } else {
+        i2c.get_scheduled_alarm(&time)
+    };
+    if let Some(scheduled_alarm) = &scheduled_alarm
+        && scheduled_alarm.has_triggered()
+    {
+        // Make sure the reason we woke was the trigger - if now != alarm time,
+        // we missed the alarm, and were woken up for some other reason.
+        if scheduled_alarm.date_time().hour() != time.date_time().hour()
+            || scheduled_alarm.date_time().minute() != time.date_time().minute()
+        {
+            // Missed alarm
+            warn!("Missed alarm");
+        } else {
+            info!("Woken by RTC alarm");
+            events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
+        }
+        // Clear the alarm flag:
+        if let Err(e) = i2c.clear_and_disable_alarm(&time) {
+            error!("{}", e);
+            restart(&mut watchdog);
+        }
+    }
+
+    validate_scheduled_alarm(
         &config,
         &mut fs,
         &time,
@@ -250,11 +260,27 @@ fn main() -> ! {
         &mut watchdog,
     );
 
+    // We ALWAYS have a valid scheduled next alarm at this point.
+    let scheduled_alarm = scheduled_alarm.unwrap();
+
+    if scheduled_alarm.is_audio_alarm() {
+        error!(
+            "Next audio alarm scheduled in {} mins (at {} {}:{}) -- {}",
+            (scheduled_alarm.date_time() - time.date_time()).num_minutes(),
+            scheduled_alarm.date_time().day(),
+            scheduled_alarm.date_time().hour(),
+            scheduled_alarm.date_time().minute(),
+            scheduled_alarm
+        );
+    } else {
+        info!("Got valid scheduled alarm {:?}", scheduled_alarm);
+    }
+
     if let Ok(is_recording) = i2c.get_is_recording() {
         // Unset the is_recording flag on attiny on startup if still enabled.
         // If it was still set, that suggests a previous recording was interrupted.
         if is_recording {
-            if config.use_low_power_mode() && fs.last_recording_is_complete() {
+            if config.use_low_power_mode() && fs.last_recording_is_complete(&mut watchdog) {
                 error!("Still had recording bit set, but last recording seems to be complete");
             }
             events.log(Event::RecordingNotFinished, &time, &mut fs);
@@ -272,8 +298,6 @@ fn main() -> ! {
         &time,
     );
     warn!("Recording mode: {:?}", recording_mode);
-    // TODO: Maybe check sun_times for valid lat/lng which can give us a recording window,
-    //  log if we can't get one
     maybe_offload_files_and_events_on_startup(
         recording_mode,
         prioritise_frame_preview,
@@ -287,27 +311,29 @@ fn main() -> ! {
         &mut pi_spi,
         &mut watchdog,
     );
-
-    if recording_mode == RecordingMode::None {
-        // FIXME: Maybe the power down should happen in startup if there's not a recording to be made.
-        // crate::audio_task::power_down_or_restart(
-        //     alarm_date_time,
-        //     time,
-        //     config,
-        //     watchdog,
-        //     i2c,
-        //     events,
-        //     fs,
-        // )
+    if let Err(e) = i2c.attiny_keep_alive() {
+        error!("Failed to send keep alive: {}", e);
     }
 
+    if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(&time)
+        && scheduled_alarm.has_triggered()
+    {
+        warn!("Alarm triggered during offload, restarting");
+        // If we triggered an alarm during offload, restart
+        restart(&mut watchdog);
+    }
+
+    let current_recording_window = config.next_or_current_recording_window(&time.date_time());
+    if let Err(e) = current_recording_window {
+        error!("{}", e);
+    }
+    let current_recording_window = current_recording_window.unwrap();
     let record_audio_now = if let RecordingMode::Audio(recording_request_type) = recording_mode {
         if prioritise_frame_preview && !recording_request_type.is_user_requested() {
             // We're not trying to make a test audio recording, and the user is interacting
             // with sidekick.
             false
         } else {
-            // missed_audio recordings will hit this case.
             true
         }
     } else {
@@ -323,7 +349,6 @@ fn main() -> ! {
             pins.gpio1,
             watchdog,
             recording_request_type,
-            &config,
             fs,
             events,
             pi_spi,
@@ -332,6 +357,39 @@ fn main() -> ! {
             sm1,
         );
     } else {
+        let current_recording_window = if THERMAL_DEV_MODE {
+            (time.date_time(), time.date_time() + Duration::minutes(60))
+        } else {
+            current_recording_window
+        };
+
+        if let Ok(camera_connection_state) = i2c.get_camera_connection_state() {
+            info!(
+                "Current camera connection state: {:?}",
+                camera_connection_state
+            );
+        }
+
+        // If we're not doing an audio recording, check if we need to shutdown now.
+        let inside_thermal_window = config
+            .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
+        let should_shutdown = recording_mode == RecordingMode::None
+            && i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_off())
+            && !inside_thermal_window;
+        if should_shutdown {
+            error!("Would tell attiny to shut us down");
+            // if let Err(e) = i2c.tell_attiny_to_power_down_rp2040() {
+            //     error!("Failed to tell attiny to power down: {}", e);
+            // }
+        } else if recording_mode == RecordingMode::None && !inside_thermal_window {
+            info!("Entering thermal mode because pi is on");
+        } else if recording_mode == RecordingMode::None && inside_thermal_window {
+            info!("Entering thermal mode because inside recording window");
+        } else if let RecordingMode::Thermal(_) = recording_mode {
+            info!("Entering thermal mode because it was requested/scheduled");
+        }
+
+        // If we don't have a recording_mode, default into thermal mode to serve frames to the rPi.
         let lepton_pins = LeptonPins {
             tx: pins.gpio23.into_function(),
             rx: pins.gpio20.into_function(),
@@ -358,7 +416,7 @@ fn main() -> ! {
             &config,
             events,
             time,
-            scheduled_alarm,
+            current_recording_window,
         );
     }
 }

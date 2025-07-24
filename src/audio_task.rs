@@ -1,32 +1,27 @@
 use crate::attiny_rtc_i2c::{MainI2C, RecordingRequestType};
 use crate::bsp;
 use crate::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
-use crate::device_config::DeviceConfig;
 use crate::event_logger::{Event, EventLogger};
+use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
-use byteorder::{ByteOrder, LittleEndian};
-use defmt::{error, info, warn};
-use rp2040_hal::gpio;
-
-use chrono::{Duration, TimeDelta};
-use crc::{CRC_16_XMODEM, Crc};
-use fugit::HertzU32;
-
-use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
 use bsp::hal::Watchdog;
+use byteorder::{ByteOrder, LittleEndian};
+use crc::{CRC_16_XMODEM, Crc};
+use defmt::{error, info, warn};
+use fugit::HertzU32;
 use gpio::FunctionNull;
 use gpio::bank0::{Gpio0, Gpio1};
 use rp2040_hal::dma::DMAExt;
+use rp2040_hal::gpio;
 use rp2040_hal::gpio::PullDown;
 use rp2040_hal::pio::PIO;
 use rp2040_hal::pio::SM1;
 use rp2040_hal::pio::UninitStateMachine;
 
-pub const DEV_MODE: bool = false;
-pub const MAX_INTERVAL_BETWEEN_AUDIO_RECORDINGS: TimeDelta = Duration::minutes(60);
+pub const AUDIO_DEV_MODE: bool = false;
 
 fn send_camera_connect_info(
     fs: &mut OnboardFlash,
@@ -41,12 +36,11 @@ fn send_camera_connect_info(
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
         info!("Sending camera connect info");
-        let success = pi_spi.send_message_over_spi(
+        let _success = pi_spi.send_message_over_spi(
             ExtTransferMessage::CameraConnectInfo,
             &payload,
             crc,
             dma,
-            resets,
             None,
         );
         if let Some(spi) = pi_spi.disable() {
@@ -63,7 +57,6 @@ pub fn record_audio(
     gpio1: gpio::Pin<Gpio1, FunctionNull, PullDown>,
     mut watchdog: Watchdog,
     recording_request_type: RecordingRequestType,
-    config: &DeviceConfig,
     mut fs: OnboardFlash,
     mut events: EventLogger,
     mut pi_spi: ExtSpiTransfers,
@@ -72,7 +65,7 @@ pub fn record_audio(
     sm1: UninitStateMachine<(PIO1, SM1)>,
 ) -> ! {
     info!("=== Core 0 Audio Recording start ===");
-    if DEV_MODE {
+    if AUDIO_DEV_MODE {
         warn!("DEV MODE");
     } else {
         warn!("FIELD MODE");
@@ -106,8 +99,6 @@ pub fn record_audio(
         recording_request_type.duration_seconds(),
         dma_channels.ch3,
         dma_channels.ch4,
-        &mut peripherals.RESETS,
-        &peripherals.SPI1,
         &mut fs,
         timestamp,
         &mut watchdog,
@@ -121,9 +112,8 @@ pub fn record_audio(
         events.log(Event::AudioRecordingFailed, time, &mut fs);
         info!("Recording failed, restarting and will try again");
     } else {
-        // If the audio recording succeeded, we'll restart and possibly offload if either of:
-        // a) this was a recording requested from thermal more in `AudioAndThermal` mode.
-        // b) this was a user-requested test recording.
+        // If the audio recording succeeded, we'll restart and possibly offload if
+        // this was a user-requested test recording.
         events.log(Event::EndedRecording, time, &mut fs);
         watchdog.feed();
         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {

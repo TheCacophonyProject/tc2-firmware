@@ -61,20 +61,6 @@ impl<'a> CursorMut<'a> {
     pub fn new(inner: &'a mut [u8]) -> CursorMut<'a> {
         CursorMut { pos: 0, inner }
     }
-    pub const fn position(&self) -> usize {
-        self.pos
-    }
-    pub fn set_position(&mut self, pos: usize) {
-        self.pos = pos;
-    }
-    pub fn remaining_slice(&mut self) -> &mut [u8] {
-        let len = self.pos.min(self.inner.as_mut().len());
-        &mut self.inner[len..]
-    }
-
-    pub fn data(&mut self) -> &mut [u8] {
-        &mut self.inner[..self.pos]
-    }
 
     pub fn write_bytes(&mut self, bytes: &[u8]) -> fmt::Result {
         // Skip over already-copied data

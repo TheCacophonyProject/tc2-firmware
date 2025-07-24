@@ -37,7 +37,7 @@ pub struct MainI2C {
 }
 
 pub mod tc2_agent_state {
-    pub const NOT_READY: u8 = 0x00;
+    pub const _NOT_READY: u8 = 0x00;
     pub const READY: u8 = 1 << 1;
     pub const RECORDING: u8 = 1 << 2;
     pub const SHORT_TEST_RECORDING: u8 = 1 << 3;
@@ -167,7 +167,11 @@ impl CameraState {
     }
 
     pub fn pi_is_waking_or_awake(&self) -> bool {
-        *self == CameraState::PoweringOn || *self == CameraState::PoweredOn
+        self.pi_is_powering_on() || self.pi_is_powered_on()
+    }
+
+    pub fn pi_is_powering_on(&self) -> bool {
+        *self == CameraState::PoweringOn
     }
 }
 
@@ -188,6 +192,22 @@ impl From<u8> for CameraState {
     }
 }
 
+impl From<u8> for CameraConnectionState {
+    fn from(value: u8) -> Self {
+        match value {
+            0x00 => CameraConnectionState::NoConnection,
+            0x01 => CameraConnectionState::ConnectedToWifi,
+            0x02 => CameraConnectionState::HostingHotspot,
+            0x03 => CameraConnectionState::WifiSetup,
+            0x04 => CameraConnectionState::HotspotSetup,
+            x => {
+                warn!("Invalid camera connection state {:x}", x);
+                CameraConnectionState::NoConnection
+            }
+        }
+    }
+}
+
 #[derive(Format, Copy, Clone, PartialEq)]
 pub struct RecordingTypeDetail {
     user_requested: bool,
@@ -203,6 +223,7 @@ pub enum RecordingMode {
 }
 
 impl RecordingMode {
+    #[allow(dead_code)]
     pub fn record_audio(&self) -> bool {
         matches!(self, RecordingMode::Audio(_))
     }
@@ -266,10 +287,7 @@ impl RecordingRequestType {
         }
     }
 
-    pub fn is_scheduled(&self) -> bool {
-        !self.is_user_requested()
-    }
-
+    #[allow(dead_code)]
     pub fn is_tc2_agent_requested(&self) -> bool {
         matches!(self, RecordingRequestType::Tc2AgentScheduled(_))
     }
@@ -313,10 +331,13 @@ fn map_i2c_err(e: ErrorKind) -> &'static str {
 }
 
 #[repr(u8)]
-enum CameraConnectionState {
+#[derive(Format)]
+pub enum CameraConnectionState {
     NoConnection = 0x00,
     ConnectedToWifi = 0x01,
     HostingHotspot = 0x02,
+    WifiSetup = 0x03,
+    HotspotSetup = 0x04,
 }
 
 const ATTINY_ADDRESS: u8 = 0x25;
@@ -326,7 +347,7 @@ const ATTINY_REG_CAMERA_STATE: u8 = 0x02;
 const ATTINY_REG_CAMERA_CONNECTION: u8 = 0x03;
 const ATTINY_REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
 const ATTINY_REG_KEEP_ALIVE: u8 = 0x0e;
-//const REG_PI_WAKEUP: u8 = 0x06;
+// const REG_PI_WAKEUP: u8 = 0x06;
 const ATTINY_REG_TC2_AGENT_STATE: u8 = 0x07;
 
 const RTC_REG_ALARM_CONTROL: u8 = 0x01;
@@ -360,16 +381,16 @@ fn encode_bcd(input: u8) -> u8 {
 }
 
 pub struct ScheduledAlarmTime {
-    time: chrono::DateTime<Utc>,
-    mode: AlarmMode,
-    already_triggered: bool,
+    pub time: chrono::DateTime<Utc>,
+    pub mode: AlarmMode,
+    pub already_triggered: bool,
 }
 
 impl ScheduledAlarmTime {
     pub fn has_triggered(&self) -> bool {
         self.already_triggered
     }
-    pub fn time(&self) -> chrono::DateTime<Utc> {
+    pub fn date_time(&self) -> chrono::DateTime<Utc> {
         self.time
     }
     pub fn is_audio_alarm(&self) -> bool {
@@ -525,18 +546,20 @@ impl MainI2C {
         })
     }
 
+    #[allow(dead_code)]
     pub fn check_device_present(&mut self, addr: u8) -> Result<bool, &str> {
         self.with_i2c(
             |i2c| {
                 let payload = &mut [0];
                 i2c.write_read(addr, &[0], payload)
-                    .map(|v| true)
+                    .map(|()| true)
                     .map_err(|e| map_i2c_err(e.kind()))
             },
             Some(0),
         )
     }
 
+    #[allow(dead_code)]
     fn attiny_write_read_command(
         &mut self,
         command: u8,
@@ -569,7 +592,7 @@ impl MainI2C {
             BigEndian::write_u16(&mut request[1..=2], request_crc);
             let result = i2c
                 .write_read(ATTINY_ADDRESS, &request, &mut payload)
-                .map(|r| 0u8)
+                .map(|()| 0u8)
                 .map_err(|e| map_i2c_err(e.kind()));
             if result.is_ok() {
                 let value = payload[0];
@@ -604,10 +627,6 @@ impl MainI2C {
 
     pub fn tell_pi_to_wakeup(&mut self) -> Result<(), &str> {
         self.try_attiny_write_command(ATTINY_REG_RP2040_PI_POWER_CTRL, 0x01)
-    }
-
-    pub fn power_ctrl_status(&mut self) -> Result<u8, &str> {
-        self.try_attiny_read_command(ATTINY_REG_RP2040_PI_POWER_CTRL)
     }
 
     pub fn get_is_recording(&mut self) -> Result<bool, &str> {
@@ -659,14 +678,6 @@ impl MainI2C {
         Ok(self.get_tc2_agent_state()?.is_offloading_files())
     }
 
-    pub fn pi_is_waking_or_awake(&mut self) -> Result<bool, &str> {
-        let state = self.try_attiny_read_command(ATTINY_REG_CAMERA_STATE)?;
-        let camera_state = CameraState::from(state);
-        match camera_state {
-            CameraState::PoweredOn | CameraState::PoweringOn => Ok(true),
-            _ => Ok(false),
-        }
-    }
     pub fn check_if_pi_is_awake_and_tc2_agent_is_ready(&mut self) -> Result<bool, &str> {
         if self.get_camera_state()?.pi_is_powered_on() {
             Ok(self.get_tc2_agent_state()?.is_ready())
@@ -675,47 +686,9 @@ impl MainI2C {
         }
     }
 
-    pub fn ensure_pi_is_awake_and_tc2_agent_is_ready(&mut self) -> Result<bool, &str> {
-        if self.get_camera_state()?.pi_is_powered_on() {
-            // FIXME: Why do we do this when the pi is already powered on?
-            //  Makes no sense...
-            info!("Sent wake signal to rPi");
-            let _ = self.tell_pi_to_wakeup();
-            Ok(self.get_tc2_agent_state()?.is_ready())
-        } else {
-            Ok(false)
-        }
-    }
-
-    // pub fn tc2_agent_is_ready(&mut self, delay: &mut Delay, print: bool) -> Result<bool, &str> {
-    //     let state = self.get_tc2_agent_state(delay)?;
-    //     if print {
-    //         if state.is_not_ready() {
-    //             info!("tc2-agent not ready");
-    //         } else if state.is_ready() {
-    //             // 2
-    //             info!("tc2-agent ready");
-    //         }
-    //         if state.is_not_ready() && state.recording_in_progress() {
-    //             info!("tc2-agent not ready, rp2040 recording",);
-    //         } else if state.is_ready() && state.recording_in_progress() {
-    //             info!("tc2-agent ready and rp2040 recording",);
-    //         } else if state.is_ready() | tc2_agent_state::TEST_AUDIO_RECORDING {
-    //             info!("tc2-agent ready and wanting test audio recording");
-    //         } else {
-    //             info!("tc2-agent unknown state {:08b}({})", state, state);
-    //         }
-    //     }
-    //     Ok((state & tc2_agent_state::READY) == tc2_agent_state::READY)
-    // }
-
     pub fn get_tc2_agent_state(&mut self) -> Result<Tc2AgentState, &'static str> {
         let state = self.try_attiny_read_command(ATTINY_REG_TC2_AGENT_STATE)?;
         Ok(Tc2AgentState::from(state))
-    }
-
-    pub fn tc2_agent_clear_test_audio_rec(&mut self) -> Result<(), &str> {
-        self.tc2_agent_write_flag(tc2_agent_state::SHORT_TEST_RECORDING, false)
     }
 
     pub fn tc2_agent_clear_mode_flags(&mut self) -> Result<(), &str> {
@@ -727,51 +700,14 @@ impl MainI2C {
         self.try_attiny_write_command(ATTINY_REG_TC2_AGENT_STATE, state.into())
     }
 
-    pub fn tc2_agent_write_flag(&mut self, flag: u8, set: bool) -> Result<(), &str> {
-        let mut state = self.get_tc2_agent_state()?;
-        if set {
-            state.set_flag(flag);
-        } else {
-            state.unset_flag(flag);
-        }
-        self.try_attiny_write_command(ATTINY_REG_TC2_AGENT_STATE, state.into())
-    }
-
-    pub fn tc2_agent_clear_and_set_flag(
-        &mut self,
-        clear_flag: u8,
-        set_flag: Option<u8>,
-    ) -> Result<(), &str> {
-        let mut state = self.get_tc2_agent_state()?;
-        state.unset_flag(clear_flag);
-        if let Some(flag) = set_flag {
-            state.set_flag(flag);
-        }
-        self.try_attiny_write_command(ATTINY_REG_TC2_AGENT_STATE, state.into())
-    }
-
-    pub fn tc2_agent_requested_thermal_mode(&mut self) -> Result<bool, &str> {
-        Ok(self.get_tc2_agent_state()?.requested_thermal_mode())
-    }
-    pub fn tc2_agent_request_thermal_mode(&mut self) -> Result<(), &str> {
-        self.tc2_agent_write_flag(tc2_agent_state::THERMAL_MODE, true)
-    }
-
-    pub fn tc2_agent_clear_thermal_mode(&mut self) -> Result<(), &str> {
-        self.tc2_agent_write_flag(tc2_agent_state::THERMAL_MODE, false)
-    }
-
-    pub fn tc2_agent_take_audio_rec(&mut self) -> Result<(), &str> {
-        self.tc2_agent_write_flag(tc2_agent_state::AUDIO_MODE, true)
-    }
-
-    pub fn tc2_agent_clear_take_audio_rec(&mut self) -> Result<(), &str> {
-        self.tc2_agent_write_flag(tc2_agent_state::AUDIO_MODE, false)
-    }
-
     pub fn get_camera_state(&mut self) -> Result<CameraState, &'static str> {
         let state = self.try_attiny_read_command(ATTINY_REG_CAMERA_STATE)?;
         Ok(CameraState::from(state))
+    }
+
+    pub fn get_camera_connection_state(&mut self) -> Result<CameraConnectionState, &'static str> {
+        let state = self.try_attiny_read_command(ATTINY_REG_CAMERA_CONNECTION)?;
+        Ok(CameraConnectionState::from(state))
     }
 
     pub fn get_datetime(&mut self, timer: Timer) -> Result<SyncedDateTime, &'static str> {
@@ -793,10 +729,15 @@ impl MainI2C {
             let minutes = decode_bcd(data[1] & 0x7f);
             let seconds = decode_bcd(data[0]);
 
+            // FIXME: Is it also worth rejecting this if the year is < 2025 or more than 2025 + 10?
+
             if day == 0 || day > 31 || month == 0 || month > 12 {
                 Err("Invalid datetime output from RTC")
             } else {
-                info!("RTC Date time {}:{}:{}", hours, minutes, seconds);
+                info!(
+                    "Synced DateTime with RTC {}:{}:{} UTC",
+                    hours, minutes, seconds
+                );
 
                 Ok(SyncedDateTime::new(
                     get_datetime_utc(year, month, day, hours, minutes, seconds),
@@ -811,7 +752,7 @@ impl MainI2C {
         wakeup_datetime_utc: &chrono::DateTime<Utc>,
         mode: AlarmMode,
         now: &SyncedDateTime,
-    ) -> Result<(), &str> {
+    ) -> Result<(), &'static str> {
         #[allow(clippy::cast_possible_truncation)]
         let wake_hour = wakeup_datetime_utc.time().hour() as u8;
         #[allow(clippy::cast_possible_truncation)]
@@ -838,18 +779,8 @@ impl MainI2C {
         wake_min: u8,
         now: &SyncedDateTime,
         alarm_mode: AlarmMode,
-    ) -> Result<(), &str> {
+    ) -> Result<(), &'static str> {
         info!("Setting wake alarm for UTC {}:{}", wake_hour, wake_min);
-        // TODO: Get to the bottom of the finicky behaviour we're seeing.
-        //  Maybe just do the alarms etc in terms of our own i2c abstraction.
-        //
-        // // For some reason doing this first seems to prime the alarm so that it actually succeeds!?
-
-        // FIXME: We should set and enable the alarm in a single write_read command. Also make sure the alarm interrupt is enabled.
-
-        // Set wakeup alarm should set all the alarm bits, and also the enabled bits for the alarm components
-        // in one call.
-
         let result = self.with_i2c_retrying(|i2c| {
             let alarm_mins = encode_bcd(wake_min);
             let alarm_hours = encode_bcd(wake_hour);
@@ -929,11 +860,14 @@ impl MainI2C {
         let mut attempts = 0;
         let max_attempts = max_attempts.unwrap_or(DEFAULT_MAX_I2C_ATTEMPTS);
         loop {
+            assert!(self.unlocked_pin.is_some(), "Should have unlocked pin");
             let result = if let Some(pin) = self.take_i2c_attiny_lock() {
                 let result = func(&mut self.i2c);
                 self.restore_i2c_attiny_lock_pin(pin);
                 result
             } else {
+                // FIXME: Once this fails once, it looks like it might never succeed.  Does it
+                //  fix itself if we restart on failure?
                 Err("Failed to get i2c lock")
             };
             if result.is_ok() {
@@ -955,7 +889,6 @@ impl MainI2C {
     }
 
     pub fn clear_and_disable_alarm(&mut self, now: &SyncedDateTime) -> Result<(), &str> {
-        info!("!!! Clearing scheduled alarm");
         let result = self.with_i2c_retrying(|i2c| {
             // Clear the alarm flag and the alarm interrupt enable flag
             i2c.write(RTC_ADDRESS, &[RTC_REG_ALARM_CONTROL, 0])
@@ -974,7 +907,7 @@ impl MainI2C {
             while i2c.tx_fifo_used() != 0 {}
             Ok(())
         });
-        if let Err(err) = result {
+        if result.is_err() {
             result
         } else if self.get_scheduled_alarm(now).is_some() {
             Err("Failed to clear and disable alarm")
@@ -998,7 +931,7 @@ impl MainI2C {
         let page_length: usize = 16;
         assert!(EEPROM_LENGTH < usize::from(u8::MAX));
         let mut eeprom = Eeprom::from_bytes([0u8; EEPROM_LENGTH]);
-        for (chunk_num, chunk) in eeprom.as_mut().chunks_mut(16).enumerate() {
+        for (chunk_num, chunk) in eeprom.as_mut().chunks_mut(page_length).enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             if let Err(e) = self.try_read_eeprom_command(chunk_num as u8, chunk) {
                 warn!("Couldn't read eeprom data: {}", e);
@@ -1036,30 +969,8 @@ impl Eeprom {
         self.inner[1..4].try_into().unwrap()
     }
 
-    pub fn power_version(&self) -> [u8; 3] {
-        self.inner[4..7].try_into().unwrap()
-    }
-
-    pub fn touch_version(&self) -> [u8; 3] {
-        self.inner[7..10].try_into().unwrap()
-    }
-
-    pub fn mic_version(&self) -> [u8; 3] {
-        self.inner[10..13].try_into().unwrap()
-    }
-
     pub fn audio_only(&self) -> bool {
         self.inner[13] != 0
-    }
-
-    pub fn id(&self) -> u64 {
-        BigEndian::read_u64(&self.inner[4..12])
-    }
-
-    pub fn timestamp(&self) -> chrono::DateTime<Utc> {
-        // FIXME: If we want to use this, need to know what increments the timestamp was stored in.
-        let timestamp = i64::from(BigEndian::read_u32(&self.inner[12..16]));
-        chrono::DateTime::<Utc>::from_timestamp_micros(timestamp).unwrap()
     }
 
     pub fn crc_16(&self) -> u16 {

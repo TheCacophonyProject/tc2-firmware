@@ -2,7 +2,7 @@ use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use defmt::{Format, Formatter, error};
 use embedded_io::Read;
 
@@ -92,6 +92,7 @@ impl DeviceConfigInner {
         self.audio_mode != AudioMode::Disabled
     }
 
+    #[allow(dead_code)]
     pub fn is_audio_only_device(&self) -> bool {
         self.audio_mode == AudioMode::AudioOnly
     }
@@ -116,15 +117,15 @@ impl DeviceConfigInner {
         } else {
             return false;
         }
-        let starts_in = start_time - *date_time_utc;
-        let starts_in_hours = starts_in.num_hours();
-        let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
-        let ends_in = end_time - *date_time_utc;
-        let ends_in_hours = ends_in.num_hours();
-        let ends_in_mins = ends_in.num_minutes() - (ends_in_hours * 60);
-        let window = end_time - start_time;
-        let window_hours = window.num_hours();
-        let window_mins = window.num_minutes() - (window_hours * 60);
+        // let starts_in = start_time - *date_time_utc;
+        // let starts_in_hours = starts_in.num_hours();
+        // let starts_in_mins = starts_in.num_minutes() - (starts_in_hours * 60);
+        // let ends_in = end_time - *date_time_utc;
+        // let ends_in_hours = ends_in.num_hours();
+        // let ends_in_mins = ends_in.num_minutes() - (ends_in_hours * 60);
+        // let window = end_time - start_time;
+        // let window_hours = window.num_hours();
+        // let window_mins = window.num_minutes() - (window_hours * 60);
         // if start_time > *date_time_utc && end_time > *date_time_utc {
         //     info!(
         //         "Recording will start in {}h{}m and end in {}h{}m, window duration {}h{}m",
@@ -285,15 +286,15 @@ pub struct DeviceConfig {
     pub cursor_position: usize,
 }
 
+impl Format for DeviceConfig {
+    fn format(&self, _fmt: Formatter) {}
+}
+
 impl PartialEq for DeviceConfig {
     fn eq(&self, other: &Self) -> bool {
         self.config_inner == other.config_inner
             && self.motion_detection_mask == other.motion_detection_mask
     }
-}
-
-impl Format for DeviceConfig {
-    fn format(&self, fmt: Formatter) {}
 }
 
 impl Default for DeviceConfig {
@@ -318,6 +319,8 @@ impl Default for DeviceConfig {
         }
     }
 }
+
+pub type RecordingWindow = (chrono::DateTime<Utc>, chrono::DateTime<Utc>);
 
 impl DeviceConfig {
     pub fn load_existing_config_from_flash(fs: &mut OnboardFlash) -> Option<DeviceConfig> {
@@ -359,7 +362,7 @@ impl DeviceConfig {
         device_name[0] = device_name_length;
         let len = device_name.len();
         let device_name = {
-            let read_bytes = cursor
+            let _read_bytes = cursor
                 .read(&mut device_name[1..(1 + usize::from(device_name_length)).min(len)])
                 .unwrap();
             device_name
@@ -417,6 +420,10 @@ impl DeviceConfig {
         self.config_inner.is_audio_device()
     }
 
+    pub fn is_continous_recorder(&self) -> bool {
+        self.config_inner.is_continuous_recorder()
+    }
+
     pub fn is_audio_only_device(&self) -> bool {
         self.config_inner.is_audio_device()
     }
@@ -436,6 +443,7 @@ impl DeviceConfig {
         )
     }
 
+    #[allow(dead_code)]
     pub fn records_audio_or_thermal(&self) -> bool {
         matches!(self.audio_mode(), AudioMode::AudioOrThermal)
     }
@@ -470,10 +478,11 @@ impl DeviceConfig {
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &chrono::DateTime<Utc>,
-    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), ()> {
+    ) -> Result<RecordingWindow, ()> {
         self.config_inner.next_or_current_recording_window(now_utc)
     }
 
+    #[allow(dead_code)]
     pub fn time_is_in_daylight(&self, date_time_utc: &chrono::DateTime<Utc>) -> bool {
         let (lat, lng) = self.config_inner.location;
         let altitude = self.config_inner.location_altitude;
@@ -484,13 +493,13 @@ impl DeviceConfig {
             f64::from(altitude.unwrap_or(0.0)),
         )
         .unwrap();
-        date_time_utc.hour() > sunrise.hour() && date_time_utc.hour() < sunset.hour()
+        date_time_utc > &sunrise && date_time_utc < &sunset
     }
 
     fn time_is_in_recording_window(
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
-        window: Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
+        window: Option<RecordingWindow>,
     ) -> bool {
         self.config_inner
             .time_is_in_recording_window(date_time_utc, window)
@@ -506,7 +515,7 @@ impl DeviceConfig {
     pub fn time_is_in_supplied_recording_window(
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
-        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+        window: RecordingWindow,
     ) -> bool {
         self.time_is_in_recording_window(date_time_utc, Some(window))
     }

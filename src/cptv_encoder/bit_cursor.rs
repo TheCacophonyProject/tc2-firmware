@@ -2,13 +2,12 @@ use byteorder::{ByteOrder, LittleEndian};
 
 const PAGE_COMMAND_ADDRESS: usize = 4;
 const USER_BUFFER_LENGTH: usize = 2048;
-const META_BUFFER_LENGTH: usize = 128;
 
 // The total buffer length is the same as a single page to be written to our onboard nand flash.
 // LZ encoding only uses the first 2048 bytes, which is the user data section.  Other metadata
 // is written in the remaining 128 bytes.  Here we only care about the first metadata section,
 // so the buffer is truncated from the full page+metadata size.
-const BUFFER_LENGTH: usize = PAGE_COMMAND_ADDRESS + 2112; //USER_BUFFER_LENGTH + META_BUFFER_LENGTH;
+const BUFFER_LENGTH: usize = PAGE_COMMAND_ADDRESS + 2112;
 type PageBuffer = [u8; BUFFER_LENGTH];
 pub struct BitCursor {
     used_bits: u32,

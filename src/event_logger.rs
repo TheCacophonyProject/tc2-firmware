@@ -2,6 +2,7 @@ use crate::onboard_flash::{OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use core::cmp::PartialEq;
 use core::ops::Range;
 use defmt::{Format, error, info, warn};
 
@@ -32,6 +33,29 @@ impl From<WakeReason> for u8 {
 impl From<WakeReason> for u64 {
     fn from(value: WakeReason) -> Self {
         value as u64
+    }
+}
+
+impl TryFrom<u64> for WakeReason {
+    type Error = ();
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(WakeReason::Unknown),
+            1 => Ok(WakeReason::ThermalOffload),
+            2 => Ok(WakeReason::ThermalOffloadAfter24Hours),
+            3 => Ok(WakeReason::ThermalHighPower),
+            4 => Ok(WakeReason::AudioThermalEnded),
+            5 => Ok(WakeReason::AudioShouldOffload),
+            6 => Ok(WakeReason::AudioTooFull),
+            7 => Ok(WakeReason::ThermalTooFull),
+            8 => Ok(WakeReason::EventsTooFull),
+            9 => Ok(WakeReason::OffloadTestRecording),
+            10 => Ok(WakeReason::OffloadOnUserDemand),
+            11 => Ok(WakeReason::RtcTimeCompromised),
+            12 => Ok(WakeReason::OpportunisticOffload),
+            _ => Err(()),
+        }
     }
 }
 
@@ -116,13 +140,16 @@ impl From<Event> for u16 {
     }
 }
 
-impl TryFrom<u16> for Event {
+impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
     type Error = ();
 
     #[allow(clippy::enum_glob_use)]
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
+    fn try_from(event: &[u8; EVENT_LENGTH]) -> Result<Self, Self::Error> {
         use Event::*;
-        match value {
+        let kind = LittleEndian::read_u16(&event[0..2]);
+        let timestamp = LittleEndian::read_i64(&event[2..10]);
+        let ext_data = LittleEndian::read_u64(&event[10..18]);
+        let kind = match kind {
             1 => Ok(Rp2040Sleep),
             2 => Ok(OffloadedRecording),
             3 => Ok(SavedNewConfig),
@@ -132,9 +159,15 @@ impl TryFrom<u16> for Event {
             7 => Ok(ToldRpiToSleep),
             8 => Ok(GotRpiPoweredDown),
             9 => Ok(GotRpiPoweredOn),
-            10 => Ok(ToldRpiToWake(WakeReason::Unknown)),
+            10 => Ok(ToldRpiToWake(
+                ext_data.try_into().unwrap_or(WakeReason::Unknown),
+            )),
             11 => Ok(LostSync),
-            12 => Ok(SetAudioAlarm(0)),
+            12 =>
+            {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(SetAudioAlarm(ext_data as i64))
+            }
             13 => Ok(GotPowerOnTimeout),
             14 => Ok(WouldDiscardAsFalsePositive),
             15 => Ok(StartedGettingFrames),
@@ -142,7 +175,11 @@ impl TryFrom<u16> for Event {
             17 => Ok(Rp2040WokenByAlarm),
             18 => Ok(RtcCommError),
             19 => Ok(AttinyCommError),
-            20 => Ok(Rp2040MissedAudioAlarm(0)),
+            20 =>
+            {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(Rp2040MissedAudioAlarm(ext_data as i64))
+            }
             21 => Ok(AudioRecordingFailed),
             22 => Ok(ErasePartialOrCorruptRecording),
             23 => Ok(StartedAudioRecording),
@@ -153,18 +190,22 @@ impl TryFrom<u16> for Event {
             28 => Ok(OffloadedLogs),
             29 => Ok(LogOffloadFailed),
             30 => Ok(CorruptFile),
-            31 => Ok(LostFrames(0)),
+            31 => Ok(LostFrames(ext_data)),
             32 => Ok(FileOffloadInterruptedByUser),
             33 => Ok(RtcVoltageLowError),
-            34 => Ok(SetThermalAlarm(0)),
+            34 =>
+            {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(SetThermalAlarm(ext_data as i64))
+            }
             _ => Err(()),
-        }
+        }?;
+        Ok(LoggerEvent { timestamp, kind })
     }
 }
 
 type EventIndex = u16;
 
-// TODO: Maybe have a map of various event payload sizes?
 #[derive(Copy, Clone)]
 pub struct LoggerEvent {
     timestamp: i64,
@@ -189,12 +230,34 @@ impl LoggerEvent {
     pub fn timestamp(&self) -> Option<DateTime<Utc>> {
         DateTime::from_timestamp_micros(self.timestamp)
     }
+
+    pub fn as_bytes(&self) -> [u8; EVENT_LENGTH] {
+        let mut event_data = [0u8; EVENT_LENGTH];
+        LittleEndian::write_u16(&mut event_data[0..2], self.kind.into());
+        LittleEndian::write_i64(&mut event_data[2..10], self.timestamp);
+        let ext_data = &mut event_data[10..18];
+        match self.kind {
+            Event::SetThermalAlarm(alarm_time)
+            | Event::SetAudioAlarm(alarm_time)
+            | Event::Rp2040MissedAudioAlarm(alarm_time) => {
+                LittleEndian::write_i64(ext_data, alarm_time);
+            }
+            Event::LostFrames(data) => {
+                LittleEndian::write_u64(ext_data, data);
+            }
+            Event::ToldRpiToWake(data) => {
+                LittleEndian::write_u64(ext_data, u64::from(data));
+            }
+            _ => {}
+        }
+        event_data
+    }
 }
 pub const MAX_EVENTS_IN_LOGGER: u16 = 1280;
-const EVENT_CODE_LENGTH: u8 = 2;
-const EVENT_TIMESTAMP_LENGTH: u8 = 8;
-const EVENT_PAYLOAD_LENGTH: u8 = 8;
-const EVENT_LENGTH: u8 = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH;
+const EVENT_CODE_LENGTH: usize = 2;
+const EVENT_TIMESTAMP_LENGTH: usize = 8;
+const EVENT_PAYLOAD_LENGTH: usize = 8;
+const EVENT_LENGTH: usize = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH + EVENT_PAYLOAD_LENGTH;
 
 // 2043, 2044, 2045, 2046, 2047: event log
 // 2041, 2042: device config
@@ -204,6 +267,13 @@ const FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS
 pub struct EventLogger {
     next_event_index: Option<EventIndex>,
 }
+
+impl PartialEq for Event {
+    fn eq(&self, other: &Self) -> bool {
+        u16::from(*self) == u16::from(*other)
+    }
+}
+
 impl EventLogger {
     pub fn new(fs: &mut OnboardFlash) -> EventLogger {
         // Scan all the pages
@@ -221,6 +291,7 @@ impl EventLogger {
         if index < MAX_EVENTS_IN_LOGGER {
             next_free_event_index = Some(index);
         }
+
         if let Some(index) = next_free_event_index {
             info!(
                 "Init EventLogger: next free event logger slot at {}, slots available {}",
@@ -236,6 +307,7 @@ impl EventLogger {
         }
     }
 
+    #[allow(dead_code)]
     pub fn list(&self, fs: &mut OnboardFlash) {
         for (i, event_index) in self.event_range().enumerate() {
             let event = Self::get_event_at_index(event_index, fs);
@@ -245,30 +317,48 @@ impl EventLogger {
         }
     }
 
-    pub fn print_event(index: usize, event: &[u8; 18]) {
-        let kind = LittleEndian::read_u16(&event[0..2]);
-        if let Ok(kind) = Event::try_from(kind) {
-            let time = LittleEndian::read_i64(&event[2..10]);
-            let utc_time = DateTime::<Utc>::from_timestamp_micros(time).unwrap();
+    pub fn print_event(index: usize, event: &[u8; EVENT_LENGTH]) {
+        if let Ok(event) = LoggerEvent::try_from(event) {
+            let utc_time = DateTime::<Utc>::from_timestamp_micros(event.timestamp).unwrap();
             let year = utc_time.year();
             let month = utc_time.month();
             let day = utc_time.day();
             let hour = utc_time.hour();
             let minute = utc_time.minute();
             let second = utc_time.second();
+
             info!(
                 "Event #{}, kind {}, time {}/{}/{} {}:{}:{}",
-                index, kind, year, month, day, hour, minute, second
+                index, event.kind, year, month, day, hour, minute, second
             );
+            let payload_time = match event.kind {
+                Event::SetAudioAlarm(alarm_time) | Event::SetThermalAlarm(alarm_time) => {
+                    let utc_time = DateTime::<Utc>::from_timestamp_micros(alarm_time).unwrap();
+                    Some(utc_time)
+                }
+                _ => None,
+            };
+            if let Some(utc_time) = payload_time {
+                let year = utc_time.year();
+                let month = utc_time.month();
+                let day = utc_time.day();
+                let hour = utc_time.hour();
+                let minute = utc_time.minute();
+                let second = utc_time.second();
+                info!(
+                    "-- Alarm time {}/{}/{} {}:{}:{}",
+                    year, month, day, hour, minute, second
+                );
+            }
         } else {
-            warn!("Unknown event kind found on flash log {}", kind);
+            warn!("Unknown event kind found on flash log {:?}", event);
         }
     }
 
     pub fn get_event_at_index_old(
         event_index: EventIndex,
         fs: &mut OnboardFlash,
-    ) -> Option<[u8; 18]> {
+    ) -> Option<[u8; EVENT_LENGTH]> {
         // 4 partial writes per page, 64 pages per block.
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
         let page = ((event_index % 256) / 4) as PageIndex;
@@ -285,7 +375,10 @@ impl EventLogger {
         }
     }
 
-    pub fn get_event_at_index(event_index: EventIndex, fs: &mut OnboardFlash) -> Option<[u8; 18]> {
+    pub fn get_event_at_index(
+        event_index: EventIndex,
+        fs: &mut OnboardFlash,
+    ) -> Option<[u8; EVENT_LENGTH]> {
         // 4 partial writes per page, 64 pages per block.
         let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
         let page = ((event_index % 256) / 4) as PageIndex;
@@ -356,18 +449,15 @@ impl EventLogger {
         fs: &mut OnboardFlash,
     ) -> Option<LoggerEvent> {
         let event_indices = self.event_range();
-        let total_events = event_indices.end;
         let mut latest_event: Option<LoggerEvent> = None;
         for event_index in event_indices {
             let event_bytes = Self::get_event_at_index(event_index, fs);
             if let Some(event_bytes) = event_bytes {
-                let kind = LittleEndian::read_u16(&event_bytes[0..2]);
-                if let Ok(Event::OffloadedRecording) = Event::try_from(kind) {
-                    let timestamp = LittleEndian::read_i64(&event_bytes[2..10]);
-                    latest_event = Some(LoggerEvent {
-                        timestamp,
-                        kind: Event::OffloadedRecording,
-                    });
+                let event = LoggerEvent::try_from(&event_bytes);
+                if let Ok(event) = event
+                    && event.kind == event_type
+                {
+                    latest_event = Some(event);
                 }
             }
         }
@@ -385,27 +475,10 @@ impl EventLogger {
     pub fn log_event(&mut self, event: LoggerEvent, fs: &mut OnboardFlash) {
         if self.count() < MAX_EVENTS_IN_LOGGER {
             if let Some(next_event_index) = &mut self.next_event_index {
-                let mut event_data = [0u8; 18];
-                LittleEndian::write_u16(&mut event_data[0..2], event.kind.into());
-                LittleEndian::write_i64(&mut event_data[2..10], event.timestamp);
-                let ext_data = &mut event_data[10..18];
-                match event.kind {
-                    Event::SetThermalAlarm(alarm_time)
-                    | Event::SetAudioAlarm(alarm_time)
-                    | Event::Rp2040MissedAudioAlarm(alarm_time) => {
-                        LittleEndian::write_i64(ext_data, alarm_time);
-                    }
-                    Event::LostFrames(data) => {
-                        LittleEndian::write_u64(ext_data, data);
-                    }
-                    Event::ToldRpiToWake(data) => {
-                        LittleEndian::write_u64(ext_data, u64::from(data));
-                    }
-                    _ => {}
-                }
                 // Write to the end of the flash storage.
                 // We can do up to 4 partial page writes per page, so in a block of 64 pages we get 256 entries.
                 // We reserve 4 blocks at the end of the flash memory for events, so 1024 events, which should be plenty.
+                let event_data = event.as_bytes();
                 let event_index = *next_event_index;
                 let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
                 let page = ((event_index % 256) / 4) as u8;

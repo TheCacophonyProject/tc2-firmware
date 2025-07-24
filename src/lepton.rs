@@ -9,10 +9,9 @@ use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
 use crate::utils::any_as_u8_slice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
-use core::mem;
 use cortex_m::prelude::*;
 use defmt::{Format, trace};
-use defmt::{error, info, panic, warn};
+use defmt::{error, info, warn};
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
@@ -38,7 +37,7 @@ const LEPTON_BUSY: u16 = 0b001;
 const LEPTON_BOOT_MODE: u16 = 0b010; // For normal operation, this bit will be set to 1, indicating successful boot from internal ROM.
 const LEPTON_ADDRESS: u8 = 0x2a;
 
-const LEPTON_POWER_ON_REGISTER: LeptonRegister = lepton_register_val(0x0000);
+const _LEPTON_POWER_ON_REGISTER: LeptonRegister = lepton_register_val(0x0000);
 const LEPTON_STATUS_REGISTER: LeptonRegister = lepton_register_val(0x0002);
 const LEPTON_COMMAND_ID_REGISTER: LeptonRegister = lepton_register_val(0x0004);
 const LEPTON_DATA_LENGTH_REGISTER: LeptonRegister = lepton_register_val(0x0006);
@@ -68,7 +67,7 @@ const LEPTON_SUB_SYSTEM_SYS: u16 = 0b0000_0010_0000_0000;
 const LEPTON_SYS_PING_CAMERA: LeptonCommand = (0x0000, 0);
 const LEPTON_SYS_STATUS: LeptonCommand = (0x0004, 4);
 const LEPTON_SYS_GET_SERIAL: LeptonCommand = (0x0008, 4);
-const LEPTON_SYS_NUM_FRAMES_TO_AVERAGE: LeptonCommand = (0x0024, 2);
+const _LEPTON_SYS_NUM_FRAMES_TO_AVERAGE: LeptonCommand = (0x0024, 2);
 const LEPTON_SYS_FFC_STATUS: LeptonCommand = (0x0044, 2);
 const LEPTON_SYS_STATS: LeptonCommand = (0x002C, 4);
 const LEPTON_SYS_TELEMETRY_ENABLE_STATE: LeptonCommand = (0x0018, 2);
@@ -81,21 +80,21 @@ const LEPTON_VID_FOCUS_ENABLE_STATE: LeptonCommand = (0x000C, 2);
 const LEPTON_AGC_ENABLE_STATE: LeptonCommand = (0x0000, 2);
 const LEPTON_OEM_GPIO_MODE: LeptonCommand = (0x0054, 2);
 const LEPTON_OEM_GPIO_VSYNC_PHASE_DELAY: LeptonCommand = (0x0058, 2);
-const LEPTON_RAD_SPOT_METER_ROI: LeptonCommand = (0x00CC, 4);
+const _LEPTON_RAD_SPOT_METER_ROI: LeptonCommand = (0x00CC, 4);
 const LEPTON_RAD_ENABLE_STATE: LeptonCommand = (0x0010, 2);
 const LEPTON_RAD_TLINEAR_ENABLE_STATE: LeptonCommand = (0x00C0, 2);
-const LEPTON_OEM_REBOOT: LeptonCommand = (0x0040, 0);
+const _LEPTON_OEM_REBOOT: LeptonCommand = (0x0040, 0);
 const LEPTON_OEM_BAD_PIXEL_REPLACEMENT: LeptonCommand = (0x006C, 2);
 const LEPTON_OEM_CAMERA_SOFTWARE_REVISION: LeptonCommand = (0x0020, 4);
 const LEPTON_OEM_TEMPORAL_FILTER: LeptonCommand = (0x0070, 2);
 const LEPTON_OEM_COLUMN_NOISE_FILTER: LeptonCommand = (0x0074, 2);
 const LEPTON_OEM_PIXEL_NOISE_FILTER: LeptonCommand = (0x0078, 2);
-const LEP_OEM_VIDEO_OUTPUT_SOURCE: LeptonCommand = (0x002c, 2);
+const _LEP_OEM_VIDEO_OUTPUT_SOURCE: LeptonCommand = (0x002c, 2);
 const LEPTON_OEM_POWER_DOWN: LeptonCommand = (0x0000, 0);
 const LEPTON_OEM_VIDEO_OUTPUT_ENABLE: LeptonCommand = (0x0024, 2);
 
 // Should be able to just read into these automatically.
-const LEPTON_DATA_1_REGISTER: LeptonRegister = lepton_register_val(0x000A);
+// const LEPTON_DATA_1_REGISTER: LeptonRegister = lepton_register_val(0x000A);
 // const LEPTON_DATA_2_REGISTER: LeptonRegister = lepton_register_val(0x000C);
 // const LEPTON_DATA_3_REGISTER: LeptonRegister = lepton_register_val(0x000E);
 // const LEPTON_DATA_4_REGISTER: LeptonRegister = lepton_register_val(0x0010);
@@ -221,6 +220,8 @@ type PowerDown = Pin<Gpio28, FunctionSio<SioOutput>, PullDown>;
 type Reset = Pin<Gpio29, FunctionSio<SioOutput>, PullDown>;
 type ClkDisable = Pin<Gpio27, FunctionSio<SioOutput>, PullDown>;
 type MasterClk = Pin<Gpio26, FunctionSio<SioInput>, PullNone>;
+
+#[allow(dead_code)]
 pub struct LeptonModule {
     spi: Option<Spi<Enabled, SPI0, (SpiTx, SpiRx, SpiClk), 16>>,
     cs: Option<SpiCs>,
@@ -236,6 +237,7 @@ pub struct LeptonModule {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 enum FFCShutterMode {
     Manual = 0,
     Auto = 1,
@@ -243,6 +245,7 @@ enum FFCShutterMode {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 enum FFCTempLockoutState {
     Inactive = 0,
     High = 1,
@@ -272,6 +275,7 @@ impl From<u8> for FFCStatus {
 
 #[repr(C)]
 #[derive(PartialEq)]
+#[allow(dead_code)]
 enum LepSysEnable {
     Disable = 0,
     Enable = 1,
@@ -303,12 +307,6 @@ impl Default for FFCState {
             desired_ffc_temp_delta: 0,
             imminent_delay: 0,
         }
-    }
-}
-
-impl FFCState {
-    pub fn ffc_is_needed(&self) -> bool {
-        self.ffc_desired == LepSysEnable::Enable
     }
 }
 
@@ -430,21 +428,6 @@ impl LeptonModule {
         Ok(())
     }
 
-    fn setup_spot_meter_roi(&mut self) -> Result<bool, LeptonError> {
-        // Change spot meter ROI so we can get scene stats per frame
-        self.set_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_RAD,
-                LEPTON_RAD_SPOT_METER_ROI,
-                LeptonCommandType::Set,
-                true,
-            ),
-            //  [startRow, startCol, endRow, endCol]
-            //&[0, 0, 119, 159],
-            &[79, 59, 80, 60], // If this is set to anything but the default 2x2 pixels, we get visual glitches in the video feed :-/
-        )
-    }
-
     fn enable_post_processing(&mut self) -> Result<bool, LeptonError> {
         // This is probably the default post-processing settings on lepton startup,
         // but it doesn't hurt to set them anyway
@@ -523,18 +506,6 @@ impl LeptonModule {
         ))
     }
 
-    fn disable_t_linear(&mut self) -> Result<bool, LeptonError> {
-        self.set_attribute_i32(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_RAD,
-                LEPTON_RAD_TLINEAR_ENABLE_STATE,
-                LeptonCommandType::Set,
-                true,
-            ),
-            0,
-        )
-    }
-
     pub fn reset_spi(
         &mut self,
         resets: &mut RESETS,
@@ -585,7 +556,7 @@ impl LeptonModule {
                         return true;
                     }
                 }
-                Err(err) => {
+                Err(_) => {
                     return false;
                 }
             }
@@ -697,46 +668,6 @@ impl LeptonModule {
             ),
             ffc_struct_bytes,
         )
-    }
-
-    pub fn get_ffc_state(&mut self) -> Result<FFCState, LeptonError> {
-        match self.get_attribute(lepton_command(
-            LEPTON_SUB_SYSTEM_SYS,
-            LEPTON_SYS_FFC_SHUTTER_MODE,
-            LeptonCommandType::Get,
-            false,
-        )) {
-            Ok((state, _length)) => {
-                let struct_size = size_of::<FFCState>();
-                let mut ffc_state = [0u8; 20];
-                ffc_state.copy_from_slice(&state[0..struct_size]);
-                let ffc_state: FFCState = unsafe { mem::transmute(ffc_state) };
-                Ok(ffc_state)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    pub fn get_ffc_status(&mut self) -> Result<FFCStatus, LeptonError> {
-        match self.get_attribute(lepton_command(
-            LEPTON_SUB_SYSTEM_SYS,
-            LEPTON_SYS_FFC_STATUS,
-            LeptonCommandType::Get,
-            false,
-        )) {
-            Ok((state, length)) => {
-                let ffc_status = LittleEndian::read_u32(&state[..((length * 2) as usize)]);
-                let ffc_status: FFCStatus = match ffc_status {
-                    0 => FFCStatus::NeverCommanded,
-                    1 => FFCStatus::Imminent,
-                    2 => FFCStatus::InProgress,
-                    3 => FFCStatus::Done,
-                    _ => panic!("Unknown FFC Status {}", ffc_status),
-                };
-                Ok(ffc_status)
-            }
-            Err(err) => Err(err),
-        }
     }
 
     pub fn do_ffc(&mut self) -> Result<bool, LeptonError> {
@@ -852,26 +783,6 @@ impl LeptonModule {
             LeptonCommandType::Run,
             false,
         ))
-    }
-
-    pub fn reboot(&mut self) -> bool {
-        warn!("Rebooting lepton module");
-        let success = self.execute_command(lepton_command(
-            LEPTON_SUB_SYSTEM_OEM,
-            LEPTON_OEM_REBOOT,
-            LeptonCommandType::Run,
-            true,
-        ));
-        if success.is_err() {
-            warn!("Error rebooting lepton");
-        }
-
-        info!("Waiting 5 seconds");
-        self.timer.delay_ms(5000);
-        while let Err(e) = self.init() {
-            self.reboot();
-        }
-        success.is_ok()
     }
 
     pub fn is_awake(&self) -> bool {
@@ -1289,10 +1200,6 @@ pub struct SceneStats {
 pub enum TelemetryLocation {
     Header,
     Footer,
-}
-
-struct CentiK {
-    inner: u16,
 }
 
 pub struct LeptonPins {

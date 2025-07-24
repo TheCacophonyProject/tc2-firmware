@@ -1,8 +1,5 @@
 use crate::bsp::pac::Peripherals;
-use crate::cptv_encoder::FRAME_WIDTH;
-use crate::frame_processing::{
-    Core0Task, FrameBuffer, NUM_LEPTON_SEGMENTS, NUM_LINES_PER_LEPTON_SEGMENT, StaticFrameBuffer,
-};
+use crate::frame_processing::{Core0Task, FrameBuffer, StaticFrameBuffer};
 use crate::lepton::{FFCStatus, LeptonFirmwareInfo, LeptonModule, LeptonPins, init_lepton_module};
 use crate::lepton_telemetry::Telemetry;
 use crate::utils::restart;
@@ -19,10 +16,9 @@ use defmt::{info, warn};
 use fugit::{HertzU32, RateExtU32};
 use rp2040_hal::{Sio, Timer, Watchdog};
 
-pub type FramePacketData = [u8; FRAME_WIDTH];
-pub type FrameSegments = [[FramePacketData; NUM_LINES_PER_LEPTON_SEGMENT]; NUM_LEPTON_SEGMENTS];
-
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
+
+#[allow(dead_code)]
 fn go_dormant_until_next_vsync(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
@@ -41,6 +37,7 @@ fn go_dormant_until_next_vsync(
     }
 }
 
+#[allow(dead_code)]
 fn go_dormant_until_woken<T: PinId>(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     wake_pin: &mut Pin<T, FunctionSio<SioInput>, PullNone>,
@@ -61,13 +58,12 @@ fn go_dormant_until_woken<T: PinId>(
 
 pub fn lepton_core1_task(
     lepton_pins: LeptonPins,
-    mut watchdog: Watchdog,
+    watchdog: Watchdog,
     system_clock_freq: HertzU32,
     peripheral_clock_freq: HertzU32,
     rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
-    is_high_power_mode: bool,
     timer: Timer,
 ) -> ! {
     // This task runs on the second core, so we need to steal the peripherals.
@@ -118,10 +114,6 @@ pub fn lepton_core1_task(
     fifo.write_blocking(dsp_lepton_firmware);
 
     let result = fifo.read_blocking();
-    if result == Core0Task::RequestReset.into() {
-        info!("Got reset request before frame acquisition startup");
-        restart(&mut watchdog);
-    }
     defmt::assert_eq!(result, Core0Task::Ready.into());
     frame_acquisition_loop(
         rosc,
@@ -132,8 +124,34 @@ pub fn lepton_core1_task(
         static_frame_buffer_a,
         static_frame_buffer_b,
         watchdog,
-        is_high_power_mode,
     );
+}
+
+fn handle_message(message: u32, state: &mut FrameLoopState) -> bool {
+    if message == Core0Task::StartRecording.into() {
+        state.is_recording = true;
+    } else if message == Core0Task::EndRecording.into() {
+        state.recording_ended = true;
+    } else if message == Core0Task::ReadyToSleep.into() {
+        return true;
+    } else if message == Core0Task::FrameProcessingComplete.into() {
+        state.transferring_prev_frame = false;
+        state.prev_frame_needs_transfer = false;
+    } else if message == Core0Task::SafeToFfc.into() {
+        state.safe_to_execute_ffc = true;
+    } else if message == Core0Task::UnsafeToFfc.into() {
+        state.safe_to_execute_ffc = false;
+    }
+    false
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct FrameLoopState {
+    prev_frame_needs_transfer: bool,
+    safe_to_execute_ffc: bool,
+    transferring_prev_frame: bool,
+    recording_ended: bool,
+    is_recording: bool,
 }
 
 /// # Panics
@@ -149,7 +167,6 @@ pub fn frame_acquisition_loop(
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     mut watchdog: Watchdog,
-    is_high_power_mode: bool,
 ) -> ! {
     let mut selected_frame_buffer = 0;
     let mut frame_counter = 0u32;
@@ -168,10 +185,14 @@ pub fn frame_acquisition_loop(
     let mut valid_frame_current_segment_num = 0u16;
     let mut started_segment = false;
     let mut attempt = 1;
-    let mut transferring_prev_frame = false;
-    let mut is_recording = false;
-    let mut recording_ended = false;
-    let mut prev_frame_needs_transfer = false;
+
+    let mut state = FrameLoopState {
+        prev_frame_needs_transfer: false,
+        safe_to_execute_ffc: true,
+        transferring_prev_frame: false,
+        recording_ended: false,
+        is_recording: false,
+    };
 
     // Each frame has 4 equally sized segments.
     let last_segment_num_for_frame = 4;
@@ -186,7 +207,6 @@ pub fn frame_acquisition_loop(
     // Do FFC every 20 mins?
     let mut ffc_requested_frame = None;
     let mut ffc_pending_time = None;
-    let mut safe_to_execute_ffc = true;
     let mut seen_telemetry_revision = [0u8, 0u8];
     let mut times_telemetry_revision_stable = -1;
     let mut frames_seen = 0;
@@ -194,7 +214,7 @@ pub fn frame_acquisition_loop(
 
     // should not feed watchdog if we dont receive a message and are in low power mode
     'frame_loop: loop {
-        if got_sync || is_recording {
+        if got_sync || state.is_recording {
             watchdog.feed();
         }
         if got_sync {
@@ -205,8 +225,8 @@ pub fn frame_acquisition_loop(
         }
         if got_sync
             && current_segment_num > last_segment_num_for_frame
-            && !is_recording
-            && !transferring_prev_frame
+            && !state.is_recording
+            && !state.transferring_prev_frame
         {
             // Go to sleep, skip dummy segment
 
@@ -215,18 +235,20 @@ pub fn frame_acquisition_loop(
             //rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
             continue 'frame_loop;
         }
-        if !transferring_prev_frame && prev_frame_needs_transfer {
+        if !state.transferring_prev_frame && state.prev_frame_needs_transfer {
             // Initiate the transfer of the previous frame
             sio_fifo.write(Core0Task::ReceiveFrame.into());
             sio_fifo.write(selected_frame_buffer);
-            safe_to_execute_ffc = sio_fifo.read_blocking() == 1;
+            if let Some(message) = sio_fifo.read() {
+                handle_message(message, &mut state);
+            }
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
             } else {
                 selected_frame_buffer = 0;
             }
-            transferring_prev_frame = true;
-            prev_frame_needs_transfer = false;
+            state.transferring_prev_frame = true;
+            state.prev_frame_needs_transfer = false;
         }
 
         // Read the next frame
@@ -235,7 +257,6 @@ pub fn frame_acquisition_loop(
             // This is one scanline
             let packet = lepton.transfer(&mut scanline_buffer).unwrap();
             let packet_header = packet[0];
-            let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
             let is_discard_packet = packet_header & 0x0f00 == 0x0f00;
             if is_discard_packet {
                 continue 'scanline;
@@ -258,7 +279,7 @@ pub fn frame_acquisition_loop(
                     // Check if we need an FFC
                     if unverified_frame_counter == prev_frame_counter + 2
                         && ffc_requested_frame.is_none()
-                        && !is_recording
+                        && !state.is_recording
                         && telemetry.msec_on != 0
                         && (telemetry.time_at_last_ffc != 0 || initial_ffc.is_some())
                     {
@@ -371,7 +392,7 @@ pub fn frame_acquisition_loop(
                         LEPTON_SPI_CLOCK_FREQ.Hz(),
                         true,
                     );
-                    if !is_recording && initial_ffc.take().is_some() {
+                    if !state.is_recording && initial_ffc.take().is_some() {
                         let _success = lepton.do_ffc();
                     }
                     break 'scanline;
@@ -434,7 +455,7 @@ pub fn frame_acquisition_loop(
                 prev_segment_was_4 = is_last_segment;
                 if packet_id == last_packet_id_for_segment {
                     if is_last_segment {
-                        if safe_to_execute_ffc && ffc_requested_frame.take().is_some() {
+                        if state.safe_to_execute_ffc && ffc_requested_frame.take().is_some() {
                             info!("Requesting needed FFC");
                             match lepton.do_ffc() {
                                 Ok(success) => {
@@ -451,7 +472,6 @@ pub fn frame_acquisition_loop(
                             }
                         } else if initial_ffc.take().is_some() {
                             info!("Requesting initial FFC");
-                            let success = lepton.do_ffc();
                             if let Err(e) = lepton.do_ffc() {
                                 initial_ffc = Some(());
                                 info!("Failed to request FFC {:?}", e);
@@ -468,13 +488,13 @@ pub fn frame_acquisition_loop(
                         }
 
                         attempt = 0;
-                        prev_frame_needs_transfer = true;
+                        state.prev_frame_needs_transfer = true;
 
                         if let Some(last_frame_seen) = last_frame_seen {
                             if got_sync && last_frame_seen != frame_counter - 1 {
                                 warn!("Lost sync");
                                 got_sync = false;
-                                prev_frame_needs_transfer = false;
+                                state.prev_frame_needs_transfer = false;
                             }
                         }
                         last_frame_seen = Some(frame_counter);
@@ -523,7 +543,11 @@ pub fn frame_acquisition_loop(
                             let success = lepton.do_ffc();
                             match success {
                                 Ok(success) => {
-                                    info!("Success requesting FFC");
+                                    if success {
+                                        info!("Success requesting FFC");
+                                    } else {
+                                        info!("Failed requesting FFC");
+                                    }
                                 }
                                 Err(e) => {
                                     initial_ffc = Some(());
@@ -544,39 +568,32 @@ pub fn frame_acquisition_loop(
                 continue 'scanline;
             }
             prev_packet_id = packet_id;
-
-            'message_loop: loop {
-                match sio_fifo.read() {
-                    None => break 'message_loop,
-                    Some(message) => {
-                        if message == Core0Task::StartRecording.into() {
-                            is_recording = true;
-                        } else if message == Core0Task::EndRecording.into() {
-                            recording_ended = true;
-                        } else if message == Core0Task::ReadyToSleep.into() {
-                            info!("Powering down lepton module");
-                            lepton.power_down_sequence();
-                            sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
-                        } else if message == Core0Task::FrameProcessingComplete.into() {
-                            transferring_prev_frame = false;
-                            prev_frame_needs_transfer = false;
-                        } else if message == Core0Task::RequestReset.into() {
-                            warn!("Request reset");
-                            restart(&mut watchdog);
+            if state.transferring_prev_frame {
+                'message_loop: loop {
+                    match sio_fifo.read() {
+                        None => break 'message_loop,
+                        Some(message) => {
+                            let needs_restart = handle_message(message, &mut state);
+                            if needs_restart {
+                                info!("Powering down lepton module");
+                                lepton.power_down_sequence();
+                                sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
+                                warn!("Request reset");
+                                restart(&mut watchdog);
+                            }
                         }
                     }
                 }
             }
         }
-
         // This block prevents a frame sync issue when we *end* recording
 
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
-        if recording_ended {
+        if state.recording_ended {
             // && !transferring_prev_frame && current_segment_num == 3 {
-            is_recording = false;
-            recording_ended = false;
+            state.is_recording = false;
+            state.recording_ended = false;
         }
         // if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
         //     rosc =

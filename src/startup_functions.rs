@@ -1,12 +1,13 @@
 use crate::attiny_rtc_i2c::{
     AlarmMode, MainI2C, RecordingMode, RecordingRequestType, ScheduledAlarmTime, Tc2AgentState,
 };
-use crate::audio_task::MAX_INTERVAL_BETWEEN_AUDIO_RECORDINGS;
+use crate::audio_task::AUDIO_DEV_MODE;
 use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig};
 use crate::event_logger::{Event, EventLogger, LoggerEvent, WakeReason};
 use crate::ext_spi_transfers::ExtSpiTransfers;
-use crate::onboard_flash::OnboardFlash;
+use crate::frame_processing::THERMAL_DEV_MODE;
+use crate::onboard_flash::{FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
@@ -17,7 +18,6 @@ use crate::utils::restart;
 use chrono::{DateTime, Duration, NaiveTime, Timelike, Utc};
 use cortex_m::prelude::*;
 use defmt::{error, info, warn};
-use fugit::HertzU32;
 use picorand::{PicoRandGenerate, RNG, WyRand};
 use rp2040_hal::pac::DMA;
 use rp2040_hal::{Timer, Watchdog};
@@ -27,12 +27,11 @@ pub fn get_device_config(
     i2c: &mut MainI2C,
     timer: Timer,
     pi_spi: &mut ExtSpiTransfers,
-    system_clock_freq_hz: HertzU32,
     resets: &mut RESETS,
     dma: &mut DMA,
     watchdog: &mut Watchdog,
     event_count: u16,
-) -> Result<(DeviceConfig, bool), ()> {
+) -> Result<(DeviceConfig, bool, bool), ()> {
     let device_config: Option<DeviceConfig> = DeviceConfig::load_existing_config_from_flash(fs);
     if let Some(device_config) = &device_config {
         info!("Existing config {:#?}", device_config.config());
@@ -50,12 +49,15 @@ pub fn get_device_config(
             pi_spi,
             resets,
             dma,
-            system_clock_freq_hz,
             device_config,
             event_count,
         );
     if let Some(device_config) = device_config {
-        Ok((device_config, prioritise_frame_preview))
+        Ok((
+            device_config,
+            prioritise_frame_preview,
+            device_config_was_updated,
+        ))
     } else {
         error!("Couldn't get config");
         Err(())
@@ -105,8 +107,9 @@ pub fn get_synced_time(
     time
 }
 
+// Make sure the alarm exists, otherwise reschedule.
 #[allow(clippy::ref_option)]
-pub fn get_or_schedule_next_alarm(
+pub fn validate_scheduled_alarm(
     config: &DeviceConfig,
     fs: &mut OnboardFlash,
     time: &SyncedDateTime,
@@ -114,53 +117,50 @@ pub fn get_or_schedule_next_alarm(
     events: &mut EventLogger,
     scheduled_alarm: &Option<ScheduledAlarmTime>,
     watchdog: &mut Watchdog,
-) -> bool {
-    // if audio alarm is set check it's within the next 60 minutes
-    // and before or on thermal window start
-    let mut missed_audio_alarm = false;
-    if let Some(scheduled_alarm) = scheduled_alarm
-        && scheduled_alarm.is_audio_alarm()
-        && config.records_audio_and_thermal()
-    {
-        let synced_time = time.date_time();
-        let alarm_time = scheduled_alarm.time();
-        let until_alarm = (alarm_time - time.date_time()).num_minutes();
-
-        // TODO: Handle different audio modes differently.
-        if alarm_time - synced_time <= MAX_INTERVAL_BETWEEN_AUDIO_RECORDINGS {
-            if !alarm_still_valid_for_thermal_window(&alarm_time, &synced_time, config) {
-                // if window time changed and alarm is after rec window start
-                info!("Rescheduling as alarm is after window start");
-                // Reschedule a new alarm
-                if let Ok(next_alarm) = schedule_next_recording(time, i2c, fs, events, config) {
-                    info!("Setting a pending recording alarm");
-                    restart(watchdog);
-                } else {
-                    error!("Couldn't schedule alarm");
-                }
+) {
+    if scheduled_alarm.is_none() {
+        warn!("Scheduled alarm is None, rescheduling");
+        // We should always have a next alarm: schedule new alarm and restart
+        match schedule_next_recording(time, i2c, fs, events, config) {
+            Ok(next_alarm) => {
+                info!("Setting a pending recording alarm: {:?}", next_alarm);
             }
-        } else {
+            Err(e) => {
+                error!("Couldn't schedule alarm: {}", e);
+            }
+        }
+        restart(watchdog);
+    }
+
+    let scheduled_alarm = scheduled_alarm.as_ref().unwrap();
+    if scheduled_alarm.has_triggered() {
+        info!("Scheduled alarm triggered, scheduling next alarm");
+        match schedule_next_recording(time, i2c, fs, events, config) {
+            Ok(next_alarm) => {
+                info!("Setting a pending recording alarm: {:?}", next_alarm);
+            }
+            Err(e) => {
+                error!("Couldn't schedule alarm: {}", e);
+                restart(watchdog);
+            }
+        }
+    }
+
+    if scheduled_alarm.is_audio_alarm() && scheduled_alarm.has_triggered() {
+        let alarm_time = scheduled_alarm.date_time();
+        let until_alarm = alarm_time - time.date_time();
+        if until_alarm.num_minutes() <= -1 {
             warn!(
                 "Missed alarm was scheduled for {} minutes ago",
-                -until_alarm
+                -until_alarm.num_minutes()
             );
             events.log(
                 Event::Rp2040MissedAudioAlarm(alarm_time.timestamp_micros()),
                 time,
                 fs,
             );
-            // should take recording now
-            missed_audio_alarm = true;
-        }
-    } else if config.records_audio_and_thermal() {
-        if schedule_next_recording(time, i2c, fs, events, config).is_ok() {
-            info!("Setting a pending recording alarm");
-            restart(watchdog);
-        } else {
-            error!("Couldn't schedule alarm");
         }
     }
-    missed_audio_alarm
 }
 
 #[allow(clippy::too_many_lines)]
@@ -193,26 +193,42 @@ pub fn maybe_offload_files_and_events_on_startup(
 
     let has_files_to_offload = fs.has_recordings_to_offload();
     if has_files_to_offload {
+        let blocks_used = fs.first_used_block_index.unwrap()..fs.last_used_block_index.unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let num_blocks_used = blocks_used.len() as u16;
+        let space_used = f32::from(num_blocks_used * 2048 * 64) / 1024.0 / 1024.0;
         info!(
-            "First used block {:?}, last used {:?}",
-            fs.first_used_block_index, fs.last_used_block_index
+            "{} files found.  Flash blocks used {:?} space used {}MB",
+            fs.num_files_in_initial_scan, blocks_used, space_used
         );
     }
     let has_events_to_offload = events.has_events_to_offload();
-    let last_recording_was_user_requested = fs.last_recording_was_user_requested();
+    if has_events_to_offload {
+        info!("There are {} event(s) to offload", events.count());
+    }
+    let last_recording_was_user_requested = fs.last_recording_was_user_requested(watchdog);
+    if last_recording_was_user_requested {
+        info!("Previous recording was user requested.",);
+    }
     let rpi_is_awake = i2c
         .get_camera_state()
         .is_ok_and(|state| state.pi_is_waking_or_awake())
         && i2c
             .get_tc2_agent_state()
             .is_ok_and(|state| state.is_ready());
+
+    if rpi_is_awake {
+        info!("rPi is awake and ready");
+    }
+
     let is_inside_thermal_recording_window =
         config.time_is_in_configured_recording_window(&time.date_time());
 
-    info!(
-        "Inside recording window? {}",
-        is_inside_thermal_recording_window
-    );
+    if is_inside_thermal_recording_window {
+        info!("Inside recording window.",);
+    } else {
+        info!("Outside recording window",);
+    }
 
     let is_outside_thermal_recording_window = !is_inside_thermal_recording_window;
     let records_audio = config.audio_mode() != AudioMode::Disabled;
@@ -230,12 +246,6 @@ pub fn maybe_offload_files_and_events_on_startup(
     let mut offload_wake_reason = WakeReason::Unknown;
     let mut should_offload = false;
 
-    if has_files_to_offload {
-        info!("Onboard flash has files to offload");
-    }
-    if has_events_to_offload {
-        info!("There are {} event(s) to offload", events.count());
-    }
     if last_recording_was_user_requested {
         if !rpi_is_awake {
             warn!("Last recording was user requested, but rPi is somehow not awake");
@@ -243,9 +253,7 @@ pub fn maybe_offload_files_and_events_on_startup(
         info!("Last recording was user requested, offload immediately");
     }
 
-    // Also
-    // fs.last_recording_was_status()
-    let end_of_thermal_window = fs.last_recorded_file_is_cptv()
+    let end_of_thermal_window = fs.file_types_found.has_type(FileType::CptvShutdown)
         && !last_recording_was_user_requested
         && is_outside_thermal_recording_window;
 
@@ -277,7 +285,10 @@ pub fn maybe_offload_files_and_events_on_startup(
         should_offload = true;
         offload_wake_reason = WakeReason::OffloadTestRecording;
     }
-    if rpi_is_awake && recording_mode.record_audio() {
+    if rpi_is_awake
+        && recording_mode.record_audio()
+        && (AUDIO_DEV_MODE || config.use_high_power_mode())
+    {
         // Opportunistically offload recordings anyway,
         // since the rpi is on (maybe in high power mode)
         offload_wake_reason = WakeReason::OpportunisticOffload;
@@ -368,6 +379,7 @@ fn duration_since_prev_offload_greater_than_24hrs(
     duration_since_prev_offload > Duration::hours(24)
 }
 
+/*
 fn power_down_or_restart(
     alarm_date_time: Option<DateTime<Utc>>,
     time: &SyncedDateTime,
@@ -447,6 +459,8 @@ fn power_down_or_restart(
     }
 }
 
+ */
+
 #[allow(clippy::too_many_lines)]
 pub fn schedule_next_recording(
     time: &SyncedDateTime,
@@ -454,7 +468,7 @@ pub fn schedule_next_recording(
     fs: &mut OnboardFlash,
     events: &mut EventLogger,
     config: &DeviceConfig,
-) -> Result<DateTime<Utc>, ()> {
+) -> Result<ScheduledAlarmTime, &'static str> {
     // FIXME: Meaning of returned result seems inconsistent
     let mut wakeup: DateTime<Utc>;
     let seed: u64;
@@ -462,42 +476,37 @@ pub fn schedule_next_recording(
 
     if config.audio_seed() > 0 {
         wakeup = if let Some(time) = current_time
-            .with_time(NaiveTime::from_hms_opt(0, 0, 0).expect("Invalid time"))
+            .with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
             .latest()
         {
             time
         } else {
-            error!("Failed to clamp current time to midnight");
-            return Err(());
+            return Err("Failed to clamp current time to midnight");
         };
-        let Ok(ts_millis) = u64::try_from(wakeup.timestamp_millis()) else {
-            error!("Failed to convert wakeup timestamp milliseconds to u64");
-            return Err(());
-        };
-
+        let ts_millis = u64::try_from(wakeup.timestamp_millis())
+            .map_err(|_| "Failed to convert wakeup timestamp milliseconds to u64")?;
         seed = u64::wrapping_add(ts_millis, u64::from(config.config().audio_seed));
     } else {
-        let Ok(ts_seconds) = u64::try_from(time.date_time().timestamp()) else {
-            error!("Failed to convert current_time timestamp to u64");
-            return Err(());
-        };
+        let ts_seconds = u64::try_from(current_time.timestamp())
+            .map_err(|_| "Failed to convert current_time timestamp to u64")?;
 
         seed = ts_seconds;
         wakeup = current_time;
     }
     let mut rng = RNG::<WyRand, u16>::new(seed);
     let r_max: u16 = u16::MAX;
+    // Tuned to average 32 recordings per day with a ratio of 1:3 short to long pauses.
     let short_chance: u16 = r_max / 4;
-    let short_pause: i64 = 2 * 60;
-    let short_window: i64 = 5 * 60;
-    let long_pause: i64 = 40 * 60;
-    let long_window: i64 = 20 * 60;
+    let short_pause: i64 = 3 * 59;
+    let short_window: i64 = 5 * 59;
+    let long_pause: i64 = 43 * 59;
+    let long_window: i64 = 25 * 60;
 
     // If a seed is set, always start alarm from 0am to keep consistent across devices.
     // So will need to generate numbers until the alarm is valid
     while wakeup <= current_time {
         let r = rng.generate();
-        let wake_in = if crate::audio_task::DEV_MODE {
+        let wake_in = if AUDIO_DEV_MODE {
             120
         } else if r <= short_chance {
             short_pause + (i64::from(r) * short_window) / i64::from(short_chance)
@@ -520,18 +529,34 @@ pub fn schedule_next_recording(
             );
             if wakeup >= start {
                 if start < current_time {
-                    if let AudioMode::AudioAndThermal = audio_mode {
+                    info!("Audio mode {}", audio_mode);
+                    if audio_mode == AudioMode::AudioAndThermal {
                         // audio recording inside recording window
                         info!("Scheduling audio inside thermal window");
-                    } else {
-                        // FIXME: Seems like we should still schedule an audio recording
-                        //  if we're in audioAndThermal mode?
-                        info!("Already in recording window so restart now");
-                        return Err(());
+                    } else if audio_mode == AudioMode::AudioOrThermal {
+                        if config.is_continous_recorder() {
+                            info!("Setting wake up to be start of next thermal recording window");
+                            if THERMAL_DEV_MODE {
+                                wakeup = current_time + Duration::minutes(3);
+                            } else {
+                                wakeup = config
+                                    .next_recording_window_start(&current_time)
+                                    .expect("Invalid next recording window");
+                            }
+                            alarm_mode = AlarmMode::Thermal;
+                        } else {
+                            // AudioOrThermal mode. Append audio wakeup to end of recording window.
+                            wakeup = end + (wakeup - current_time);
+                            alarm_mode = AlarmMode::Audio;
+                        }
                     }
                 } else {
                     info!("Setting wake up to be start of next thermal recording window");
-                    wakeup = start;
+                    if THERMAL_DEV_MODE {
+                        wakeup = current_time + Duration::minutes(3);
+                    } else {
+                        wakeup = start;
+                    }
                     alarm_mode = AlarmMode::Thermal;
                 }
             }
@@ -540,6 +565,7 @@ pub fn schedule_next_recording(
     i2c.set_wakeup_alarm(&wakeup, alarm_mode, time)
         .map_err(|e| {
             error!("Failed to set wakeup alarm: {}", e);
+            e
         })?;
     if alarm_mode == AlarmMode::Audio {
         events.log(Event::SetAudioAlarm(wakeup.timestamp_micros()), time, fs);
@@ -547,39 +573,20 @@ pub fn schedule_next_recording(
         events.log(Event::SetThermalAlarm(wakeup.timestamp_micros()), time, fs);
     }
 
-    Ok(wakeup)
+    Ok(ScheduledAlarmTime {
+        time: wakeup,
+        mode: alarm_mode,
+        already_triggered: false,
+    })
 }
 
-pub fn alarm_still_valid_for_thermal_window(
-    alarm: &DateTime<Utc>,
-    now: &DateTime<Utc>,
-    config: &DeviceConfig,
-) -> bool {
-    // config has changed so if not in audio-only mode check that
-    // the alarm is still going to trigger on recording window start
-    if !config.is_audio_only_device() {
-        // FIXME: Handle both types of audio+thermal
-        return if let Ok((start, end)) = config.next_or_current_recording_window(now) {
-            // alarm before start or we are in recording window
-            *alarm <= start || *now >= start
-        } else {
-            false
-        };
-    }
-    true
-}
-
-#[allow(clippy::ref_option)]
 pub fn work_out_recording_mode(
-    scheduled_recording: &Option<ScheduledAlarmTime>,
+    scheduled_alarm: &ScheduledAlarmTime,
     prioritise_frame_preview: bool,
     i2c: &mut MainI2C,
     config: &DeviceConfig,
     time: &SyncedDateTime,
 ) -> RecordingMode {
-    // TODO: Check if pi is powering on, and if it is, wait for it.  Maybe not in this function tho?
-    //  If config.high_power_mode() and the pi is not awake, always wake it?
-
     let pi_is_awake = i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_on());
     let tc2_agent_state = if pi_is_awake {
         i2c.get_tc2_agent_state().unwrap_or_default()
@@ -605,36 +612,29 @@ pub fn work_out_recording_mode(
     Otherwise, we go to audio mode but don't record?  Or we go back to sleep if we're not in the
     thermal window, and the pi isn't on?
      */
-
     if pi_is_asleep {
-        if let Some(scheduled_alarm) = scheduled_recording {
-            if scheduled_alarm.has_triggered() {
-                // We woke with an alarm trigger for a scheduled recording.
-                if config.is_audio_device() && scheduled_alarm.is_audio_alarm() {
-                    return RecordingMode::Audio(RecordingRequestType::rp2040_scheduled_recording());
-                } else if !is_audio_only_device && scheduled_alarm.is_thermal_alarm() {
-                    return RecordingMode::Thermal(
-                        RecordingRequestType::rp2040_scheduled_recording(),
-                    );
-                }
+        if scheduled_alarm.has_triggered() {
+            // We woke with an alarm trigger for a scheduled recording.
+            if config.is_audio_device() && scheduled_alarm.is_audio_alarm() {
+                return RecordingMode::Audio(RecordingRequestType::rp2040_scheduled_recording());
+            } else if !is_audio_only_device && scheduled_alarm.is_thermal_alarm() {
+                return RecordingMode::Thermal(RecordingRequestType::rp2040_scheduled_recording());
             }
-            // We don't know why were woken up, but we don't need to make a recording.
         }
+        // We don't know why were woken up, but we don't need to make a recording.
+        // We could have been woken by user action, and the pi is currently booting,
+        // but in that case we'll get restarted when tc2-agent starts.
         RecordingMode::None
     } else {
         // rPi is awake, and we could have been woken up for various reasons.
-        if let Some(scheduled_alarm) = scheduled_recording {
-            // FIXME: In both branches, we just check to see if the alarm has triggered to see if we need to restart into a diff mode,
-            //  rather than checking time offsets
-            if scheduled_alarm.has_triggered() {
-                // We woke with an alarm trigger for a scheduled recording.
-                if config.is_audio_device() && scheduled_alarm.is_audio_alarm() {
-                    return RecordingMode::Audio(RecordingRequestType::rp2040_scheduled_recording());
-                } else if !is_audio_only_device && scheduled_alarm.is_thermal_alarm() {
-                    return RecordingMode::Thermal(
-                        RecordingRequestType::rp2040_scheduled_recording(),
-                    );
-                }
+        // FIXME: In both branches, we just check to see if the alarm has triggered to see if we need to restart into a diff mode,
+        //  rather than checking time offsets
+        if scheduled_alarm.has_triggered() {
+            // We woke with an alarm trigger for a scheduled recording.
+            if config.is_audio_device() && scheduled_alarm.is_audio_alarm() {
+                return RecordingMode::Audio(RecordingRequestType::rp2040_scheduled_recording());
+            } else if !is_audio_only_device && scheduled_alarm.is_thermal_alarm() {
+                return RecordingMode::Thermal(RecordingRequestType::rp2040_scheduled_recording());
             }
         }
         // No scheduled recording or scheduled recording hasn't triggered yet,
