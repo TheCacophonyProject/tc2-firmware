@@ -231,7 +231,6 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
 
     let is_outside_thermal_recording_window = !is_inside_thermal_recording_window;
-    let records_audio = config.audio_mode() != AudioMode::Disabled;
     let is_too_full_to_record_in_current_mode = match recording_mode {
         RecordingMode::Audio(mode) => fs.is_too_full_to_start_new_audio_recordings(&mode),
         RecordingMode::Thermal(_) => fs.is_too_full_to_start_new_cptv_recordings(),
@@ -242,7 +241,6 @@ pub fn maybe_offload_files_and_events_on_startup(
         warn!("Too full to record in current mode");
     }
 
-    let is_old_file_system = fs.file_start_block_index.is_none();
     let mut offload_wake_reason = WakeReason::Unknown;
     let mut should_offload = false;
 
@@ -273,10 +271,6 @@ pub fn maybe_offload_files_and_events_on_startup(
             offload_wake_reason = WakeReason::AudioTooFull;
         }
     }
-    if is_old_file_system {
-        should_offload = true;
-        offload_wake_reason = WakeReason::Unknown;
-    }
     if events.is_nearly_full() {
         should_offload = true;
         offload_wake_reason = WakeReason::EventsTooFull;
@@ -296,7 +290,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
     let should_offload = if !should_offload && has_files_to_offload {
         offload_wake_reason = WakeReason::ThermalOffloadAfter24Hours;
-        duration_since_prev_offload_greater_than_24hrs(events, fs, time)
+        duration_since_prev_offload_greater_than_23hrs(events, fs, time)
     } else {
         should_offload
     };
@@ -362,7 +356,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
 }
 
-fn duration_since_prev_offload_greater_than_24hrs(
+fn duration_since_prev_offload_greater_than_23hrs(
     events: &mut EventLogger,
     fs: &mut OnboardFlash,
     time: &SyncedDateTime,
@@ -376,7 +370,7 @@ fn duration_since_prev_offload_greater_than_24hrs(
                     time.date_time() - date_time_utc
                 })
         });
-    duration_since_prev_offload > Duration::hours(24)
+    duration_since_prev_offload > Duration::hours(23)
 }
 
 /*
@@ -563,9 +557,8 @@ pub fn schedule_next_recording(
         }
     }
     i2c.set_wakeup_alarm(&wakeup, alarm_mode, time)
-        .map_err(|e| {
+        .inspect_err(|e| {
             error!("Failed to set wakeup alarm: {}", e);
-            e
         })?;
     if alarm_mode == AlarmMode::Audio {
         events.log(Event::SetAudioAlarm(wakeup.timestamp_micros()), time, fs);
@@ -585,7 +578,6 @@ pub fn work_out_recording_mode(
     prioritise_frame_preview: bool,
     i2c: &mut MainI2C,
     config: &DeviceConfig,
-    time: &SyncedDateTime,
 ) -> RecordingMode {
     let pi_is_awake = i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_on());
     let tc2_agent_state = if pi_is_awake {
@@ -594,14 +586,10 @@ pub fn work_out_recording_mode(
         Tc2AgentState::default()
     };
     let tc2_agent_ready = tc2_agent_state.is_ready();
-    let test_recording_requested = tc2_agent_state.requested_audio_mode();
     let pi_is_asleep = !(pi_is_awake && tc2_agent_ready);
     let is_audio_only_device =
         config.is_audio_only_device() || i2c.check_if_is_audio_device().unwrap_or(false);
-    // FIXME: Probably should clear mode flags after a successful test recording?
-    if i2c.tc2_agent_clear_mode_flags().is_err() {
-        error!("Failed to clear recording mode flags");
-    }
+    let records_thermal = !is_audio_only_device;
     /*
     We want to record audio if any of:
     a) we were woken by an audio alarm AND config still has us as an audio device
@@ -616,9 +604,9 @@ pub fn work_out_recording_mode(
         if scheduled_alarm.has_triggered() {
             // We woke with an alarm trigger for a scheduled recording.
             if config.is_audio_device() && scheduled_alarm.is_audio_alarm() {
-                return RecordingMode::Audio(RecordingRequestType::rp2040_scheduled_recording());
+                return RecordingMode::Audio(RecordingRequestType::scheduled_recording());
             } else if !is_audio_only_device && scheduled_alarm.is_thermal_alarm() {
-                return RecordingMode::Thermal(RecordingRequestType::rp2040_scheduled_recording());
+                return RecordingMode::Thermal(RecordingRequestType::scheduled_recording());
             }
         }
         // We don't know why were woken up, but we don't need to make a recording.
@@ -627,46 +615,38 @@ pub fn work_out_recording_mode(
         RecordingMode::None
     } else {
         // rPi is awake, and we could have been woken up for various reasons.
-        // FIXME: In both branches, we just check to see if the alarm has triggered to see if we need to restart into a diff mode,
-        //  rather than checking time offsets
         if scheduled_alarm.has_triggered() {
             // We woke with an alarm trigger for a scheduled recording.
             if config.is_audio_device() && scheduled_alarm.is_audio_alarm() {
-                return RecordingMode::Audio(RecordingRequestType::rp2040_scheduled_recording());
+                return RecordingMode::Audio(RecordingRequestType::scheduled_recording());
             } else if !is_audio_only_device && scheduled_alarm.is_thermal_alarm() {
-                return RecordingMode::Thermal(RecordingRequestType::rp2040_scheduled_recording());
+                return RecordingMode::Thermal(RecordingRequestType::scheduled_recording());
             }
         }
         // No scheduled recording or scheduled recording hasn't triggered yet,
         // but that's okay, we'll go into the thermal branch and start serving frames to the rPi,
         // as long as we're not an audio-only device.
 
-        // FIXME: Do we need to deal with prioritise frames here, or would we expect the pi to just
-        //  restart us in thermal mode if needed?
-
-        if config.is_audio_device() && tc2_agent_state.test_audio_recording_requested() {
+        if prioritise_frame_preview {
+            warn!("Prioritising frame preview mode");
+            RecordingMode::None
+        } else if config.is_audio_device() && tc2_agent_state.test_audio_recording_requested() {
             let recording_request_type = if tc2_agent_state.short_test_audio_recording_requested() {
-                RecordingRequestType::short_test_recording()
+                RecordingRequestType::test_recording(60)
             } else {
-                RecordingRequestType::long_test_recording()
+                RecordingRequestType::test_recording(60 * 5)
             };
             RecordingMode::Audio(recording_request_type)
-        } else if !is_audio_only_device && tc2_agent_state.test_thermal_recording_requested() {
+        } else if records_thermal && tc2_agent_state.test_thermal_recording_requested() {
             let recording_request_type = if tc2_agent_state.short_test_thermal_recording_requested()
             {
-                RecordingRequestType::short_test_recording()
+                RecordingRequestType::test_recording(10)
             } else {
-                RecordingRequestType::long_test_recording()
+                RecordingRequestType::test_recording(60)
             };
-            return RecordingMode::Thermal(recording_request_type);
-        } else if !is_audio_only_device && tc2_agent_state.requested_thermal_mode() {
-            return RecordingMode::Thermal(RecordingRequestType::tc2_agent_scheduled_recording());
-        } else if config.is_audio_device() && tc2_agent_state.requested_audio_mode() {
-            return RecordingMode::Audio(RecordingRequestType::tc2_agent_scheduled_recording());
-        } else if !is_audio_only_device {
-            RecordingMode::Thermal(RecordingRequestType::rp2040_scheduled_recording())
+            RecordingMode::Thermal(recording_request_type)
         } else {
-            return RecordingMode::None;
+            RecordingMode::None
         }
     }
 }

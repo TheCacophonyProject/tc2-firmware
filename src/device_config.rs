@@ -92,7 +92,6 @@ impl DeviceConfigInner {
         self.audio_mode != AudioMode::Disabled
     }
 
-    #[allow(dead_code)]
     pub fn is_audio_only_device(&self) -> bool {
         self.audio_mode == AudioMode::AudioOnly
     }
@@ -102,9 +101,9 @@ impl DeviceConfigInner {
         date_time_utc: &chrono::DateTime<Utc>,
         window: Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
     ) -> bool {
-        if self.is_continuous_recorder() {
-            // info!("Continuous recording mode enabled");
-            return true;
+        if self.is_audio_only_device() {
+            // Audio only devices are never in the recording window.
+            return false;
         }
         let start_time;
         let end_time;
@@ -425,7 +424,7 @@ impl DeviceConfig {
     }
 
     pub fn is_audio_only_device(&self) -> bool {
-        self.config_inner.is_audio_device()
+        self.config_inner.is_audio_only_device()
     }
 
     pub fn audio_seed(&self) -> u32 {
@@ -509,6 +508,9 @@ impl DeviceConfig {
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
     ) -> bool {
+        if self.is_continous_recorder() {
+            return true;
+        }
         self.time_is_in_recording_window(date_time_utc, None)
     }
 

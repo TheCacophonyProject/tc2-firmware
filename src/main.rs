@@ -41,6 +41,7 @@ use crate::startup_functions::{
     get_device_config, get_synced_time, maybe_offload_files_and_events_on_startup,
     validate_scheduled_alarm, work_out_recording_mode,
 };
+use crate::sub_tasks::FormattedTime;
 use crate::utils::{extend_lifetime_generic_mut, restart};
 use bsp::hal::Timer;
 use bsp::hal::watchdog::Watchdog;
@@ -53,6 +54,7 @@ use chrono::{Datelike, Duration, Timelike, Utc};
 use cortex_m::asm::nop;
 use defmt::{assert, assert_eq, error, info, warn};
 use defmt_rtt as _;
+use embedded_hal::delay::DelayNs;
 use fugit::{ExtU32, RateExtU32};
 use panic_probe as _;
 use rp2040_hal::I2C;
@@ -98,7 +100,7 @@ fn main() -> ! {
     assert!(system_clock_freq.to_Hz() / 1_000_000 <= u32::from(u8::MAX));
     #[allow(clippy::cast_possible_truncation)]
     watchdog.enable_tick_generation((system_clock_freq.to_Hz() / 1_000_000) as u8);
-    let timer: Timer = Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
+    let mut timer: Timer = Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
     let sio = Sio::new(peripherals.SIO);
     let pins = rp2040_hal::gpio::Pins::new(
         peripherals.IO_BANK0,
@@ -196,9 +198,6 @@ fn main() -> ! {
 
     let mut events = EventLogger::new(&mut fs);
     let time = get_synced_time(&mut i2c, &mut events, &mut fs, &mut watchdog, timer).unwrap();
-
-    //let _ = i2c.clear_and_disable_alarm(&time);
-
     let dc_result = get_device_config(
         &mut fs,
         &mut i2c,
@@ -237,8 +236,10 @@ fn main() -> ! {
         if scheduled_alarm.date_time().hour() != time.date_time().hour()
             || scheduled_alarm.date_time().minute() != time.date_time().minute()
         {
-            // Missed alarm
-            warn!("Missed alarm");
+            if scheduled_alarm.is_audio_alarm() {
+                // Missed alarm
+                warn!("Missed alarm");
+            }
         } else {
             info!("Woken by RTC alarm");
             events.log(Event::Rp2040WokenByAlarm, &time, &mut fs);
@@ -295,7 +296,6 @@ fn main() -> ! {
         prioritise_frame_preview,
         &mut i2c,
         &config,
-        &time,
     );
     warn!("Recording mode: {:?}", recording_mode);
     maybe_offload_files_and_events_on_startup(
@@ -314,7 +314,6 @@ fn main() -> ! {
     if let Err(e) = i2c.attiny_keep_alive() {
         error!("Failed to send keep alive: {}", e);
     }
-
     if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(&time)
         && scheduled_alarm.has_triggered()
     {
@@ -377,10 +376,14 @@ fn main() -> ! {
             && i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_off())
             && !inside_thermal_window;
         if should_shutdown {
-            error!("Would tell attiny to shut us down");
-            // if let Err(e) = i2c.tell_attiny_to_power_down_rp2040() {
-            //     error!("Failed to tell attiny to power down: {}", e);
-            // }
+            info!("Tell attiny to shut us down");
+            timer.delay_ms(1000);
+            if let Err(e) = i2c.tell_attiny_to_power_down_rp2040() {
+                error!("Failed to tell attiny to power down: {}", e);
+            }
+            loop {
+                nop();
+            }
         } else if recording_mode == RecordingMode::None && !inside_thermal_window {
             info!("Entering thermal mode because pi is on");
         } else if recording_mode == RecordingMode::None && inside_thermal_window {
@@ -417,6 +420,7 @@ fn main() -> ! {
             events,
             time,
             current_recording_window,
+            recording_mode,
         );
     }
 }

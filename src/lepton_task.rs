@@ -158,6 +158,7 @@ struct FrameLoopState {
 ///
 /// Does not panic, spi read is actually infallible
 #[allow(clippy::too_many_lines)]
+#[allow(unused_variables)]
 pub fn frame_acquisition_loop(
     rosc: &RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
@@ -568,23 +569,22 @@ pub fn frame_acquisition_loop(
                 continue 'scanline;
             }
             prev_packet_id = packet_id;
-            if state.transferring_prev_frame {
-                'message_loop: loop {
-                    match sio_fifo.read() {
-                        None => break 'message_loop,
-                        Some(message) => {
-                            let needs_restart = handle_message(message, &mut state);
-                            if needs_restart {
-                                info!("Powering down lepton module");
-                                lepton.power_down_sequence();
-                                sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
-                                warn!("Request reset");
-                                restart(&mut watchdog);
-                            }
+            //if state.transferring_prev_frame {
+            'message_loop: loop {
+                match sio_fifo.read() {
+                    None => break 'message_loop,
+                    Some(message) => {
+                        let needs_restart = handle_message(message, &mut state);
+                        if needs_restart {
+                            info!("Powering down lepton module");
+                            lepton.power_down_sequence();
+                            warn!("Request reset");
+                            restart(&mut watchdog);
                         }
                     }
                 }
             }
+            //}
         }
         // This block prevents a frame sync issue when we *end* recording
 

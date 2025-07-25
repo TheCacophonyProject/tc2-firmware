@@ -119,8 +119,10 @@ pub fn record_audio(
         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {
             error!("Failed to clear mode flags {}", e);
         }
-        if let Err(e) = i2c.clear_and_disable_alarm(time) {
-            error!("Failed to clear and disable alarm: {}", e);
+        if !recording_request_type.is_user_requested() {
+            if let Err(e) = i2c.clear_and_disable_alarm(time) {
+                error!("Failed to clear and disable alarm: {}", e);
+            }
         }
     }
     restart(&mut watchdog)

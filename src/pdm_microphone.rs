@@ -218,7 +218,7 @@ impl PdmMicrophone {
     #[allow(clippy::too_many_lines)]
     pub fn record_for_n_seconds(
         &mut self,
-        num_seconds: usize,
+        num_seconds: u32,
         ch3: Channel<CH3>,
         ch4: Channel<CH4>,
         fs: &mut OnboardFlash,
@@ -252,7 +252,7 @@ impl PdmMicrophone {
         let mut filter = PDMFilter::new(adjusted_sample_rate as f32);
         filter.init();
         let mut current_recording = RecordingStatus {
-            total_samples: adjusted_sample_rate as usize * PDM_DECIMATION * num_seconds,
+            total_samples: adjusted_sample_rate as usize * PDM_DECIMATION * num_seconds as usize,
             samples_taken: 0,
         };
         let mut recorded_successfully = false;

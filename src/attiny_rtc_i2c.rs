@@ -211,8 +211,7 @@ impl From<u8> for CameraConnectionState {
 #[derive(Format, Copy, Clone, PartialEq)]
 pub struct RecordingTypeDetail {
     user_requested: bool,
-    tc2_agent_requested: bool,
-    duration_seconds: usize,
+    pub duration_seconds: u32,
 }
 
 #[derive(Format, Copy, Clone, PartialEq)]
@@ -235,77 +234,41 @@ impl RecordingMode {
 
 #[derive(Format, Copy, Clone, PartialEq)]
 pub enum RecordingRequestType {
-    ShortTest(RecordingTypeDetail),
-    LongTest(RecordingTypeDetail),
-    Rp2040Scheduled(RecordingTypeDetail),
-    Tc2AgentScheduled(RecordingTypeDetail),
+    Test(RecordingTypeDetail),
+    Scheduled(RecordingTypeDetail),
 }
 
 impl RecordingRequestType {
-    pub fn short_test_recording() -> Self {
-        RecordingRequestType::ShortTest(RecordingTypeDetail {
+    pub fn test_recording(duration_seconds: u32) -> Self {
+        RecordingRequestType::Test(RecordingTypeDetail {
             user_requested: true,
-            tc2_agent_requested: false,
-            duration_seconds: 10,
+            duration_seconds,
         })
     }
 
-    pub fn long_test_recording() -> Self {
-        RecordingRequestType::LongTest(RecordingTypeDetail {
-            user_requested: true,
-            tc2_agent_requested: false,
-            duration_seconds: 60 * 5,
-        })
-    }
-
-    pub fn rp2040_scheduled_recording() -> Self {
-        RecordingRequestType::Rp2040Scheduled(RecordingTypeDetail {
+    pub fn scheduled_recording() -> Self {
+        RecordingRequestType::Scheduled(RecordingTypeDetail {
             user_requested: false,
-            tc2_agent_requested: false,
-            duration_seconds: 60,
-        })
-    }
-
-    pub fn tc2_agent_scheduled_recording() -> Self {
-        RecordingRequestType::Tc2AgentScheduled(RecordingTypeDetail {
-            user_requested: false,
-            tc2_agent_requested: true,
             duration_seconds: 60,
         })
     }
 
     pub fn is_user_requested(&self) -> bool {
         match self {
-            RecordingRequestType::ShortTest(RecordingTypeDetail { user_requested, .. })
-            | RecordingRequestType::LongTest(RecordingTypeDetail { user_requested, .. })
-            | RecordingRequestType::Rp2040Scheduled(RecordingTypeDetail {
-                user_requested, ..
-            })
-            | RecordingRequestType::Tc2AgentScheduled(RecordingTypeDetail {
-                user_requested, ..
-            }) => *user_requested,
+            RecordingRequestType::Test(RecordingTypeDetail { user_requested, .. })
+            | RecordingRequestType::Scheduled(RecordingTypeDetail { user_requested, .. }) => {
+                *user_requested
+            }
         }
     }
 
-    #[allow(dead_code)]
-    pub fn is_tc2_agent_requested(&self) -> bool {
-        matches!(self, RecordingRequestType::Tc2AgentScheduled(_))
-    }
-
-    pub fn duration_seconds(&self) -> usize {
+    pub fn duration_seconds(&self) -> u32 {
         match self {
-            RecordingRequestType::ShortTest(RecordingTypeDetail {
+            RecordingRequestType::Test(RecordingTypeDetail {
                 duration_seconds, ..
             })
-            | RecordingRequestType::LongTest(RecordingTypeDetail {
+            | RecordingRequestType::Scheduled(RecordingTypeDetail {
                 duration_seconds, ..
-            })
-            | RecordingRequestType::Rp2040Scheduled(RecordingTypeDetail {
-                duration_seconds, ..
-            })
-            | RecordingRequestType::Tc2AgentScheduled(RecordingTypeDetail {
-                duration_seconds,
-                ..
             }) => *duration_seconds,
         }
     }
@@ -696,6 +659,7 @@ impl MainI2C {
         state.unset_flag(tc2_agent_state::LONG_TEST_RECORDING);
         state.unset_flag(tc2_agent_state::SHORT_TEST_RECORDING);
         state.unset_flag(tc2_agent_state::THERMAL_MODE);
+        state.unset_flag(tc2_agent_state::RECORDING);
         state.unset_flag(tc2_agent_state::AUDIO_MODE);
         self.try_attiny_write_command(ATTINY_REG_TC2_AGENT_STATE, state.into())
     }

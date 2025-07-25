@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::attiny_rtc_i2c::MainI2C;
+use crate::attiny_rtc_i2c::{MainI2C, RecordingMode, RecordingRequestType, RecordingTypeDetail};
 use crate::bsp::pac::{DMA, Peripherals};
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
@@ -131,6 +131,10 @@ impl StatusRecordingState {
             || *self == StatusRecordingState::MakingShutdown
     }
 
+    pub fn is_not_in_progress(&self) -> bool {
+        !self.in_progress()
+    }
+
     pub fn is_not_pending(&self) -> bool {
         !self.is_pending()
     }
@@ -206,6 +210,7 @@ pub fn record_thermal(
     events: EventLogger,
     time: SyncedDateTime,
     current_recording_window: RecordingWindow,
+    recording_mode: RecordingMode,
 ) -> ! {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
@@ -258,6 +263,7 @@ pub fn record_thermal(
         events,
         time,
         current_recording_window,
+        recording_mode,
     );
 }
 type LeptonVersion = ((u8, u8, u8), (u8, u8, u8));
@@ -311,6 +317,7 @@ pub fn thermal_motion_task(
     mut events: EventLogger,
     mut time: SyncedDateTime,
     current_recording_window: RecordingWindow,
+    recording_mode: RecordingMode,
 ) -> ! {
     info!("=== Core 0 Thermal Motion start ===");
     if THERMAL_DEV_MODE {
@@ -425,6 +432,13 @@ pub fn thermal_motion_task(
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
 
     let mut started = Some(());
+    let mut test_recording_in_progress = None;
+    let mut test_recording =
+        if let RecordingMode::Thermal(RecordingRequestType::Test(detail)) = recording_mode {
+            Some(detail)
+        } else {
+            None
+        };
 
     info!(
         "Current time is in recording window? {}",
@@ -518,7 +532,7 @@ pub fn thermal_motion_task(
         }
         let mut ended_recording = false;
         let mut should_start_new_recording = false;
-        if !past_ffc_event && frame_is_valid && motion_detection.is_some() {
+        if !past_ffc_event && motion_detection.is_some() && cptv_stream.is_none() {
             warn!(
                 "Resetting motion detection due to FFC event {:?}",
                 telemetry
@@ -528,7 +542,7 @@ pub fn thermal_motion_task(
         // NOTE: In low power mode, don't try to start recordings/motion detection
         //  until frames have stabilised.
         let should_record_to_flash =
-            frame_is_valid && past_ffc_event && config.use_low_power_mode();
+            frame_is_valid && telemetry_is_valid && past_ffc_event && config.use_low_power_mode();
 
         // FIXME: What happens if we're in the middle of recording a cptv file and
         //  we get an invalid frame header?  Maybe this doesn't happen in practice?
@@ -572,9 +586,24 @@ pub fn thermal_motion_task(
                 info!("Would end recording, but outside window");
             }
 
+            if !should_start_new_recording && test_recording.is_some() {
+                // Take test recording.
+                test_recording_in_progress = test_recording.take();
+                should_start_new_recording = true;
+            }
+
             let should_end_current_recording = if let Some(cptv_stream) = &cptv_stream {
                 let (recording_is_max_length, storage_insufficient, motion_ended) =
-                    if bk.status_recording.in_progress() {
+                    if let Some(RecordingTypeDetail {
+                        duration_seconds, ..
+                    }) = test_recording_in_progress
+                    {
+                        (
+                            cptv_stream.len() == duration_seconds * 9,
+                            fs.is_nearly_full_for_thermal_recordings(),
+                            false,
+                        )
+                    } else if bk.status_recording.in_progress() {
                         (cptv_stream.reached_max_length(), fs.is_full(), false)
                     } else {
                         (
@@ -592,11 +621,19 @@ pub fn thermal_motion_task(
 
             if should_start_new_recording {
                 // start recording below so frame buffer is out of scope
-                if is_outside_recording_window && !bk.status_recording.in_progress() {
+                if is_outside_recording_window
+                    && bk.status_recording.is_not_in_progress()
+                    && test_recording_in_progress.is_none()
+                {
                     should_start_new_recording = false;
                     info!("Would start recording, but outside recording window");
                 } else if bk.status_recording.in_progress() {
                     info!("Making status recording {}", bk.status_recording);
+                } else if test_recording_in_progress.is_some() {
+                    info!(
+                        "Making user-requested test recording {}",
+                        test_recording_in_progress
+                    );
                 }
             } else if should_end_current_recording {
                 // Finalise on a different frame period to writing out the prev/last frame,
@@ -604,7 +641,8 @@ pub fn thermal_motion_task(
                 if let Some(cptv_stream) = &mut cptv_stream {
                     let cptv_start_block_index = cptv_stream.starting_block_index;
 
-                    if !bk.status_recording.in_progress()
+                    if bk.status_recording.is_not_in_progress()
+                        && test_recording_in_progress.is_none()
                         && motion_detection.as_ref().unwrap().was_false_positive()
                     {
                         info!(
@@ -652,7 +690,14 @@ pub fn thermal_motion_task(
 
                     // Clear out prev frame before starting a new recording stream.
                     prev_frame_2.fill(0);
-                    if let Err(e) = i2c.stopped_recording() {
+                    if test_recording_in_progress.take().is_some() {
+                        // Finished requested test recording, restart now.
+                        if let Err(e) = i2c.tc2_agent_clear_mode_flags() {
+                            error!("Failed to clear mode flags {}", e);
+                        }
+                        timer.delay_ms(100);
+                        request_restart(&mut sio);
+                    } else if let Err(e) = i2c.stopped_recording() {
                         error!("Error clearing recording flag on attiny: {}", e);
                     }
 
@@ -712,7 +757,7 @@ pub fn thermal_motion_task(
                 &crc_table,
                 is_startup_status,
                 is_shutdown_status,
-                false, // TODO: is user-requested
+                test_recording_in_progress.is_some(),
             );
             cptv_streamer.init_gzip_stream(&mut fs, false);
             // Write out the initial frame from *before* the time when the motion detection triggered.
@@ -762,13 +807,20 @@ pub fn thermal_motion_task(
             let duration_until_next_alarm = next_alarm.date_time() - time.date_time();
             let next_alarm_mode = next_alarm.mode;
             if inside_recording_window {
-                info!(
-                    "Got frame #{}, inside recording window, window ends in {}mins, next alarm ({}) in {}mins",
-                    telemetry.frame_num,
-                    duration_until_window_end.num_minutes(),
-                    next_alarm_mode,
-                    duration_until_next_alarm.num_minutes()
-                );
+                if duration_until_next_alarm.num_minutes() < 0 {
+                    info!(
+                        "Got frame #{}, inside recording window",
+                        telemetry.frame_num,
+                    );
+                } else {
+                    info!(
+                        "Got frame #{}, inside recording window, window ends in {}mins, next alarm ({}) in {}mins",
+                        telemetry.frame_num,
+                        duration_until_window_end.num_minutes(),
+                        next_alarm_mode,
+                        duration_until_next_alarm.num_minutes()
+                    );
+                }
             } else {
                 info!(
                     "Got frame #{}, outside recording window, next alarm ({}) in {}mins",
@@ -799,6 +851,7 @@ pub fn thermal_motion_task(
                 &mut time,
                 &mut sio,
                 config,
+                &test_recording_in_progress,
             )
         {
             #[allow(clippy::cast_possible_truncation)]
@@ -810,7 +863,7 @@ pub fn thermal_motion_task(
                 warn!("I2C messages took {}µs", elapsed);
             }
         } else {
-            let frames_elapsed = if frame_is_valid {
+            let frames_elapsed = if frame_is_valid && telemetry_is_valid {
                 get_frames_elapsed(&telemetry, &prev_telemetry)
             } else {
                 1
@@ -821,7 +874,7 @@ pub fn thermal_motion_task(
             timer.delay_us(expected_i2c_io_time_us);
         }
 
-        if frame_is_valid {
+        if frame_is_valid && telemetry_is_valid {
             prev_telemetry = Some(telemetry);
         }
         bk.frames_seen += 1;
@@ -862,6 +915,7 @@ fn take_front_buffer(
     });
 }
 
+#[allow(clippy::ref_option)]
 fn do_periodic_bookkeeping(
     bk: &mut BookkeepingState,
     i2c: &mut MainI2C,
@@ -870,6 +924,7 @@ fn do_periodic_bookkeeping(
     time: &mut SyncedDateTime,
     sio: &mut Sio,
     config: &DeviceConfig,
+    user_requested_recording: &Option<RecordingTypeDetail>,
 ) -> bool {
     // Do periodic checks that require I2C I/O, or are otherwise computationally expensive
     // and can have variable effects on frame time.
@@ -892,6 +947,8 @@ fn do_periodic_bookkeeping(
         if need_to_make_shutdown_status_recording {
             warn!("Make shutdown status recording");
             bk.status_recording.next_state();
+        } else if user_requested_recording.is_some() {
+            // Do nothing, there's a test recording in progress
         } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time) {
             if scheduled_alarm.is_audio_alarm() && scheduled_alarm.has_triggered() {
                 request_restart(sio);
@@ -929,9 +986,6 @@ fn do_periodic_bookkeeping(
             }
         }
         time.resync_with_rtc(i2c, events, fs);
-        // NOTE: In continuous recording mode, the device will only shut down briefly
-        //  when the flash storage is nearly full, and it needs to offload files.
-        //  Or, in the case of high-power-mode, it will  never shut down.
         let is_inside_recording_window = config
             .time_is_in_supplied_recording_window(&time.date_time(), bk.current_recording_window);
         let is_outside_recording_window = !is_inside_recording_window;
@@ -939,11 +993,13 @@ fn do_periodic_bookkeeping(
             && (config.use_high_power_mode()
                 || fs.file_types_found.has_type(FileType::CptvShutdown))
         {
-            // NOTE: If there is a user getting frames, they'll be disconnected here.
+            // NOTE: Even in continuous recording mode, there is still an "outside the window"
+            //  where the current 24hr window ends, and we will restart and offload recordings.
+
+            // FIXME: If there is a user getting frames, they'll be disconnected here.
+            //  We could fix that by deferring, if we had a way to check if we still want to prioritise
+            //  getting frames?
             if fs.has_recordings_to_offload() {
-                // If we're now outside the recording window,
-                // Trigger a restart now via the watchdog timer, so that flash storage will
-                // be offloaded during the startup sequence.
                 warn!("Recording window ended with files to offload, request restart");
                 request_restart(sio);
             }
@@ -960,12 +1016,14 @@ fn do_periodic_bookkeeping(
                 .get_camera_state()
                 .is_ok_and(|state| state.pi_is_powered_off())
             {
+                // Restart so that we'll ask for us to be put to sleep after any file offloading.
                 request_restart(sio);
             } else {
                 warn!("Pi is still awake, so rp2040 must stay awake");
             }
         } else if is_inside_recording_window && config.use_high_power_mode() {
             if i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_off()) {
+                // Restart so that we'll power the rPi back on
                 request_restart(sio);
             }
         } else if is_outside_recording_window
@@ -975,6 +1033,16 @@ fn do_periodic_bookkeeping(
             //  Should we have an override?
             info!("Should make shutdown recording");
             bk.status_recording.next_state();
+        } else if is_outside_recording_window {
+            if i2c
+                .get_camera_state()
+                .is_ok_and(|state| state.pi_is_powered_off())
+            {
+                // Restart so that we'll ask for us to be put to sleep.
+                request_restart(sio);
+            } else {
+                warn!("Pi is still awake, so rp2040 must stay awake");
+            }
         }
     } else if every_minute_and_a_half {
         if let Err(e) = i2c.attiny_keep_alive() {
@@ -1001,15 +1069,11 @@ fn advance_time_by_n_frames(frames_elapsed: u32, time: &mut SyncedDateTime) {
 }
 
 fn request_restart(sio: &mut Sio) {
-    // Power down frame acquisition
     info!("Tell core1 to get ready to sleep");
+    // Power down frame acquisition
     // Tell core1 we're exiting the recording loop, and it should
-    // power down the lepton module, and wait for reply.
+    // power down the lepton module, then restart us.
     sio.fifo.write(Core0Task::ReadyToSleep.into());
-    let result = sio.fifo.read_blocking();
-    // Wait until core1 tells us that the message was received and the lepton
-    // module has been put to sleep.
-    assert_eq!(result, Core0Task::LeptonReadyToSleep.into());
     loop {
         // Wait to be reset
         nop();
