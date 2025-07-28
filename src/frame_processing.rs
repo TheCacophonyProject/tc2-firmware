@@ -246,7 +246,7 @@ pub fn record_thermal(
             watchdog,
             system_clock_freq,
             peripheral_clock_freq,
-            rosc,
+            &rosc,
             static_frame_buffer_a,
             static_frame_buffer_b,
             timer,

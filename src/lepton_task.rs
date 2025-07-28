@@ -18,6 +18,7 @@ use rp2040_hal::{Sio, Timer, Watchdog};
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
 
+#[allow(dead_code)]
 fn go_dormant_until_next_vsync(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
@@ -41,7 +42,7 @@ pub fn lepton_core1_task(
     watchdog: Watchdog,
     system_clock_freq: HertzU32,
     peripheral_clock_freq: HertzU32,
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
     timer: Timer,
@@ -141,7 +142,7 @@ struct FrameLoopState {
 #[allow(clippy::too_many_lines)]
 #[allow(unused_variables)]
 pub fn frame_acquisition_loop(
-    mut rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
+    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,
@@ -212,7 +213,7 @@ pub fn frame_acquisition_loop(
             && !state.transferring_prev_frame
         {
             // Go to sleep, skip dummy segment
-            rosc = go_dormant_until_next_vsync(rosc, lepton, system_clock_freq, got_sync);
+            // rosc = go_dormant_until_next_vsync(rosc, lepton, system_clock_freq, got_sync);
             continue 'frame_loop;
         }
         if !state.transferring_prev_frame && state.prev_frame_needs_transfer {
@@ -575,10 +576,10 @@ pub fn frame_acquisition_loop(
             state.is_recording = false;
             state.recording_ended = false;
         }
-        if !state.is_recording && !state.transferring_prev_frame && current_segment_num == 3 {
-            rosc = go_dormant_until_next_vsync(rosc, lepton, system_clock_freq, got_sync);
-        } else if current_segment_num == 3 {
-            //warn!("Overrunning frame time");
-        }
+        //if !state.is_recording && !state.transferring_prev_frame && current_segment_num == 3 {
+        // rosc = go_dormant_until_next_vsync(rosc, lepton, system_clock_freq, got_sync);
+        //} else if current_segment_num == 3 {
+        //warn!("Overrunning frame time");
+        //}
     }
 }
