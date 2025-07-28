@@ -1,13 +1,15 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use crate::attiny_rtc_i2c::{MainI2C, RecordingMode, RecordingRequestType, RecordingTypeDetail};
+use crate::attiny_rtc_i2c::{
+    CameraState, MainI2C, RecordingMode, RecordingRequestType, RecordingTypeDetail,
+};
 use crate::bsp::pac::{DMA, Peripherals};
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{DeviceConfig, RecordingWindow};
-use crate::event_logger::{Event, EventLogger};
+use crate::event_logger::{DiscardedRecordingInfo, Event, EventLogger};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER_HEADER_LENGTH};
 use crate::lepton::{FFCStatus, LeptonPins};
 use crate::motion_detector::{MotionTracking, track_motion};
@@ -244,7 +246,7 @@ pub fn record_thermal(
             watchdog,
             system_clock_freq,
             peripheral_clock_freq,
-            &rosc,
+            rosc,
             static_frame_buffer_a,
             static_frame_buffer_b,
             timer,
@@ -333,9 +335,6 @@ pub fn thermal_motion_task(
     // TODO: Maybe log the #of FFC events in a recording window, so we can know the average/total
     //  'blackout' time when we might have missed triggers?
 
-    // FIXME: Do we want to make startup recordings at the beginning of the window, or also
-    //  when the pi is started by a user, and we're outside the window?
-
     // TODO: Do we want to have a max recording length timeout, or just pause recording if a
     //  subject stays in the frame but doesn't move for a while?  Maybe if a subject is stationary
     //  for 1 minute, we pause, and only resume recording if there is new movement, or it moves again?
@@ -368,27 +367,16 @@ pub fn thermal_motion_task(
         &mut sio,
     );
     let mut bk = {
-        // This might be true if we woke up in thermal mode having been randomly shutdown?
-        // FIXME: If the user cancels offload, then we might think we've made a status recording
-        //  this session when we actually haven't?
-        //  Maybe we also write the current time to the metadata of written files,
-        //  then we can see when they were made?
-
-        // The last recorded CPTV file should be a shutdown status.
-        // It's fine to scan for this on startup.
-
-        // If it's made a startup status recording, that would be the first recording
-        // in the fs.  Opportunistic offloading breaks this logic though.
-
-        // NOTE: Assume that if we have any cptv files saved we're in the active window
-        //  recording session, and therefore we've already made a startup recording in this session.
-
-        // FIXME: Check that startup/shutdown were made in current window?
-        //  Or just check if we're at the beginning of the window, otherwise assume we've made a
-        //  startup status, but it may have been offloaded because the flash got full.
-        let made_startup_status_recording = fs.file_types_found.has_type(FileType::CptvStartup)
+        let made_startup_status_recording = (fs.file_types_found.has_type(FileType::CptvStartup)
             && fs.last_startup_recording_time.is_some()
-            && fs.last_startup_recording_time.unwrap() > current_recording_window.0;
+            && fs.last_startup_recording_time.unwrap() > current_recording_window.0)
+            || events
+                .latest_event_of_kind(Event::OffloadedRecording, &mut fs)
+                .is_some_and(|e| {
+                    e.timestamp()
+                        .is_some_and(|time| time > current_recording_window.0)
+                });
+
         let made_shutdown_recording = fs.file_types_found.has_type(FileType::CptvShutdown);
         let status_recording_state = if made_startup_status_recording && made_shutdown_recording {
             StatusRecordingState::AllDone
@@ -552,7 +540,7 @@ pub fn thermal_motion_task(
         if should_record_to_flash {
             if started.take().is_some() {
                 info!(
-                    "Motion detection active, telemetry {:?} frame is valid, {}, telemetry_is_valid {}",
+                    "Motion detection active, {:?} frame is valid, {}, telemetry_is_valid {}",
                     telemetry, frame_is_valid, telemetry_is_valid
                 );
             }
@@ -651,7 +639,17 @@ pub fn thermal_motion_task(
                             fs.last_used_block_index.unwrap()
                         );
                         let _ = fs.erase_last_file();
-                        events.log(Event::WouldDiscardAsFalsePositive, &time, &mut fs);
+                        #[allow(clippy::cast_possible_truncation)]
+                        events.log(
+                            Event::WouldDiscardAsFalsePositive(DiscardedRecordingInfo {
+                                recording_type: FileType::CptvScheduled,
+                                num_frames: cptv_stream.len() as u16,
+                                seconds_since_last_ffc: (telemetry.msec_since_last_ffc / 1000)
+                                    as u16,
+                            }),
+                            &time,
+                            &mut fs,
+                        );
                     } else {
                         cptv_stream.finalise(&mut fs, &time);
                         let blocks_used = cptv_start_block_index..fs.last_used_block_index.unwrap();
@@ -746,6 +744,7 @@ pub fn thermal_motion_task(
             let is_shutdown_status = bk.status_recording == StatusRecordingState::MakingShutdown;
 
             error!("Starting new recording at frame #{}", &telemetry.frame_num);
+            info!("{:?}", telemetry);
             let mut cptv_streamer = CptvStream::new(
                 time.get_timestamp_micros(), // Microseconds
                 lepton_version,
@@ -799,7 +798,7 @@ pub fn thermal_motion_task(
         if ended_recording {
             sio.fifo.write(Core0Task::EndRecording.into());
         }
-        if bk.frames_seen % (30 * 9) == 0 && frame_is_valid {
+        if bk.frames_seen % (60 * 9) == 0 && frame_is_valid {
             let (_, window_end) = bk.current_recording_window;
             let duration_until_window_end = window_end - time.date_time();
             let inside_recording_window = config
@@ -812,7 +811,7 @@ pub fn thermal_motion_task(
                         "Got frame #{}, inside recording window",
                         telemetry.frame_num,
                     );
-                } else {
+                } else if duration_until_next_alarm.num_minutes() != 0 {
                     info!(
                         "Got frame #{}, inside recording window, window ends in {}mins, next alarm ({}) in {}mins",
                         telemetry.frame_num,
@@ -820,13 +819,28 @@ pub fn thermal_motion_task(
                         next_alarm_mode,
                         duration_until_next_alarm.num_minutes()
                     );
+                } else {
+                    info!(
+                        "Got frame #{}, inside recording window, window ends in {}mins, next alarm ({}) in {}s",
+                        telemetry.frame_num,
+                        duration_until_window_end.num_minutes(),
+                        next_alarm_mode,
+                        duration_until_next_alarm.num_minutes()
+                    );
                 }
-            } else {
+            } else if duration_until_next_alarm.num_minutes() != 0 {
                 info!(
                     "Got frame #{}, outside recording window, next alarm ({}) in {}mins",
                     telemetry.frame_num,
                     next_alarm_mode,
                     duration_until_next_alarm.num_minutes()
+                );
+            } else {
+                info!(
+                    "Got frame #{}, outside recording window, next alarm ({}) in {}s",
+                    telemetry.frame_num,
+                    next_alarm_mode,
+                    duration_until_next_alarm.num_seconds()
                 );
             }
         }
@@ -840,7 +854,7 @@ pub fn thermal_motion_task(
             request_restart(&mut sio);
         }
 
-        let expected_i2c_io_time_us = 2000u32;
+        let expected_i2c_io_time_us = 2400u32;
         let start = timer.get_counter();
         if is_not_recording
             && do_periodic_bookkeeping(
@@ -936,6 +950,13 @@ fn do_periodic_bookkeeping(
         config.use_high_power_mode() && frames_seen > 0 && frames_seen % 197 == 0;
     let every_ten_seconds = frames_seen > 0 && frames_seen % 47 == 0;
     let every_minute_and_a_half = frames_seen > 0 && frames_seen % 810 == 0;
+    if every_minute
+        || every_minute_and_a_half
+        || every_twenty_seconds_in_high_power_mode
+        || every_ten_seconds
+    {
+        time.resync_with_rtc(i2c, events, fs, every_minute);
+    }
     if every_ten_seconds {
         let (_, window_end) = bk.current_recording_window;
         let duration_until_window_end = window_end - time.date_time();
@@ -951,6 +972,7 @@ fn do_periodic_bookkeeping(
             // Do nothing, there's a test recording in progress
         } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time) {
             if scheduled_alarm.is_audio_alarm() && scheduled_alarm.has_triggered() {
+                let _ = i2c.enter_audio_mode();
                 request_restart(sio);
             }
         }
@@ -975,17 +997,18 @@ fn do_periodic_bookkeeping(
         // NOTE: We only advise the RPi that it can shut down if we're not currently recording –
         //  since the change in frame times can affect our frame sync.
         //  It's fine to call this repeatedly, the RPi will shut down when it wants to.
+        let camera_state = i2c.get_camera_state();
         if config.use_low_power_mode() {
             // Once per minute, if we're not currently recording,
             // tell the RPi it can shut down, as it's not needed in
             // low-power mode unless it's sending preview frames.
-            if i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
+            if camera_state.is_ok_and(|state| !state.pi_is_powered_off())
+                && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
                 && bk.logged_told_rpi_to_sleep.take().is_some()
             {
                 events.log(Event::ToldRpiToSleep, time, fs);
             }
         }
-        time.resync_with_rtc(i2c, events, fs);
         let is_inside_recording_window = config
             .time_is_in_supplied_recording_window(&time.date_time(), bk.current_recording_window);
         let is_outside_recording_window = !is_inside_recording_window;
@@ -1006,7 +1029,8 @@ fn do_periodic_bookkeeping(
             if config.use_high_power_mode() {
                 // Tell rPi it is outside its recording window in high-power
                 // mode, and can go to sleep.
-                if i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
+                if camera_state.is_ok_and(|state| !state.pi_is_powered_off())
+                    && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
                     && bk.logged_told_rpi_to_sleep.take().is_some()
                 {
                     events.log(Event::ToldRpiToSleep, time, fs);
@@ -1014,7 +1038,7 @@ fn do_periodic_bookkeeping(
             }
             if i2c
                 .get_camera_state()
-                .is_ok_and(|state| state.pi_is_powered_off())
+                .is_ok_and(CameraState::pi_is_powered_off)
             {
                 // Restart so that we'll ask for us to be put to sleep after any file offloading.
                 request_restart(sio);
@@ -1022,22 +1046,17 @@ fn do_periodic_bookkeeping(
                 warn!("Pi is still awake, so rp2040 must stay awake");
             }
         } else if is_inside_recording_window && config.use_high_power_mode() {
-            if i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_off()) {
+            if camera_state.is_ok_and(CameraState::pi_is_powered_off) {
                 // Restart so that we'll power the rPi back on
                 request_restart(sio);
             }
         } else if is_outside_recording_window
             && bk.status_recording == StatusRecordingState::NeedsShutdown
         {
-            // FIXME: This doesn't actually work unless we're still in the window
-            //  Should we have an override?
             info!("Should make shutdown recording");
             bk.status_recording.next_state();
         } else if is_outside_recording_window {
-            if i2c
-                .get_camera_state()
-                .is_ok_and(|state| state.pi_is_powered_off())
-            {
+            if camera_state.is_ok_and(CameraState::pi_is_powered_off) {
                 // Restart so that we'll ask for us to be put to sleep.
                 request_restart(sio);
             } else {
@@ -1064,7 +1083,7 @@ fn advance_time_by_n_frames(frames_elapsed: u32, time: &mut SyncedDateTime) {
     if frames_elapsed > 100 {
         warn!("Got {} elapsed frames, ignoring", frames_elapsed);
     } else {
-        time.set(time.date_time() + Duration::milliseconds(115 * i64::from(frames_elapsed)));
+        time.set(time.date_time_utc + Duration::milliseconds(115 * i64::from(frames_elapsed)));
     }
 }
 

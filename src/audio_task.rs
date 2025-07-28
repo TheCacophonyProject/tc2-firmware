@@ -1,6 +1,7 @@
 use crate::attiny_rtc_i2c::{MainI2C, RecordingRequestType};
 use crate::bsp;
 use crate::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
+use crate::device_config::DeviceConfig;
 use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::OnboardFlash;
@@ -52,6 +53,7 @@ fn send_camera_connect_info(
 #[allow(clippy::too_many_lines)]
 pub fn record_audio(
     mut i2c: MainI2C,
+    config: &DeviceConfig,
     system_clock_freq: HertzU32,
     gpio0: gpio::Pin<Gpio0, FunctionNull, PullDown>,
     gpio1: gpio::Pin<Gpio1, FunctionNull, PullDown>,
@@ -60,7 +62,7 @@ pub fn record_audio(
     mut fs: OnboardFlash,
     mut events: EventLogger,
     mut pi_spi: ExtSpiTransfers,
-    time: &SyncedDateTime,
+    mut time: SyncedDateTime,
     pio1: PIO<PIO1>,
     sm1: UninitStateMachine<(PIO1, SM1)>,
 ) -> ! {
@@ -94,7 +96,7 @@ pub fn record_audio(
         pio1,
         sm1,
     );
-    events.log(Event::StartedAudioRecording, time, &mut fs);
+    events.log(Event::StartedAudioRecording, &time, &mut fs);
     let recording_failed = !microphone.record_for_n_seconds(
         recording_request_type.duration_seconds(),
         dma_channels.ch3,
@@ -102,28 +104,35 @@ pub fn record_audio(
         &mut fs,
         timestamp,
         &mut watchdog,
-        time,
+        &time,
         recording_request_type.is_user_requested(),
     );
     if let Err(e) = i2c.stopped_recording() {
         error!("Error unsetting recording flag on attiny: {}", e);
     }
     if recording_failed {
-        events.log(Event::AudioRecordingFailed, time, &mut fs);
+        events.log(Event::AudioRecordingFailed, &time, &mut fs);
         info!("Recording failed, restarting and will try again");
     } else {
         // If the audio recording succeeded, we'll restart and possibly offload if
         // this was a user-requested test recording.
-        events.log(Event::EndedRecording, time, &mut fs);
+        events.log(Event::EndedRecording, &time, &mut fs);
         watchdog.feed();
         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {
             error!("Failed to clear mode flags {}", e);
         }
         if !recording_request_type.is_user_requested() {
-            if let Err(e) = i2c.clear_and_disable_alarm(time) {
+            if let Err(e) = i2c.clear_and_disable_alarm(&time) {
                 error!("Failed to clear and disable alarm: {}", e);
             }
         }
     }
+
+    time.resync_with_rtc(&mut i2c, &mut events, &mut fs, false);
+    if config.time_is_in_configured_recording_window(&time.date_time()) {
+        // We're in the thermal window, so restart won't sleep us.
+        let _ = i2c.enter_thermal_mode();
+    }
+
     restart(&mut watchdog)
 }

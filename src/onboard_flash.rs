@@ -322,7 +322,7 @@ type SpiEnabledPeripheral = Spi<
 >;
 
 #[repr(u8)]
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Format, PartialEq, Clone, Copy)]
 pub enum FileType {
     CptvScheduled = 1 << 0,
     CptvUserRequested = 1 << 1,
@@ -332,6 +332,23 @@ pub enum FileType {
     AudioUserRequested = 1 << 5,
     AudioStartup = 1 << 6,
     AudioShutdown = 1 << 7,
+}
+
+impl TryFrom<u8> for FileType {
+    type Error = &'static str;
+    fn try_from(value: u8) -> Result<Self, &'static str> {
+        match value {
+            0b0000_0001 => Ok(FileType::CptvScheduled),
+            0b0000_0010 => Ok(FileType::CptvUserRequested),
+            0b0000_0100 => Ok(FileType::CptvStartup),
+            0b0000_1000 => Ok(FileType::CptvShutdown),
+            0b0001_0000 => Ok(FileType::AudioScheduled),
+            0b0010_0000 => Ok(FileType::AudioUserRequested),
+            0b0100_0000 => Ok(FileType::AudioStartup),
+            0b1000_0000 => Ok(FileType::AudioShutdown),
+            _ => Err("Unknown FileType"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -433,7 +450,7 @@ impl OnboardFlash {
         // Find last non bad block to use for config.  Note that we need 2 contigous good blocks
         // to store the device config.
 
-        // FIXME: Should probably follow a similar strategy for events and alarm block
+        // FIXME: Should probably follow a similar strategy for events
         //  Also mark page metadata for first page in the block with type.
         let mut block_index = NUM_RECORDING_BLOCKS;
         while self.bad_blocks.contains(&block_index) || self.bad_blocks.contains(&(block_index + 1))
@@ -582,10 +599,6 @@ impl OnboardFlash {
                 file_start = self.current_page.previous_file_start_block_index();
                 continue;
             }
-
-            // If the first byte of a file is 1, it was an audio file.
-            // FIXME: We now do better and write the type into the user-metadata too
-            //  - remove the shebang check in the next revision.
             let is_cptv =
                 self.current_page.user_data()[0] != 1 || self.current_page.is_cptv_recording();
             if only_last || is_cptv {
@@ -597,6 +610,7 @@ impl OnboardFlash {
         false
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn scan(&mut self) {
         let mut bad_blocks = [u16::MAX; 40];
         self.file_types_found = FileTypes::default();
@@ -638,10 +652,20 @@ impl OnboardFlash {
 
                         if self.current_page.is_cptv_recording() {
                             if self.current_page.is_startup_status_recording() {
-                                self.file_types_found.add_type(FileType::CptvStartup);
-                                if self.current_page.file_written_time().is_some() {
-                                    self.last_startup_recording_time =
-                                        self.current_page.file_written_time();
+                                // For the file time, we need to go back and read the first page.
+                                if self.read_page(block_index, 0).is_ok() {
+                                    self.read_page_metadata(block_index);
+                                    self.wait_for_all_ready();
+
+                                    self.file_types_found.add_type(FileType::CptvStartup);
+                                    if self.current_page.file_written_time().is_some() {
+                                        self.last_startup_recording_time =
+                                            self.current_page.file_written_time();
+                                    }
+                                }
+                                if self.read_page(block_index, 1).is_ok() {
+                                    self.read_page_metadata(block_index);
+                                    self.wait_for_all_ready();
                                 }
                             } else if self.current_page.is_shutdown_status_recording() {
                                 self.file_types_found.add_type(FileType::CptvShutdown);
@@ -944,8 +968,6 @@ impl OnboardFlash {
         }
     }
     pub fn get_file_part(&mut self) -> Option<FilePartReturn> {
-        // TODO: Could interleave using cache_random_read, might improve throughput slightly?
-        // FIXME: Try doing this
         if self
             .read_page(self.current_block_index, self.current_page_index)
             .is_ok()
@@ -1020,7 +1042,6 @@ impl OnboardFlash {
     #[allow(clippy::unnecessary_wraps)]
     pub fn read_page(&mut self, block: BlockIndex, page: PageIndex) -> Result<(), &str> {
         // FIXME: Handle logging of ECC errors and results of read page properly.
-
         assert!(block < 2048, "Invalid block");
         assert!(page < 64, "Invalid page");
         let address = OnboardFlash::get_address(block, page);
@@ -1497,11 +1518,9 @@ impl OnboardFlash {
         // PROGRAM_LOAD
         self.spi_write(&bytes[1..]);
         self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
-        // FIXME - can program failed bit get set, and then discarded, before wait for ready completes?
         let status = self.wait_for_ready();
 
         // TODO: Check ECC status, mark and relocate block if needed.
-        //info!("Status after program {:#010b}", status.inner);
         if status.program_failed() {
             // FIXME: Should we return an error here?
             error!("Programming failed");

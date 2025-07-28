@@ -1,4 +1,4 @@
-use crate::onboard_flash::{OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
+use crate::onboard_flash::{FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Datelike, Timelike, Utc};
@@ -60,6 +60,32 @@ impl TryFrom<u64> for WakeReason {
 }
 
 #[derive(Format, Copy, Clone)]
+pub struct DiscardedRecordingInfo {
+    pub recording_type: FileType,
+    pub num_frames: u16,
+    pub seconds_since_last_ffc: u16,
+}
+
+impl DiscardedRecordingInfo {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn as_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+        bytes[0] = self.recording_type as u8;
+        LittleEndian::write_u16(&mut bytes[1..=2], self.num_frames);
+        LittleEndian::write_u16(&mut bytes[3..=4], self.seconds_since_last_ffc);
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        DiscardedRecordingInfo {
+            recording_type: FileType::try_from(bytes[0]).unwrap_or(FileType::CptvScheduled),
+            num_frames: LittleEndian::read_u16(&bytes[1..=2]),
+            seconds_since_last_ffc: LittleEndian::read_u16(&bytes[3..=4]),
+        }
+    }
+}
+
+#[derive(Format, Copy, Clone)]
 pub enum Event {
     Rp2040Sleep,
     OffloadedRecording,
@@ -75,7 +101,7 @@ pub enum Event {
     SetThermalAlarm(i64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
     SetAudioAlarm(i64), // Also has a time that the alarm is set for as additional data?  Events can be bigger
     GotPowerOnTimeout,
-    WouldDiscardAsFalsePositive,
+    WouldDiscardAsFalsePositive(DiscardedRecordingInfo),
     StartedGettingFrames,
     FlashStorageNearlyFull,
     Rp2040WokenByAlarm,
@@ -83,7 +109,7 @@ pub enum Event {
     AttinyCommError,
     Rp2040MissedAudioAlarm(i64),
     AudioRecordingFailed,
-    ErasePartialOrCorruptRecording,
+    ErasePartialOrCorruptRecording(DiscardedRecordingInfo),
     StartedAudioRecording,
     ThermalMode,
     AudioMode,
@@ -91,7 +117,7 @@ pub enum Event {
     FileOffloadFailed,
     LogOffloadFailed,
     OffloadedLogs,
-    CorruptFile,
+    CorruptFile, // Unused?
     LostFrames(u64),
     FileOffloadInterruptedByUser,
     RtcVoltageLowError,
@@ -115,7 +141,7 @@ impl From<Event> for u16 {
             LostSync => 11,
             SetAudioAlarm(_) => 12,
             GotPowerOnTimeout => 13,
-            WouldDiscardAsFalsePositive => 14,
+            WouldDiscardAsFalsePositive(_) => 14,
             StartedGettingFrames => 15,
             FlashStorageNearlyFull => 16,
             Rp2040WokenByAlarm => 17,
@@ -123,7 +149,7 @@ impl From<Event> for u16 {
             AttinyCommError => 19,
             Rp2040MissedAudioAlarm(_) => 20,
             AudioRecordingFailed => 21,
-            ErasePartialOrCorruptRecording => 22,
+            ErasePartialOrCorruptRecording(_) => 22,
             StartedAudioRecording => 23,
             ThermalMode => 24,
             AudioMode => 25,
@@ -148,7 +174,8 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
         use Event::*;
         let kind = LittleEndian::read_u16(&event[0..2]);
         let timestamp = LittleEndian::read_i64(&event[2..10]);
-        let ext_data = LittleEndian::read_u64(&event[10..18]);
+        let payload = &event[10..18];
+        let ext_data = LittleEndian::read_u64(payload);
         let kind = match kind {
             1 => Ok(Rp2040Sleep),
             2 => Ok(OffloadedRecording),
@@ -169,7 +196,9 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
                 Ok(SetAudioAlarm(ext_data as i64))
             }
             13 => Ok(GotPowerOnTimeout),
-            14 => Ok(WouldDiscardAsFalsePositive),
+            14 => Ok(WouldDiscardAsFalsePositive(
+                DiscardedRecordingInfo::from_bytes(payload),
+            )),
             15 => Ok(StartedGettingFrames),
             16 => Ok(FlashStorageNearlyFull),
             17 => Ok(Rp2040WokenByAlarm),
@@ -181,7 +210,9 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
                 Ok(Rp2040MissedAudioAlarm(ext_data as i64))
             }
             21 => Ok(AudioRecordingFailed),
-            22 => Ok(ErasePartialOrCorruptRecording),
+            22 => Ok(ErasePartialOrCorruptRecording(
+                DiscardedRecordingInfo::from_bytes(payload),
+            )),
             23 => Ok(StartedAudioRecording),
             24 => Ok(ThermalMode),
             25 => Ok(AudioMode),
@@ -247,6 +278,10 @@ impl LoggerEvent {
             }
             Event::ToldRpiToWake(data) => {
                 LittleEndian::write_u64(ext_data, u64::from(data));
+            }
+            Event::WouldDiscardAsFalsePositive(discard_info)
+            | Event::ErasePartialOrCorruptRecording(discard_info) => {
+                ext_data.copy_from_slice(&discard_info.as_bytes());
             }
             _ => {}
         }

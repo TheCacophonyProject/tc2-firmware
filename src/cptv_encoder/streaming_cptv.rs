@@ -504,7 +504,6 @@ impl<'a> CptvStream<'a> {
         self.num_frames += 1;
     }
 
-    #[allow(dead_code)]
     pub fn len(&self) -> u32 {
         self.num_frames
     }

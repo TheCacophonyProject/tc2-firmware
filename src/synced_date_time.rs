@@ -1,16 +1,24 @@
 use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{Event, EventLogger};
 use crate::onboard_flash::OnboardFlash;
+use crate::sub_tasks::FormattedTime;
 use chrono::{DateTime, Duration, Utc};
-use defmt::error;
+use defmt::{Format, Formatter, error, warn};
 use rp2040_hal::Timer;
 use rp2040_hal::timer::Instant;
 
 // NOTE: Important: If we start using dormant states again, the timer will be incorrect
+#[derive(Copy, Clone)]
 pub struct SyncedDateTime {
-    date_time_utc: DateTime<Utc>,
+    pub date_time_utc: DateTime<Utc>,
     pub timer_offset: Instant,
     timer: Timer,
+}
+
+impl Format for SyncedDateTime {
+    fn format(&self, fmt: Formatter) {
+        defmt::write!(fmt, "{}", FormattedTime(self.date_time_utc));
+    }
 }
 
 impl SyncedDateTime {
@@ -40,9 +48,22 @@ impl SyncedDateTime {
         i2c: &mut MainI2C,
         events: &mut EventLogger,
         fs: &mut OnboardFlash,
+        print: bool,
     ) {
-        match i2c.get_datetime(self.timer) {
-            Ok(new_time) => *self = new_time,
+        match i2c.get_datetime(self.timer, print) {
+            Ok(new_time) => {
+                if new_time.date_time_utc > self.date_time_utc
+                    && new_time.date_time_utc < self.date_time_utc + Duration::minutes(15)
+                {
+                    if (new_time.date_time() - self.date_time()) > Duration::seconds(2) {
+                        warn!(
+                            "Time drift {}µs",
+                            (new_time.date_time() - self.date_time()).num_microseconds()
+                        );
+                    }
+                    *self = new_time;
+                }
+            }
             Err(e) => {
                 events.log(Event::RtcCommError, self, fs);
                 error!("Unable to get DateTime from RTC: {}", e);

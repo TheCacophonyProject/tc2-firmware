@@ -4,7 +4,7 @@ use crate::lepton::{FFCStatus, LeptonFirmwareInfo, LeptonModule, LeptonPins, ini
 use crate::lepton_telemetry::Telemetry;
 use crate::utils::restart;
 use crate::{FFC_INTERVAL_MS, bsp};
-use bsp::hal::gpio::{FunctionSio, Interrupt, Pin, PinId, PullNone, SioInput};
+use bsp::hal::gpio::Interrupt;
 use bsp::hal::pac::RESETS;
 use bsp::hal::rosc::RingOscillator;
 use bsp::hal::sio::SioFifo;
@@ -18,7 +18,6 @@ use rp2040_hal::{Sio, Timer, Watchdog};
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
 
-#[allow(dead_code)]
 fn go_dormant_until_next_vsync(
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
@@ -37,31 +36,12 @@ fn go_dormant_until_next_vsync(
     }
 }
 
-#[allow(dead_code)]
-fn go_dormant_until_woken<T: PinId>(
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
-    wake_pin: &mut Pin<T, FunctionSio<SioInput>, PullNone>,
-    lepton: &mut LeptonModule,
-    rosc_freq: HertzU32,
-) -> RingOscillator<bsp::hal::rosc::Enabled> {
-    lepton
-        .vsync
-        .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
-    wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, true);
-    unsafe { rosc.dormant() };
-    // Woken by pin
-    let disabled_rosc = RingOscillator::new(rosc.free());
-    let initialized_rosc = disabled_rosc.initialize_with_freq(rosc_freq);
-    wake_pin.set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
-    initialized_rosc
-}
-
 pub fn lepton_core1_task(
     lepton_pins: LeptonPins,
     watchdog: Watchdog,
     system_clock_freq: HertzU32,
     peripheral_clock_freq: HertzU32,
-    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
+    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
     timer: Timer,
@@ -119,6 +99,7 @@ pub fn lepton_core1_task(
         rosc,
         &mut lepton,
         &mut fifo,
+        system_clock_freq,
         peripheral_clock_freq,
         &mut peripherals.RESETS,
         static_frame_buffer_a,
@@ -160,10 +141,11 @@ struct FrameLoopState {
 #[allow(clippy::too_many_lines)]
 #[allow(unused_variables)]
 pub fn frame_acquisition_loop(
-    rosc: &RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
+    mut rosc: RingOscillator<bsp::hal::rosc::Enabled>, // NOTE: not using dormant at the moment, so don't need mut
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,
+    system_clock_freq: HertzU32,
     resets: &mut RESETS,
     frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
     frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
@@ -213,7 +195,7 @@ pub fn frame_acquisition_loop(
     let mut frames_seen = 0;
     let mut last_frame_seen = None;
 
-    // should not feed watchdog if we dont receive a message and are in low power mode
+    // should not feed watchdog if we don't receive a message and are in low power mode
     'frame_loop: loop {
         if got_sync || state.is_recording {
             watchdog.feed();
@@ -230,10 +212,7 @@ pub fn frame_acquisition_loop(
             && !state.transferring_prev_frame
         {
             // Go to sleep, skip dummy segment
-
-            // FIXME - Whenever recording starts, we lose a frame here. It's the all important first frame of the recording.
-            //  Let's just use a bit more power for now until we figure out how to fix this.
-            //rosc = go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
+            rosc = go_dormant_until_next_vsync(rosc, lepton, system_clock_freq, got_sync);
             continue 'frame_loop;
         }
         if !state.transferring_prev_frame && state.prev_frame_needs_transfer {
@@ -241,7 +220,13 @@ pub fn frame_acquisition_loop(
             sio_fifo.write(Core0Task::ReceiveFrame.into());
             sio_fifo.write(selected_frame_buffer);
             if let Some(message) = sio_fifo.read() {
-                handle_message(message, &mut state);
+                let needs_restart = handle_message(message, &mut state);
+                if needs_restart {
+                    info!("Powering down lepton module");
+                    lepton.power_down_sequence();
+                    warn!("Request reset");
+                    restart(&mut watchdog);
+                }
             }
             if selected_frame_buffer == 0 {
                 selected_frame_buffer = 1;
@@ -569,7 +554,6 @@ pub fn frame_acquisition_loop(
                 continue 'scanline;
             }
             prev_packet_id = packet_id;
-            //if state.transferring_prev_frame {
             'message_loop: loop {
                 match sio_fifo.read() {
                     None => break 'message_loop,
@@ -584,22 +568,17 @@ pub fn frame_acquisition_loop(
                     }
                 }
             }
-            //}
         }
-        // This block prevents a frame sync issue when we *end* recording
-
         // NOTE: If we're not transferring the previous frame, and the current segment is the second
         //  to last for a real frame, we can go dormant until the next vsync interrupt.
         if state.recording_ended {
-            // && !transferring_prev_frame && current_segment_num == 3 {
             state.is_recording = false;
             state.recording_ended = false;
         }
-        // if !is_recording && !transferring_prev_frame && current_segment_num == 3 {
-        //     rosc =
-        //         go_dormant_until_next_vsync(rosc, lepton, clocks.system_clock.freq(), got_sync);
-        // } else if current_segment_num == 3 {
-        //     //warn!("Overrunning frame time");
-        // }
+        if !state.is_recording && !state.transferring_prev_frame && current_segment_num == 3 {
+            rosc = go_dormant_until_next_vsync(rosc, lepton, system_clock_freq, got_sync);
+        } else if current_segment_num == 3 {
+            //warn!("Overrunning frame time");
+        }
     }
 }

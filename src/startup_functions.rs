@@ -1,5 +1,6 @@
 use crate::attiny_rtc_i2c::{
-    AlarmMode, MainI2C, RecordingMode, RecordingRequestType, ScheduledAlarmTime, Tc2AgentState,
+    AlarmMode, CameraState, MainI2C, RecordingMode, RecordingRequestType, ScheduledAlarmTime,
+    Tc2AgentState,
 };
 use crate::audio_task::AUDIO_DEV_MODE;
 use crate::bsp::pac::RESETS;
@@ -15,7 +16,7 @@ use crate::sub_tasks::{
 };
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
-use chrono::{DateTime, Duration, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveTime, Timelike, Utc};
 use cortex_m::prelude::*;
 use defmt::{error, info, warn};
 use picorand::{PicoRandGenerate, RNG, WyRand};
@@ -31,7 +32,7 @@ pub fn get_device_config(
     dma: &mut DMA,
     watchdog: &mut Watchdog,
     event_count: u16,
-) -> Result<(DeviceConfig, bool, bool), ()> {
+) -> Result<(DeviceConfig, bool, bool, bool), ()> {
     let device_config: Option<DeviceConfig> = DeviceConfig::load_existing_config_from_flash(fs);
     if let Some(device_config) = &device_config {
         info!("Existing config {:#?}", device_config.config());
@@ -40,10 +41,7 @@ pub fn get_device_config(
         // We need to wake up the rpi and get a config
         wake_raspberry_pi(i2c, timer, Some(watchdog), None);
     }
-
-    // FIXME: This should become "config startup handshake", and we have another
-    //  camera config handshake later on when the lepton has actually initialised or whatever.
-    let (device_config, device_config_was_updated, prioritise_frame_preview) =
+    let (device_config, device_config_was_updated, prioritise_frame_preview, force_offload_now) =
         get_existing_device_config_or_config_from_pi_on_initial_handshake(
             fs,
             pi_spi,
@@ -57,6 +55,7 @@ pub fn get_device_config(
             device_config,
             prioritise_frame_preview,
             device_config_was_updated,
+            force_offload_now,
         ))
     } else {
         error!("Couldn't get config");
@@ -69,42 +68,75 @@ pub fn get_synced_time(
     events: &mut EventLogger,
     fs: &mut OnboardFlash,
     watchdog: &mut Watchdog,
-    timer: Timer,
+    mut timer: Timer,
 ) -> Result<SyncedDateTime, &'static str> {
-    let time = i2c.get_datetime(timer);
-    if let Err(e) = time {
-        if e == "Time integrity compromised" {
-            // Maybe wake up pi, and ask for RTC to be set?
-            info!("Should wake pi because {:?}", e);
-            let _wait_to_wake = wake_raspberry_pi(
-                i2c,
-                timer,
-                Some(watchdog),
-                Some((
-                    fs,
-                    events,
-                    LoggerEvent::new_with_unknown_time(Event::ToldRpiToWake(
-                        WakeReason::RtcTimeCompromised,
-                    )),
-                )),
-            );
+    info!("Getting synced time");
+    // NOTE: I2C communication from the rp2040 to the RTC unit is not perfect – sometimes
+    //  a bit gets flipped when reading the time, and we get a wrong date.
+    //  When we get the initial time on startup, we sample it a bunch of times to try and reduce
+    //  the likelihood of this error.
+    let mut prev_time: Option<SyncedDateTime> = None;
+    let mut test_iterations = 0;
+    loop {
+        let time = i2c.get_datetime(timer, false);
+        match time {
+            Err(e) => {
+                if e == "Time integrity compromised" {
+                    // Maybe wake up pi, and ask for RTC to be set?
+                    info!("Should wake pi because {:?}", e);
+                    let _wait_to_wake = wake_raspberry_pi(
+                        i2c,
+                        timer,
+                        Some(watchdog),
+                        Some((
+                            fs,
+                            events,
+                            LoggerEvent::new_with_unknown_time(Event::ToldRpiToWake(
+                                WakeReason::RtcTimeCompromised,
+                            )),
+                        )),
+                    );
 
-            loop {
-                watchdog.feed();
-                // Now block here until we can get a good date with the lv flag unset.
-                let time = get_synced_time(i2c, events, fs, watchdog, timer);
-                if time.is_ok() {
-                    return time;
+                    loop {
+                        watchdog.feed();
+                        // Now block here until we can get a good date with the lv flag unset.
+                        let time = get_synced_time(i2c, events, fs, watchdog, timer);
+                        if time.is_ok() {
+                            return time;
+                        }
+                    }
+                } else {
+                    // can't get time so use 0 and add a time when tc2-agent uploads
+                    events.log_event(LoggerEvent::new_with_unknown_time(Event::RtcCommError), fs);
+                    error!("{}", e);
+                    restart(watchdog);
                 }
             }
-        } else {
-            // can't get time so use 0 and add a time when tc2-agent uploads
-            events.log_event(LoggerEvent::new_with_unknown_time(Event::RtcCommError), fs);
-            error!("{}", e);
-            restart(watchdog);
+            Ok(time) => {
+                if let Some(prev_time) = &prev_time {
+                    let prev_date_time = prev_time.date_time_utc;
+                    let this_date_time = time.date_time_utc;
+
+                    if this_date_time < prev_date_time
+                        || prev_date_time.year() != this_date_time.year()
+                        || prev_date_time.month() != this_date_time.month()
+                        || prev_date_time.day() != this_date_time.day()
+                        || prev_date_time.hour() != this_date_time.hour()
+                        || prev_date_time.minute() != this_date_time.minute()
+                    {
+                        test_iterations = 0;
+                    } else {
+                        test_iterations += 1;
+                    }
+                }
+                prev_time = Some(time);
+            }
+        }
+        timer.delay_ms(1);
+        if test_iterations >= 10 {
+            return time;
         }
     }
-    time
 }
 
 // Make sure the alarm exists, otherwise reschedule.
@@ -167,6 +199,7 @@ pub fn validate_scheduled_alarm(
 pub fn maybe_offload_files_and_events_on_startup(
     recording_mode: RecordingMode,
     prioritise_frame_preview: bool,
+    force_offload_now: bool,
     fs: &mut OnboardFlash,
     config: &DeviceConfig,
     time: &SyncedDateTime,
@@ -194,11 +227,11 @@ pub fn maybe_offload_files_and_events_on_startup(
     let has_files_to_offload = fs.has_recordings_to_offload();
     if has_files_to_offload {
         let blocks_used = fs.first_used_block_index.unwrap()..fs.last_used_block_index.unwrap();
-        #[allow(clippy::cast_possible_truncation)]
-        let num_blocks_used = blocks_used.len() as u16;
-        let space_used = f32::from(num_blocks_used * 2048 * 64) / 1024.0 / 1024.0;
+        let num_blocks_used = blocks_used.len() + 1;
+        #[allow(clippy::cast_precision_loss)]
+        let space_used = (num_blocks_used * 2048 * 64) as f32 / 1024.0 / 1024.0;
         info!(
-            "{} files found.  Flash blocks used {:?} space used {}MB",
+            "{} files found. Flash blocks used {:?} space used {}MB",
             fs.num_files_in_initial_scan, blocks_used, space_used
         );
     }
@@ -212,7 +245,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
     let rpi_is_awake = i2c
         .get_camera_state()
-        .is_ok_and(|state| state.pi_is_waking_or_awake())
+        .is_ok_and(CameraState::pi_is_waking_or_awake)
         && i2c
             .get_tc2_agent_state()
             .is_ok_and(|state| state.is_ready());
@@ -287,6 +320,10 @@ pub fn maybe_offload_files_and_events_on_startup(
         // since the rpi is on (maybe in high power mode)
         offload_wake_reason = WakeReason::OpportunisticOffload;
         should_offload = true;
+    }
+    if !should_offload && has_events_to_offload && force_offload_now {
+        should_offload = true;
+        offload_wake_reason = WakeReason::OffloadOnUserDemand;
     }
     let should_offload = if !should_offload && has_files_to_offload {
         offload_wake_reason = WakeReason::ThermalOffloadAfter24Hours;
@@ -373,88 +410,6 @@ fn duration_since_prev_offload_greater_than_23hrs(
     duration_since_prev_offload > Duration::hours(23)
 }
 
-/*
-fn power_down_or_restart(
-    alarm_date_time: Option<DateTime<Utc>>,
-    time: &SyncedDateTime,
-    config: &DeviceConfig,
-    mut watchdog: Watchdog,
-    mut i2c: MainI2C,
-    mut events: EventLogger,
-    mut fs: OnboardFlash,
-) -> ! {
-    let mut should_sleep = true;
-    let mut logged_power_down = Some(());
-    let boot_into_thermal_mode = config.records_audio_and_thermal();
-    // FIXME: This looks sus to me – what happens in AudioOrThermal mode?
-    let in_thermal_recording_window = config.audio_mode() == AudioMode::AudioAndThermal
-        && config.time_is_in_configured_recording_window(&time.date_time());
-
-    // FIXME: Clean up this flow control
-    loop {
-        let pi_is_powered_off = i2c
-            .get_camera_state()
-            .is_ok_and(|state| state.pi_is_powered_off());
-        // If we're in low-power mode, we don't need the rPi anymore.
-        if !pi_is_powered_off
-            && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
-            && logged_power_down.take().is_some()
-        {
-            events.log(Event::ToldRpiToSleep, time, &mut fs);
-        }
-
-        watchdog.feed();
-        if should_sleep {
-            if let Ok(state) = i2c.get_camera_state() {
-                if state.pi_is_powered_off() {
-                    if let Some(alarm_time) = alarm_date_time {
-                        let until_alarm = (alarm_time - time.date_time()).num_minutes();
-                        if until_alarm < 1 {
-                            // otherwise the alarm could trigger between here and sleeping
-                            should_sleep = false;
-                            info!("Alarm is scheduled in {} so not sleeping", until_alarm);
-                            if until_alarm <= 0 {
-                                info!("Alarm in past, so restart now to take recording");
-                                restart(&mut watchdog);
-                            }
-                            continue;
-                        }
-                    }
-
-                    if !in_thermal_recording_window {
-                        info!("Ask Attiny to power down rp2040");
-                        events.log(Event::Rp2040Sleep, time, &mut fs);
-                        if i2c.tell_attiny_to_power_down_rp2040().is_ok() {
-                            info!("Sleeping");
-                        } else {
-                            error!("Failed sending sleep request to attiny");
-                        }
-                    }
-                }
-            }
-        }
-        if boot_into_thermal_mode && should_sleep {
-            // if we have done everything and PI is still on go into thermal for preview
-            if let Ok(()) = i2c.tc2_agent_request_thermal_mode() {
-                info!("Going into thermal mode");
-                restart(&mut watchdog);
-            }
-        }
-
-        if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time) {
-            if scheduled_alarm.has_triggered() {
-                info!("Alarm triggered after taking a recording resetting rp2040");
-                restart(&mut watchdog);
-            }
-        }
-
-        time.get_timer().delay_ms(5 * 1000);
-        watchdog.feed();
-    }
-}
-
- */
-
 #[allow(clippy::too_many_lines)]
 pub fn schedule_next_recording(
     time: &SyncedDateTime,
@@ -463,7 +418,6 @@ pub fn schedule_next_recording(
     events: &mut EventLogger,
     config: &DeviceConfig,
 ) -> Result<ScheduledAlarmTime, &'static str> {
-    // FIXME: Meaning of returned result seems inconsistent
     let mut wakeup: DateTime<Utc>;
     let seed: u64;
     let current_time = time.date_time();
@@ -556,6 +510,9 @@ pub fn schedule_next_recording(
             }
         }
     }
+    if wakeup < current_time + Duration::seconds(70) {
+        wakeup = current_time + Duration::seconds(70);
+    }
     i2c.set_wakeup_alarm(&wakeup, alarm_mode, time)
         .inspect_err(|e| {
             error!("Failed to set wakeup alarm: {}", e);
@@ -579,7 +536,9 @@ pub fn work_out_recording_mode(
     i2c: &mut MainI2C,
     config: &DeviceConfig,
 ) -> RecordingMode {
-    let pi_is_awake = i2c.get_camera_state().is_ok_and(|s| s.pi_is_powered_on());
+    let pi_is_awake = i2c
+        .get_camera_state()
+        .is_ok_and(CameraState::pi_is_powered_on);
     let tc2_agent_state = if pi_is_awake {
         i2c.get_tc2_agent_state().unwrap_or_default()
     } else {

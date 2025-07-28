@@ -378,7 +378,6 @@ impl PdmMicrophone {
 
 const USER_BUFFER_LENGTH: usize = 1024;
 
-// FIXME: Where does this number come from?
 // expecting 2066 bytes
 // so for u16 data
 pub struct AudioBuffer {

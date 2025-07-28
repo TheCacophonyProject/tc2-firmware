@@ -3,7 +3,7 @@ use crate::attiny_rtc_i2c::MainI2C;
 use crate::bsp;
 use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
-use crate::event_logger::{Event, EventLogger, LoggerEvent};
+use crate::event_logger::{DiscardedRecordingInfo, Event, EventLogger, LoggerEvent};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
@@ -112,10 +112,13 @@ impl defmt::Format for FormattedTime {
     fn format(&self, fmt: Formatter) {
         defmt::write!(
             fmt,
-            "DateTime: {} {}:{}:00",
+            "DateTime: {}-{}-{} {}:{}:{} UTC",
+            self.0.year(),
+            self.0.month(),
             self.0.day(),
             self.0.hour(),
             self.0.minute(),
+            self.0.second()
         );
     }
 }
@@ -181,147 +184,164 @@ fn offload_recordings_and_events(
         let mut file_ended = false;
         let last_used_block_index = fs.last_used_block_index.unwrap_or(0);
 
-        // For speed of offloading, we read from flash cache into a one of the page buffers
-        // held by the flash_storage.  Then we swap buffers and return the just read page,
+        let mut current_file_metadata = None;
+        // For speed of offloading, we read from the flash cache into one of the page buffers
+        // held by the flash_storage.  Then we swap buffers and return the just read page
         // so that it can be immediately transferred via DMA to the raspberry pi.
         // Only, we're sharing the same SPI peripheral to do this, so while the transfer is happening
         // we can't be transferring more to the back buffer from the flash.  So what's the point
         // of having a complex double buffering system?
-        'outer: while let Some(file_part) = fs.get_file_part() {
-            let FilePartReturn {
-                part,
-                crc16,
-                block,
-                page,
-                is_last_page_for_file,
-                spi,
-                metadata,
-                timestamp,
-            } = file_part;
-            watchdog.feed();
-            pi_spi.enable(spi, resets);
-            let transfer_type = if file_start && !is_last_page_for_file {
-                ExtTransferMessage::BeginFileTransfer
-            } else if !file_start && !is_last_page_for_file {
-                ExtTransferMessage::ResumeFileTransfer
-            } else if is_last_page_for_file {
-                ExtTransferMessage::EndFileTransfer
-            } else if file_start && is_last_page_for_file {
-                ExtTransferMessage::BeginAndEndFileTransfer
-            } else {
-                unreachable!("Invalid file transfer state");
-            };
-
-            let mut progress = None;
-            if transfer_type == ExtTransferMessage::BeginFileTransfer {
-                // Each file start will give the max used block
-                progress = Some(last_used_block_index);
-            } else if transfer_type == ExtTransferMessage::EndFileTransfer {
-                progress = Some(block);
-            }
-
-            if file_start {
-                let cptv_recording = metadata == FileType::CptvStartup
-                    || metadata == FileType::CptvShutdown
-                    || metadata == FileType::CptvScheduled
-                    || metadata == FileType::CptvUserRequested;
-                let audio_recording = metadata == FileType::AudioStartup
-                    || metadata == FileType::AudioShutdown
-                    || metadata == FileType::AudioUserRequested
-                    || metadata == FileType::AudioScheduled;
-                if let Some(timestamp) = timestamp {
-                    info!(
-                        "First file part at {}:{}, written at {}",
-                        block,
-                        page,
-                        FormattedTime(timestamp)
-                    );
+        if !interrupted_by_user {
+            'outer: while let Some(file_part) = fs.get_file_part() {
+                let FilePartReturn {
+                    part,
+                    crc16,
+                    block,
+                    page,
+                    is_last_page_for_file,
+                    spi,
+                    metadata,
+                    timestamp,
+                } = file_part;
+                watchdog.feed();
+                pi_spi.enable(spi, resets);
+                let transfer_type = if file_start && !is_last_page_for_file {
+                    ExtTransferMessage::BeginFileTransfer
+                } else if !file_start && !is_last_page_for_file {
+                    ExtTransferMessage::ResumeFileTransfer
+                } else if is_last_page_for_file {
+                    ExtTransferMessage::EndFileTransfer
+                } else if file_start && is_last_page_for_file {
+                    ExtTransferMessage::BeginAndEndFileTransfer
                 } else {
-                    info!("First file part at {}:{}", block, page,);
+                    unreachable!("Invalid file transfer state");
+                };
+
+                let mut progress = None;
+                if transfer_type == ExtTransferMessage::BeginFileTransfer {
+                    // Each file start will give the max-used block
+                    progress = Some(last_used_block_index);
+                } else if transfer_type == ExtTransferMessage::EndFileTransfer {
+                    progress = Some(block);
                 }
-                if cptv_recording {
-                    if metadata == FileType::CptvStartup {
-                        info!("Offloading CPTV startup status recording");
-                    } else if metadata == FileType::CptvShutdown {
-                        info!("Offloading CPTV shutdown status recording");
-                    } else if metadata == FileType::CptvUserRequested {
-                        info!("Offloading CPTV test recording");
+
+                if file_start {
+                    current_file_metadata = Some(metadata);
+                    let cptv_recording = metadata == FileType::CptvStartup
+                        || metadata == FileType::CptvShutdown
+                        || metadata == FileType::CptvScheduled
+                        || metadata == FileType::CptvUserRequested;
+                    let audio_recording = metadata == FileType::AudioStartup
+                        || metadata == FileType::AudioShutdown
+                        || metadata == FileType::AudioUserRequested
+                        || metadata == FileType::AudioScheduled;
+                    if let Some(timestamp) = timestamp {
+                        info!(
+                            "First file part at {}:{}, written at {}",
+                            block,
+                            page,
+                            FormattedTime(timestamp)
+                        );
                     } else {
-                        info!("Offloading scheduled CPTV recording");
+                        info!("First file part at {}:{}", block, page,);
                     }
-                } else if audio_recording {
-                    if metadata == FileType::AudioStartup {
-                        info!("Offloading audio startup status recording");
-                    } else if metadata == FileType::AudioShutdown {
-                        info!("Offloading audio shutdown status recording");
-                    } else if metadata == FileType::AudioUserRequested {
-                        info!("Offloading test audio recording");
-                    } else {
-                        info!("Offloading scheduled audio recording");
+                    if cptv_recording {
+                        if metadata == FileType::CptvStartup {
+                            info!("Offloading CPTV startup status recording");
+                        } else if metadata == FileType::CptvShutdown {
+                            info!("Offloading CPTV shutdown status recording");
+                        } else if metadata == FileType::CptvUserRequested {
+                            info!("Offloading CPTV test recording");
+                        } else {
+                            info!("Offloading scheduled CPTV recording");
+                        }
+                    } else if audio_recording {
+                        if metadata == FileType::AudioStartup {
+                            info!("Offloading audio startup status recording");
+                        } else if metadata == FileType::AudioShutdown {
+                            info!("Offloading audio shutdown status recording");
+                        } else if metadata == FileType::AudioUserRequested {
+                            info!("Offloading test audio recording");
+                        } else {
+                            info!("Offloading scheduled audio recording");
+                        }
                     }
                 }
-            }
-            if is_last_page_for_file {
-                info!("Got last file part at {}:{}", block, page);
-            }
-            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-            let current_crc = crc_check.checksum(part);
-            if current_crc != crc16 {
-                warn!(
-                    "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
-                    part_count, block, page
-                );
-            }
+                if is_last_page_for_file {
+                    info!("Got last file part at {}:{}", block, page);
+                }
+                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                let current_crc = crc_check.checksum(part);
+                if current_crc != crc16 {
+                    warn!(
+                        "Data corrupted at part #{} ({}:{}) in transfer to or from flash memory",
+                        part_count, block, page
+                    );
+                }
 
-            let mut attempts = 0;
-            'transfer_part: loop {
-                watchdog.feed();
-                let did_transfer =
-                    pi_spi.send_message_over_spi(transfer_type, part, current_crc, dma, progress);
-                if did_transfer {
-                    if attempts > 0 {
-                        warn!("File part took multiple attempts: {}", attempts);
+                let mut attempts = 0;
+                'transfer_part: loop {
+                    watchdog.feed();
+                    let did_transfer = pi_spi.send_message_over_spi(
+                        transfer_type,
+                        part,
+                        current_crc,
+                        dma,
+                        progress,
+                    );
+                    if did_transfer {
+                        if attempts > 0 {
+                            warn!("File part took multiple attempts: {}", attempts);
+                        }
+                        break 'transfer_part;
                     }
-                    break 'transfer_part;
+                    attempts += 1;
+                    if attempts > 100 {
+                        success = false;
+                        break 'transfer_part;
+                    }
                 }
-                attempts += 1;
-                if attempts > 100 {
-                    success = false;
-                    break 'transfer_part;
-                }
-            }
 
-            // Give spi peripheral back to flash storage.
-            if let Some(spi) = pi_spi.disable() {
-                fs.take_spi(spi, resets);
-                if is_last_page_for_file && success {
-                    events.log(Event::OffloadedRecording, time, fs);
+                // Give spi peripheral back to flash storage.
+                if let Some(spi) = pi_spi.disable() {
+                    fs.take_spi(spi, resets);
+                    if is_last_page_for_file && success {
+                        events.log(Event::OffloadedRecording, time, fs);
+                    }
                 }
-            }
-            if !success {
-                break 'outer;
-            }
+                if !success {
+                    break 'outer;
+                }
 
-            part_count += 1;
-            if is_last_page_for_file {
-                file_count += 1;
-                info!("Offloaded {} file(s)", file_count);
-                watchdog.feed();
-                let _ = fs.erase_last_file();
-                file_ended = true;
-                break;
+                part_count += 1;
+                if is_last_page_for_file {
+                    file_count += 1;
+                    info!("Offloaded {} file(s)", file_count);
+                    watchdog.feed();
+                    let _ = fs.erase_last_file();
+                    file_ended = true;
+                    break;
+                }
+                file_start = false;
             }
-            file_start = false;
         }
 
-        if !file_ended {
+        if !file_ended && !interrupted_by_user {
             info!(
                 "Incomplete file at block {} erasing",
                 fs.file_start_block_index
             );
             watchdog.feed();
             if fs.erase_last_file().is_err() {
-                events.log(Event::ErasePartialOrCorruptRecording, time, fs);
+                events.log(
+                    Event::ErasePartialOrCorruptRecording(DiscardedRecordingInfo {
+                        recording_type: current_file_metadata.unwrap_or(FileType::CptvScheduled),
+                        num_frames: 0,
+                        seconds_since_last_ffc: 0,
+                    }),
+                    time,
+                    fs,
+                );
             }
         }
         if only_last_file {
@@ -364,10 +384,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     dma: &mut DMA,
     existing_config: Option<DeviceConfig>,
     event_count: u16,
-) -> (Option<DeviceConfig>, bool, bool) {
+) -> (Option<DeviceConfig>, bool, bool, bool) {
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
     let mut prioritise_frame_preview = false;
+    let mut force_offload_now = false;
 
     let num_files_to_offload = fs.num_files_in_initial_scan;
     let num_blocks_to_offload = fs.last_used_block_index.unwrap_or(0);
@@ -398,6 +419,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 if new_config.is_some() {
                     length_used = new_config.as_mut().unwrap().cursor_position;
                     prioritise_frame_preview = device_config[4 + length_used] == 5;
+                    force_offload_now = device_config[4 + length_used + 1] == 1;
                 }
 
                 let mut new_config_bytes = [0u8; 2400 + 112];
@@ -458,13 +480,19 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                         config_was_updated = true;
                     }
                 }
-                (new_config, config_was_updated, prioritise_frame_preview)
+                (
+                    new_config,
+                    config_was_updated,
+                    prioritise_frame_preview,
+                    force_offload_now,
+                )
             } else {
                 warn!("Pi did not respond");
                 (
                     existing_config,
                     config_was_updated,
                     prioritise_frame_preview,
+                    force_offload_now,
                 )
             };
             if let Some(spi_free) = pi_spi.disable() {
@@ -479,6 +507,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 existing_config,
                 config_was_updated,
                 prioritise_frame_preview,
+                force_offload_now,
             )
         }
     } else {
@@ -494,6 +523,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             existing_config,
             config_was_updated,
             prioritise_frame_preview,
+            force_offload_now,
         )
     }
 }

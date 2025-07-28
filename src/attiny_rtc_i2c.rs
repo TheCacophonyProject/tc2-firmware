@@ -1,6 +1,7 @@
 use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
 use crate::bsp::pac::I2C1;
 use crate::device_config::get_datetime_utc;
+use crate::sub_tasks::FormattedTime;
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
@@ -148,7 +149,7 @@ impl TryFrom<u8> for AlarmMode {
 }
 
 #[repr(u8)]
-#[derive(Format, PartialEq)]
+#[derive(Format, PartialEq, Clone, Copy)]
 pub enum CameraState {
     PoweringOn = 0x00,
     PoweredOn = 0x01,
@@ -159,19 +160,19 @@ pub enum CameraState {
 }
 
 impl CameraState {
-    pub fn pi_is_powered_on(&self) -> bool {
-        *self == CameraState::PoweredOn
+    pub fn pi_is_powered_on(self) -> bool {
+        self == CameraState::PoweredOn
     }
-    pub fn pi_is_powered_off(&self) -> bool {
-        *self == CameraState::PoweredOff
+    pub fn pi_is_powered_off(self) -> bool {
+        self == CameraState::PoweredOff
     }
 
-    pub fn pi_is_waking_or_awake(&self) -> bool {
+    pub fn pi_is_waking_or_awake(self) -> bool {
         self.pi_is_powering_on() || self.pi_is_powered_on()
     }
 
-    pub fn pi_is_powering_on(&self) -> bool {
-        *self == CameraState::PoweringOn
+    pub fn pi_is_powering_on(self) -> bool {
+        self == CameraState::PoweringOn
     }
 }
 
@@ -368,10 +369,8 @@ impl Format for ScheduledAlarmTime {
     fn format(&self, fmt: Formatter) {
         defmt::write!(
             fmt,
-            "ScheduledAlarmTime: time: {} {}:{}:00, mode: {}, already_triggered: {}",
-            self.time.day(),
-            self.time.hour(),
-            self.time.minute(),
+            "ScheduledAlarmTime: {}, mode: {}, already_triggered: {}",
+            FormattedTime(self.date_time()),
             self.mode,
             self.already_triggered
         );
@@ -654,6 +653,20 @@ impl MainI2C {
         Ok(Tc2AgentState::from(state))
     }
 
+    pub fn enter_thermal_mode(&mut self) -> Result<(), &str> {
+        let mut state = self.get_tc2_agent_state()?;
+        state.unset_flag(tc2_agent_state::AUDIO_MODE);
+        state.set_flag(tc2_agent_state::THERMAL_MODE);
+        self.try_attiny_write_command(ATTINY_REG_TC2_AGENT_STATE, state.into())
+    }
+
+    pub fn enter_audio_mode(&mut self) -> Result<(), &str> {
+        let mut state = self.get_tc2_agent_state()?;
+        state.set_flag(tc2_agent_state::AUDIO_MODE);
+        state.unset_flag(tc2_agent_state::THERMAL_MODE);
+        self.try_attiny_write_command(ATTINY_REG_TC2_AGENT_STATE, state.into())
+    }
+
     pub fn tc2_agent_clear_mode_flags(&mut self) -> Result<(), &str> {
         let mut state = self.get_tc2_agent_state()?;
         state.unset_flag(tc2_agent_state::LONG_TEST_RECORDING);
@@ -674,7 +687,11 @@ impl MainI2C {
         Ok(CameraConnectionState::from(state))
     }
 
-    pub fn get_datetime(&mut self, timer: Timer) -> Result<SyncedDateTime, &'static str> {
+    pub fn get_datetime(
+        &mut self,
+        timer: Timer,
+        print: bool,
+    ) -> Result<SyncedDateTime, &'static str> {
         self.with_i2c_retrying(|i2c| {
             let mut data = [0; 7];
             i2c.write_read(RTC_ADDRESS, &[RTC_REG_DATETIME_SECONDS], &mut data)
@@ -692,21 +709,18 @@ impl MainI2C {
             let hours = decode_bcd(data[2] & 0x3f);
             let minutes = decode_bcd(data[1] & 0x7f);
             let seconds = decode_bcd(data[0]);
-
-            // FIXME: Is it also worth rejecting this if the year is < 2025 or more than 2025 + 10?
-
-            if day == 0 || day > 31 || month == 0 || month > 12 {
+            if year < 25 || day == 0 || day > 31 || month == 0 || month > 12 {
                 Err("Invalid datetime output from RTC")
             } else {
-                info!(
-                    "Synced DateTime with RTC {}:{}:{} UTC",
-                    hours, minutes, seconds
-                );
-
-                Ok(SyncedDateTime::new(
+                let synced_time = SyncedDateTime::new(
                     get_datetime_utc(year, month, day, hours, minutes, seconds),
                     timer,
-                ))
+                );
+                if print {
+                    info!("Synced DateTime with RTC {}", synced_time);
+                }
+
+                Ok(synced_time)
             }
         })
     }
@@ -725,12 +739,10 @@ impl MainI2C {
         let wake_day = wakeup_datetime_utc.date_naive().day() as u8;
 
         info!(
-            "Set alarm in mode {}, current time is {}:{} Next alarm is {}:{}",
+            "Set alarm in mode {}, Current time: {}, Next alarm: {}",
             mode,
-            now.date_time().time().hour(),
-            now.date_time().time().minute(),
-            wakeup_datetime_utc.hour(),
-            wakeup_datetime_utc.minute()
+            now,
+            FormattedTime(*wakeup_datetime_utc)
         );
 
         self.set_wakeup_alarm_days_hours_mins(wake_day, wake_hour, wake_min, now, mode)
@@ -744,7 +756,6 @@ impl MainI2C {
         now: &SyncedDateTime,
         alarm_mode: AlarmMode,
     ) -> Result<(), &'static str> {
-        info!("Setting wake alarm for UTC {}:{}", wake_hour, wake_min);
         let result = self.with_i2c_retrying(|i2c| {
             let alarm_mins = encode_bcd(wake_min);
             let alarm_hours = encode_bcd(wake_hour);
@@ -830,8 +841,6 @@ impl MainI2C {
                 self.restore_i2c_attiny_lock_pin(pin);
                 result
             } else {
-                // FIXME: Once this fails once, it looks like it might never succeed.  Does it
-                //  fix itself if we restart on failure?
                 Err("Failed to get i2c lock")
             };
             if result.is_ok() {
