@@ -1,17 +1,19 @@
+use crate::FIRMWARE_VERSION;
 use crate::byte_slice_cursor::CursorMut;
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
-use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
+use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_HEIGHT_U32, FRAME_WIDTH, FRAME_WIDTH_U32};
 use crate::device_config::DeviceConfig;
-use crate::lepton::Telemetry;
-use crate::onboard_flash::OnboardFlash;
-use crate::utils::{u16_slice_to_u8, u16_slice_to_u8_mut};
-use crate::FIRMWARE_VERSION;
+use crate::lepton_telemetry::Telemetry;
+use crate::onboard_flash::{
+    BlockIndex, FileType, OnboardFlash, RecordingFileType, RecordingFileTypeDetails,
+};
+use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
-use core::mem;
-use core::ops::{Index, IndexMut};
-use defmt::{info, Format};
+use defmt::{Format, info};
+
+const NUM_STATUS_RECORDING_FRAMES: u32 = 18;
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Copy, Clone, Format)]
@@ -54,7 +56,44 @@ pub enum FieldType {
     Unknown = b';',
 }
 
+// This is *either* a zero-terminated string,
+// *or* a string taking the full length of the `data` array.
+#[derive(Copy, Clone)]
+pub struct MaybeZeroTerminatedString<const LENGTH: usize> {
+    data: [u8; LENGTH],
+}
+
+impl<const LENGTH: usize> MaybeZeroTerminatedString<LENGTH> {
+    pub fn new() -> Self {
+        Self { data: [0; LENGTH] }
+    }
+
+    pub fn new_with_bytes(bytes: &[u8]) -> Self {
+        let mut s = Self::new();
+        s.set_bytes(bytes);
+        s
+    }
+
+    pub fn set_bytes(&mut self, bytes: &[u8]) {
+        assert!(bytes.len() <= LENGTH);
+        self.data[0..bytes.len()].copy_from_slice(bytes);
+    }
+
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.data
+            .iter()
+            .position(|&x| x == 0)
+            .unwrap_or(self.data.len())
+    }
+
+    pub fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
 impl From<char> for FieldType {
+    #[allow(clippy::enum_glob_use)]
     fn from(val: char) -> Self {
         use FieldType::*;
         match val {
@@ -95,29 +134,6 @@ impl From<char> for FieldType {
 }
 
 #[derive(Clone)]
-pub struct FrameData {
-    data: [u16; 160 * 120],
-    min: u16,
-    max: u16,
-}
-
-impl Index<usize> for FrameData {
-    type Output = [u16];
-
-    #[inline(always)]
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.data[(index * FRAME_WIDTH)..(index * FRAME_WIDTH) + FRAME_WIDTH]
-    }
-}
-
-impl IndexMut<usize> for FrameData {
-    #[inline(always)]
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.data[(index * FRAME_WIDTH)..(index * FRAME_WIDTH) + FRAME_WIDTH]
-    }
-}
-
-#[derive(Clone)]
 pub struct CptvFrameHeader {
     pub time_on: u32,
 
@@ -129,178 +145,53 @@ pub struct CptvFrameHeader {
     pub frame_temp_c: f32,
 }
 
-impl CptvFrameHeader {
-    pub fn new() -> CptvFrameHeader {
-        CptvFrameHeader {
-            time_on: 0,
-            bit_width: 0,
-            frame_size: 0,
-            last_ffc_time: 0,
-            last_ffc_temp_c: 0.0,
-            frame_temp_c: 0.0,
-        }
-    }
-}
+fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u16, u16, i32) {
+    // Here we are doing *intra-frame* delta encoding between this frame `curr` and the previous
+    // frame if present.  If there was no previous frame, `prev_frame` will be all zeros.
 
-impl FrameData {
-    pub fn new() -> FrameData {
-        FrameData {
-            data: [0; FRAME_WIDTH * FRAME_HEIGHT],
-            min: u16::MAX,
-            max: u16::MIN,
-        }
-    }
+    // We need to work out during the delta encoding what the min and max frame values are
+    // for eventual playback normalization purposes.
 
-    pub fn view(&self, x: usize, y: usize, w: usize, h: usize) -> impl Iterator<Item = &u16> {
-        let start_row = y * FRAME_WIDTH;
-        let end_row = (y + h) * FRAME_WIDTH;
-        self.data[start_row..end_row]
-            .chunks_exact(FRAME_WIDTH)
-            .into_iter()
-            .flat_map(move |row| row.iter().skip(x).take(w))
-    }
+    // IDEA: Images from lepton often seem to have vertical noise bands that are similar
+    // - so rotating the image by 90 degrees before compressing could be a win.
 
-    pub fn view_mut(
-        &mut self,
-        x: usize,
-        y: usize,
-        w: usize,
-        h: usize,
-    ) -> impl Iterator<Item = &mut u16> {
-        let start_row = y * FRAME_WIDTH;
-        let end_row = (y + h) * FRAME_WIDTH;
-        self.data[start_row..end_row]
-            .chunks_exact_mut(FRAME_WIDTH)
-            .into_iter()
-            .flat_map(move |row| row.iter_mut().skip(x).take(w))
-    }
+    let mut max_value = u16::MIN;
+    let mut min_value = u16::MAX;
 
-    pub fn data(&self) -> &[u16] {
-        &self.data
-    }
-
-    pub fn set(&mut self, x: usize, y: usize, val: u16) {
-        // Ignore edge pixels for this?
-        self.max = u16::max(self.max, val);
-        self.min = u16::min(self.min, val);
-        self[y][x] = val;
-    }
-}
-
-fn delta_encode_frame_data(prev_frame: &mut [u16], curr: &[u16]) -> (u8, u16, u16) {
-    // We need to work out after the delta encoding what the range is, and how many bits we can pack
-    // this into.
-
-    // Here we are doing intra-frame delta encoding between this frame and the previous frame if
-    // present.
     let snake_iter = (0..FRAME_WIDTH)
         .chain((0..FRAME_WIDTH).rev())
         .cycle()
         .take(FRAME_WIDTH * FRAME_HEIGHT)
         .enumerate()
         .map(|(index, i)| (index / FRAME_WIDTH) * FRAME_WIDTH + i);
-    //.skip(1);
-    let mut prev_val = 0;
-
-    // IDEA: Images from lepton often seem to have vertical noise bands that are similar
-    // - so rotating the image by 90 degrees before compressing could be a win.
-
-    // NOTE: This decimates the output, taking total compression from 3.x:1 to 5:1
-    //let cutoff = CUTOFF; // Is the cutoff fine being symmetrical around zero?
-    // TODO: Once we know our warm body cutoff, we can also apply this only to cooler pixels?
-
-    let mut max_value = u16::MIN;
-    let mut min_value = u16::MAX;
 
     // NOTE: We can ignore the first pixel when working out our range, since that is always a literal u32
-    // let curr_px = unsafe { curr.get_unchecked(0) };
-    // info!("First frame px {}", *curr_px);
-    // let prev_raw = unsafe { prev_frame.get_unchecked(0) };
-    // let mut val = *curr_px as i32 - *prev_raw as i32;
-    // let delta = val - prev_val;
-    // info!("First frame delta {}", delta);
-    // *unsafe { output.get_unchecked_mut(0) } = delta;
-    // prev_val = val;
-
-    // TODO: Try having a separate buffer for prev_frame?
-    let max = i16::MAX as i32;
-    let min = i16::MIN as i32;
-    let mut bits_per_pixel = 8;
-    let mut i = 0;
-    for input_index in snake_iter {
-        let curr_px = unsafe { curr.get_unchecked(input_index) };
-        max_value = max_value.max(*curr_px);
-        min_value = min_value.min(*curr_px);
-        let prev_raw = unsafe { prev_frame.get_unchecked(input_index) };
-        let val = *curr_px as i32 - *prev_raw as i32;
+    let max = i32::from(i16::MAX);
+    let min = i32::from(i16::MIN);
+    let initial_value = i32::from(curr[0]) - i32::from(prev_frame[0]);
+    let mut prev_val = 0;
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    for offset in snake_iter {
+        let curr_px = unsafe { *curr.get_unchecked(offset) };
+        let prev_px = unsafe { prev_frame.get_unchecked_mut(offset) };
+        max_value = max_value.max(curr_px);
+        min_value = min_value.min(curr_px);
+        let val = i32::from(curr_px) - i32::from(*prev_px);
+        // The actual delta is a delta of deltas.  So first intra-frame, then iter-pixel.
         let delta = val - prev_val;
-
-        assert!(
+        debug_assert!(
             delta >= min,
-            "delta {}, min {}, val {}, prev_val {}, curr_px {}, prev_px {}",
-            delta,
-            min,
-            val,
-            prev_val,
-            curr_px,
-            prev_raw
+            "delta {delta}, min {min}, val {val}, prev_val {prev_val}, curr_px {curr_px}, prev_px {prev_px}",
         );
-        assert!(
+        debug_assert!(
             delta <= max,
-            "delta {}, max {}, val {}, prev_val {}, curr_px {}, prev_px {}",
-            delta,
-            max,
-            val,
-            prev_val,
-            curr_px,
-            prev_raw
+            "delta {delta}, max {max}, val {val}, prev_val {prev_val}, curr_px {curr_px}, prev_px {prev_px}",
         );
-        if i > 0 && (delta > 127 || delta < -127) {
-            bits_per_pixel = 16;
-        }
-        *unsafe { prev_frame.get_unchecked_mut(input_index) } = delta as u16;
-        i += 1;
+        *prev_px = delta as u16;
         prev_val = val;
     }
-    // NOTE: If we go from 65535 to 0 in one step, that's a delta of -65535 which doesn't fit into 16 bits.
-    //  Can this happen ever with real input?  How should we guard against it?
-    //  Are there more realistic scenarios which don't work?  Let's get a bunch of lepton 3.5 files
-    //  and work out the ranges there.\
-
-    // NOTE: To play nice with lz77, we only want to pack to bytes
-    let px_1 = unsafe { *prev_frame.get_unchecked(1) };
-    {
-        let px = unsafe { *prev_frame.get_unchecked(0) } as i16;
-        let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
-        LittleEndian::write_u32(&mut prev_as_u8[0..4], px as u32);
-    }
-    //need to reverse every odd row
-    for i in (1..FRAME_HEIGHT).step_by(2) {
-        let row_i: usize = FRAME_WIDTH * i;
-        for z in 0..FRAME_WIDTH / 2 {
-            let swap_px = *unsafe { prev_frame.get_unchecked(row_i + z) };
-            let other_px = *unsafe { prev_frame.get_unchecked(row_i + FRAME_WIDTH - z - 1) };
-            *unsafe { prev_frame.get_unchecked_mut(row_i + z) } = other_px;
-            *unsafe { prev_frame.get_unchecked_mut(row_i + FRAME_WIDTH - z - 1) } = swap_px;
-        }
-    }
-    // shift pixels 1 faster way to do this??
-    for i in (2..prev_frame.len() - 1).rev() {
-        unsafe { *prev_frame.get_unchecked_mut(i + 1) = *prev_frame.get_unchecked(i) };
-    }
-    *unsafe { prev_frame.get_unchecked_mut(2) } = px_1;
-    if bits_per_pixel == 8 {
-        let prev_as_u8 = unsafe { u16_slice_to_u8_mut(prev_frame) };
-        let mut u16_i = 3 * 2;
-
-        for i in 5..(prev_as_u8.len() / 2) {
-            let px = unsafe { *prev_as_u8.get_unchecked(u16_i) } as u8;
-            *unsafe { prev_as_u8.get_unchecked_mut(i) } = px;
-            u16_i += 2;
-        }
-    }
-
-    (bits_per_pixel, min_value, max_value)
+    (min_value, max_value, initial_value)
 }
 struct FieldIterator {
     state: [u8; 30], // TODO: What is the actual high-water mark for field sizes?
@@ -312,6 +203,7 @@ struct FieldIterator {
 impl Iterator for FieldIterator {
     type Item = u8;
 
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.size == 0 {
@@ -322,7 +214,7 @@ impl Iterator for FieldIterator {
                 Some(self.size)
             } else if self.cursor == 2 {
                 Some(self.code)
-            } else if self.cursor <= (self.size as u16) + 2 {
+            } else if self.cursor <= u16::from(self.size) + 2 {
                 Some(self.state[self.cursor as usize - 3])
             } else {
                 None
@@ -331,37 +223,23 @@ impl Iterator for FieldIterator {
     }
 }
 
-struct FrameHeaderIterator {
-    state: [u8; 2],
-    cursor: u8,
-}
-
-impl Iterator for FrameHeaderIterator {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.cursor == 0 {
-            self.cursor += 1;
-            Some(self.state[0])
-        } else if self.cursor == 1 {
-            self.cursor += 1;
-            Some(self.state[1])
-        } else {
-            None
-        }
-    }
-}
-
 fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
-    let size = mem::size_of_val(value);
+    let size = size_of_val(value);
+    #[allow(clippy::cast_possible_truncation)]
     let size = if size > 8 {
-        // This is a 0 terminated string
-        let slice = unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size) };
+        // This is a zero-terminated string - or if the slice is full, it just has the length of the
+        // slice as its termination/length.
+        let slice = unsafe {
+            core::slice::from_raw_parts(core::ptr::from_ref::<T>(value).cast::<u8>(), size)
+        };
         let length = slice.iter().position(|&x| x == 0).unwrap_or(size - 1);
+        assert!(u8::try_from(length).is_ok());
         length as u8
     } else {
         size as u8
     };
+
+    // FIXME: Longer device names are truncated, so why allow longer device names elsewhere at all?
     //assert!(size <= 30);
     let mut iter_state = FieldIterator {
         state: [0u8; 30],
@@ -371,14 +249,14 @@ fn push_field_iterator<T: Sized>(value: &T, code: FieldType) -> FieldIterator {
     };
 
     iter_state.state[0..size as usize].copy_from_slice(unsafe {
-        core::slice::from_raw_parts(value as *const T as *const u8, size as usize)
+        core::slice::from_raw_parts(core::ptr::from_ref::<T>(value).cast::<u8>(), size as usize)
     });
     iter_state
 }
 
 /// This is a pre-computed dynamic LZ77 (deflate) header.
 /// It starts with the block type b10 (dynamic) and is followed by the pre-computed huffman table
-/// code length descriptions see: (Deflate spec)[https://www.ietf.org/rfc/rfc1951.txt]
+/// code length descriptions see: [Deflate spec](https://www.ietf.org/rfc/rfc1951.txt)
 /// For our purposes of writing out CPTV files, we only use a 1:1 byte mapping of literal values to
 /// huffman codes, we don't attempt to do matching of longer patterns in the data stream,
 /// since this would a) take more memory, and b) have a less constant performance profile.
@@ -397,39 +275,43 @@ pub struct CptvStream<'a> {
     huffman_table: &'a [HuffmanEntry; 257],
     crc_val: u32,
     total_uncompressed: u32,
-    pub starting_block_index: u16,
-    pub num_frames: u32,
+    pub starting_block_index: BlockIndex,
+    num_frames: u32,
+    recording_type: RecordingFileTypeDetails,
 }
 
 pub fn make_crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
-    for n in 0..256 {
+    for (n, slot) in table.iter_mut().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
         let mut c = n as u32;
         for _ in 0..8 {
             if c & 1 == 1 {
-                c = 0xedb88320 ^ (c >> 1);
+                c = 0xedb8_8320 ^ (c >> 1);
             } else {
-                c = c >> 1;
+                c >>= 1;
             }
         }
-        table[n] = c;
+        *slot = c;
     }
     table
 }
 
 impl<'a> CptvStream<'a> {
     pub fn new(
-        current_time: u64,
+        current_time: i64,
         lepton_version: u8,
-        lepton_serial: Option<u32>,
-        lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
+        lepton_serial: u32,
+        lepton_firmware_version: ((u8, u8, u8), (u8, u8, u8)),
         device_config: &DeviceConfig,
-        flash_storage: &mut OnboardFlash,
+        fs: &mut OnboardFlash,
         huffman_table: &'a [HuffmanEntry; 257],
         crc_table: &'a [u32; 256],
-        is_status_recording: bool,
+        is_startup_status_recording: bool,
+        is_shutdown_status_recording: bool,
+        is_user_requested_recording: bool,
     ) -> CptvStream<'a> {
-        let starting_block_index = flash_storage.start_file(1);
+        let starting_block_index = fs.start_file(1);
 
         // Camera serial, camera firmware, location_altitude, location_timestamp, location_accuracy
         let cptv_header = Cptv2Header::new(
@@ -438,17 +320,47 @@ impl<'a> CptvStream<'a> {
             lepton_serial,
             lepton_firmware_version,
             device_config,
-            is_status_recording,
+            is_startup_status_recording,
+            is_shutdown_status_recording,
+            is_user_requested_recording,
         );
+        let recording_type = RecordingFileTypeDetails {
+            startup_status: is_startup_status_recording,
+            shutdown_status: is_shutdown_status_recording,
+            user_requested: is_user_requested_recording,
+        };
         CptvStream {
             cursor: BitCursor::new(),
             crc_table,
             huffman_table,
             crc_val: 0,
             total_uncompressed: 0,
-            starting_block_index: starting_block_index as u16,
+            starting_block_index,
             cptv_header,
             num_frames: 0,
+            recording_type,
+        }
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    pub fn push_byte(&mut self, byte: u8, fs: &mut OnboardFlash) {
+        self.total_uncompressed += 1;
+        self.crc_val ^= 0xffff_ffff;
+        self.crc_val = self.crc_table[((self.crc_val ^ u32::from(byte)) & 0xff) as usize]
+            ^ (self.crc_val >> 8);
+        self.crc_val ^= 0xffff_ffff;
+        let entry = &self.huffman_table[usize::from(byte)];
+        self.cursor
+            .write_bits(u32::from(entry.code), u32::from(entry.bits));
+
+        if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
+            _ = fs.append_recording_bytes(
+                to_flush,
+                num_bytes,
+                RecordingFileType::Cptv(self.recording_type),
+            );
+            self.cursor.flush_residual_bits();
         }
     }
 
@@ -457,12 +369,12 @@ impl<'a> CptvStream<'a> {
     /// of a 'dynamic' gzip block, with pre-calculated huffman tables describing only literals
     /// (not match lengths or distances).  This will always be smaller than our page size of 2048 bytes
     /// so there's no need to check if we need to flush out to flash memory.
-    pub fn init_gzip_stream(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
+    pub fn init_gzip_stream(&mut self, fs: &mut OnboardFlash, at_header_location: bool) {
         self.crc_val = 0;
         self.total_uncompressed = 0;
 
         let (block_index, page_index) = if at_header_location {
-            (Some(self.starting_block_index as isize), Some(0isize))
+            (Some(self.starting_block_index), Some(0))
         } else {
             (None, None)
         };
@@ -474,95 +386,164 @@ impl<'a> CptvStream<'a> {
         {
             self.cursor.write_byte(*byte);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                _ = flash_storage.append_file_bytes(
+                _ = fs.append_recording_bytes_at_location(
                     to_flush,
                     num_bytes,
-                    false,
                     block_index,
                     page_index,
+                    RecordingFileType::Cptv(self.recording_type),
                 );
                 self.cursor.flush_residual_bits();
             }
         }
         self.cursor.write_bits(
-            STATIC_LZ77_DYNAMIC_BLOCK_HEADER[STATIC_LZ77_DYNAMIC_BLOCK_HEADER.len() - 1] as u32,
+            u32::from(STATIC_LZ77_DYNAMIC_BLOCK_HEADER[STATIC_LZ77_DYNAMIC_BLOCK_HEADER.len() - 1]),
             5,
         );
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = flash_storage.append_file_bytes(
+            _ = fs.append_recording_bytes_at_location(
                 to_flush,
                 num_bytes,
-                false,
                 block_index,
                 page_index,
+                RecordingFileType::Cptv(self.recording_type),
             );
             self.cursor.flush_residual_bits();
         }
     }
 
     /// Add a new frame to the current CPTV stream, flushing out pages to the flash storage as needed.
+    /// This takes two "raw" frames of u16 values, and writes the delta-encoded result into the
+    /// `prev_frame` buffer.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_wrap)]
     pub fn push_frame(
         &mut self,
         current_frame: &[u16],
         prev_frame: &mut [u16],
         frame_telemetry: &Telemetry,
-        flash_storage: &mut OnboardFlash,
+        fs: &mut OnboardFlash,
     ) {
-        let (bit_width, min_value, max_value) = delta_encode_frame_data(prev_frame, current_frame);
-        let frame_size = 4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (bit_width as u32 / 8);
+        let (min_value, max_value, initial_px) = delta_encode_frame_data(prev_frame, current_frame);
+        let delta_encoded_frame = prev_frame;
+
+        // We need to work out what the max delta range is and how many bits we can pack this into.
+        // In this implementation, we represent the delta-encoded pixels as either
+        // 8 or 16 bit values, since we want to pack nicely into full bytes to maximize entropy
+        // so that the lz77 algorithm has a lot of the same values to work with.
+        // The CPTV file format has these delta pixel values encoded in a zig-zag or snake
+        // pattern for each row of pixels: Note that the first row has the first 2 u16 values
+        // actually representing an u32 value of the starting value for the frame
+        // ...for purely historical reasons.
+
+        // ↓↓ : u32 starting value
+        // -----------┐
+        //  ┌---------┘
+        //  └---------┐
+        //  ┌---------┘
+        //  └----------
+        // ... etc
+        let i8_min = i16::from(i8::MIN);
+        let i8_max = i16::from(i8::MAX);
+        let bits_per_pixel = if delta_encoded_frame[1..]
+            .iter()
+            .map(|&x| x as i16)
+            .any(|x| x < i8_min || x > i8_max)
+        {
+            16
+        } else {
+            8
+        };
+        let frame_size_bytes =
+            4 + ((FRAME_HEIGHT * FRAME_WIDTH) - 1) as u32 * (u32::from(bits_per_pixel) / 8);
         let frame_header = CptvFrameHeader {
             time_on: frame_telemetry.msec_on,
             last_ffc_time: frame_telemetry.time_at_last_ffc,
-            bit_width,
-            frame_size,
+            bit_width: bits_per_pixel,
+            frame_size: frame_size_bytes,
             last_ffc_temp_c: frame_telemetry.fpa_temp_c_at_last_ffc,
             frame_temp_c: frame_telemetry.fpa_temp_c,
         };
         let frame_header_iter = frame_header_iter(&frame_header);
-        let delta_encoded = unsafe { &u16_slice_to_u8(&prev_frame)[0..frame_size as usize] };
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
         if self.cptv_header.total_frame_count % 10 == 0 {
             info!(
-                "Write frame #{}, {}",
+                "Write frame #{}, (#{} in telemetry)",
                 self.cptv_header.total_frame_count, frame_telemetry.frame_num
             );
         }
-        for byte in frame_header_iter.chain(delta_encoded.iter().map(|&x| x)) {
-            self.total_uncompressed += 1;
-            self.crc_val = self.crc_val ^ 0xffffffff;
-            self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
-                ^ (self.crc_val >> 8);
-            self.crc_val = self.crc_val ^ 0xffffffff;
-            let entry = &self.huffman_table[byte as usize];
-            self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                _ = flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                self.cursor.flush_residual_bits();
+
+        let snake_iter = delta_encoded_frame
+            .chunks_exact(FRAME_WIDTH)
+            .step_by(2)
+            .zip(
+                delta_encoded_frame
+                    .chunks_exact(FRAME_WIDTH)
+                    .skip(1)
+                    .step_by(2),
+            )
+            .flat_map(|(even_row, odd_row)| even_row.iter().chain(odd_row.iter().rev()))
+            .skip(1);
+        // NOTE: Here we can insert the i32 start pixel at the beginning of each frame.
+        for byte in frame_header_iter.chain(initial_px.to_le_bytes()) {
+            self.push_byte(byte, fs);
+        }
+        if bits_per_pixel == 16 {
+            for px in snake_iter {
+                for byte in px.to_be_bytes() {
+                    self.push_byte(byte, fs);
+                }
+            }
+        } else {
+            for &px in snake_iter {
+                self.push_byte(px as u8, fs);
             }
         }
-
         self.num_frames += 1;
     }
 
-    fn write_gzip_trailer(&mut self, flash_storage: &mut OnboardFlash, at_header_location: bool) {
+    pub fn len(&self) -> u32 {
+        self.num_frames
+    }
+
+    pub fn reached_max_length(&self) -> bool {
+        if self.recording_type.startup_status || self.recording_type.shutdown_status {
+            self.num_frames >= NUM_STATUS_RECORDING_FRAMES
+        } else {
+            let max_length_in_frames = if crate::frame_processing::THERMAL_DEV_MODE {
+                60 * 9
+            } else {
+                60 * 10 * 9
+            };
+            self.num_frames >= max_length_in_frames
+        }
+    }
+
+    fn write_gzip_trailer(
+        &mut self,
+        fs: &mut OnboardFlash,
+        at_header_location: bool,
+        time: Option<&SyncedDateTime>,
+    ) {
         let (block_index, page_index) = if at_header_location {
-            (Some(self.starting_block_index as isize), Some(0isize))
+            (Some(self.starting_block_index), Some(0))
         } else {
             (None, None)
         };
 
         // End the actual data stream by writing out the end of stream literal.
         let entry = &self.huffman_table[256];
-        self.cursor.write_bits(entry.code as u32, entry.bits as u32);
+        self.cursor
+            .write_bits(u32::from(entry.code), u32::from(entry.bits));
         if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-            _ = flash_storage.append_file_bytes(
+            _ = fs.append_recording_bytes_at_location(
                 to_flush,
                 num_bytes,
-                false,
                 block_index,
                 page_index,
+                RecordingFileType::Cptv(self.recording_type),
             );
             self.cursor.flush_residual_bits();
         }
@@ -571,12 +552,12 @@ impl<'a> CptvStream<'a> {
         let needs_flush = self.cursor.end_aligned();
         if needs_flush {
             let (to_flush, num_bytes) = self.cursor.flush();
-            _ = flash_storage.append_file_bytes(
+            _ = fs.append_recording_bytes_at_location(
                 to_flush,
                 num_bytes,
-                false,
                 block_index,
                 page_index,
+                RecordingFileType::Cptv(self.recording_type),
             );
             self.cursor.flush_residual_bits();
         }
@@ -587,12 +568,12 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                let _ = flash_storage.append_file_bytes(
+                let _ = fs.append_recording_bytes_at_location(
                     to_flush,
                     num_bytes,
-                    false,
                     block_index,
                     page_index,
+                    RecordingFileType::Cptv(self.recording_type),
                 );
                 self.cursor.flush_residual_bits();
             }
@@ -602,12 +583,12 @@ impl<'a> CptvStream<'a> {
         for b in buf {
             self.cursor.write_byte(b);
             if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                let _ = flash_storage.append_file_bytes(
+                let _ = fs.append_recording_bytes_at_location(
                     to_flush,
                     num_bytes,
-                    false,
                     block_index,
                     page_index,
+                    RecordingFileType::Cptv(self.recording_type),
                 );
                 self.cursor.flush_residual_bits();
             }
@@ -616,40 +597,53 @@ impl<'a> CptvStream<'a> {
         // and write out to storage.
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
-        let _ = flash_storage.append_file_bytes(
-            to_flush,
-            num_bytes,
-            !at_header_location,
-            block_index,
-            page_index,
-        );
+        if at_header_location {
+            let _ = fs.append_recording_bytes_at_location_with_time(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                RecordingFileType::Cptv(self.recording_type),
+                time,
+            );
+        } else {
+            // Write the last part of the file
+            let _ = fs.append_last_recording_bytes_at_location(
+                to_flush,
+                num_bytes,
+                block_index,
+                page_index,
+                RecordingFileType::Cptv(self.recording_type),
+            );
+        }
     }
 
     /// End the current CPTV stream, and write out the CPTV header as a separate gzip member which
     /// will be prepended to the main data stream when transferred out to the raspberry pi.  These
     /// two gzip 'members' or self-contained gip streams when concatenated are themselves a valid
     /// gzip stream, and therefore make up a valid CPTV file.
-    pub fn finalise(&mut self, flash_storage: &mut OnboardFlash) {
+    pub fn finalise(&mut self, fs: &mut OnboardFlash, time: &SyncedDateTime) {
         // Write out the gzip trailer for the main data - the CPTV frames.
-        self.write_gzip_trailer(flash_storage, false);
+        self.write_gzip_trailer(fs, false, None);
 
         // Now write the CPTV header into the first page of the starting block as a separate gzip member,
         // now that we know the total frame count for the recording, and the min/max pixel values.
-        self.init_gzip_stream(flash_storage, true);
-        for byte in push_header_iterator(&self.cptv_header) {
-            self.total_uncompressed += 1;
-            self.crc_val = self.crc_val ^ 0xffffffff;
-            self.crc_val = self.crc_table[((self.crc_val ^ byte as u32) & 0xff) as usize]
-                ^ (self.crc_val >> 8);
-            self.crc_val = self.crc_val ^ 0xffffffff;
-            let entry = &self.huffman_table[byte as usize];
-            self.cursor.write_bits(entry.code as u32, entry.bits as u32);
-            if let Some((to_flush, num_bytes)) = self.cursor.should_flush() {
-                _ = flash_storage.append_file_bytes(to_flush, num_bytes, false, None, None);
-                self.cursor.flush_residual_bits();
-            }
+        self.init_gzip_stream(fs, true);
+        for byte in push_header_iterator(&self.cptv_header.clone()) {
+            self.push_byte(byte, fs);
         }
-        self.write_gzip_trailer(flash_storage, true);
+        self.write_gzip_trailer(fs, true, Some(time));
+
+        if self.recording_type.user_requested {
+            fs.file_types_found.add_type(FileType::CptvUserRequested);
+        } else if self.recording_type.shutdown_status {
+            fs.file_types_found.add_type(FileType::CptvShutdown);
+        } else if self.recording_type.startup_status {
+            fs.file_types_found.add_type(FileType::CptvStartup);
+            fs.last_startup_recording_time = Some(time.date_time());
+        } else {
+            fs.file_types_found.add_type(FileType::CptvScheduled);
+        }
     }
 }
 
@@ -667,12 +661,12 @@ impl HeaderIterator {
     }
 }
 
-pub fn frame_header_iter<'a>(frame_header: &'a CptvFrameHeader) -> impl Iterator<Item = u8> + 'a {
+pub fn frame_header_iter(frame_header: &CptvFrameHeader) -> impl Iterator<Item = u8> + '_ {
     // Write the frame header
     // We know the number of fields up front:
     [b'F', 6]
         .iter()
-        .map(|x| *x)
+        .copied()
         .chain(push_field_iterator(
             &frame_header.frame_size,
             FieldType::FrameSize,
@@ -699,6 +693,7 @@ pub fn frame_header_iter<'a>(frame_header: &'a CptvFrameHeader) -> impl Iterator
         ))
 }
 
+#[allow(clippy::ref_option)]
 fn push_optional_field_iterator<T: Sized>(value: &Option<T>, code: FieldType) -> FieldIterator {
     if let Some(value) = value {
         push_field_iterator(value, code)
@@ -726,10 +721,9 @@ impl Iterator for HeaderIterator {
     }
 }
 pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
-    let num_header_fields = 12u8;
+    let num_header_fields = 14u8;
+    #[allow(clippy::cast_possible_truncation)]
     let num_optional_header_fields = [
-        header.serial_number.is_some(),
-        header.firmware_version.is_some(),
         header.latitude.is_some(),
         header.longitude.is_some(),
         header.loc_timestamp.is_some(),
@@ -737,8 +731,8 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
         header.accuracy.is_some(),
         header.status_recording.is_some(),
     ]
-    .iter()
-    .filter(|x| **x)
+    .into_iter()
+    .filter(|&x| x)
     .count() as u8;
     HeaderIterator::new(num_header_fields + num_optional_header_fields)
         .chain(push_field_iterator(&header.min_value, FieldType::MinValue))
@@ -748,29 +742,23 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
             FieldType::NumFrames,
         ))
         .chain(push_field_iterator(&header.timestamp, FieldType::Timestamp))
-        .chain(push_field_iterator(&(FRAME_WIDTH as u32), FieldType::Width))
-        .chain(push_field_iterator(
-            &(FRAME_HEIGHT as u32),
-            FieldType::Height,
-        ))
+        .chain(push_field_iterator(&FRAME_WIDTH_U32, FieldType::Width))
+        .chain(push_field_iterator(&FRAME_HEIGHT_U32, FieldType::Height))
         .chain(push_field_iterator(&1u8, FieldType::Compression))
         .chain(push_field_iterator(&9u8, FieldType::FrameRate))
         .chain(push_field_iterator(
             &header.device_name,
             FieldType::DeviceName,
         ))
-        .chain(push_field_iterator(
-            &[b'f', b'l', b'i', b'r'],
-            FieldType::Brand,
-        ))
+        .chain(push_field_iterator(&[b"flir"], FieldType::Brand))
         .chain(push_field_iterator(&header.model, FieldType::Model))
         .chain(push_field_iterator(&header.device_id, FieldType::DeviceID))
-        .chain(push_optional_field_iterator(
+        .chain(push_field_iterator(
             &header.serial_number,
             FieldType::CameraSerial,
         ))
-        .chain(push_optional_field_iterator(
-            &header.firmware_version.map_or(None, |x| Some(x)),
+        .chain(push_field_iterator(
+            &header.firmware_version,
             FieldType::FirmwareVersion,
         ))
         .chain(push_optional_field_iterator(
@@ -794,23 +782,23 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
             FieldType::Accuracy,
         ))
         .chain(push_optional_field_iterator(
-            &header.status_recording.map_or(None, |x| Some(x)),
+            &header.status_recording,
             FieldType::MotionConfig,
         ))
-        .into_iter()
 }
 
 // "flir"
 // "lepton3.5"
 // "<unknown>"
+#[derive(Copy, Clone)]
 pub struct Cptv2Header {
-    pub timestamp: u64,
-    pub device_name: [u8; 63],
-    pub model: [u8; 30],
+    pub timestamp: i64,
+    pub device_name: MaybeZeroTerminatedString<63>,
+    pub model: MaybeZeroTerminatedString<30>,
     pub device_id: u32,
-    pub serial_number: Option<u32>,
-    pub firmware_version: Option<[u8; 30]>,
-    pub status_recording: Option<[u8; 30]>,
+    pub serial_number: u32,
+    pub firmware_version: MaybeZeroTerminatedString<30>,
+    pub status_recording: Option<MaybeZeroTerminatedString<30>>,
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
     pub loc_timestamp: Option<u64>,
@@ -824,67 +812,66 @@ pub struct Cptv2Header {
 
 impl Cptv2Header {
     pub fn new(
-        timestamp: u64,
+        timestamp: i64,
         lepton_version: u8,
-        lepton_serial: Option<u32>,
-        lepton_firmware_version: Option<((u8, u8, u8), (u8, u8, u8))>,
-        device_config: &DeviceConfig,
-        is_status_recording: bool,
+        lepton_serial: u32,
+        lepton_firmware_version: ((u8, u8, u8), (u8, u8, u8)),
+        config: &DeviceConfig,
+        is_startup_status_recording: bool,
+        is_shutdown_status_recording: bool,
+        is_user_requested: bool,
     ) -> Cptv2Header {
         // NOTE: Set default values for things not included in
         // older CPTVv1 files, which can otherwise be decoded as
         // v2.
-        let mut firmware = [0u8; 30];
-        let mut cursor = CursorMut::new(&mut firmware);
-        if let Some(((m_major, m_minor, m_build), (d_major, d_minor, d_build))) =
-            lepton_firmware_version
-        {
-            let _ = write!(
-                &mut cursor,
-                "{}.{}.{}/{}.{}.{}/{}",
-                m_major, m_minor, m_build, d_major, d_minor, d_build, FIRMWARE_VERSION
-            );
-        } else {
-            let _ = write!(&mut cursor, "{}", FIRMWARE_VERSION);
-        }
-        let status_recording = if is_status_recording {
-            let mut status = [0u8; 30];
-            info!("Creating status recording");
-            status[0..12].copy_from_slice("status: true".as_bytes());
-            Some(status)
-        } else {
-            None
-        };
+        let mut firmware = MaybeZeroTerminatedString::<30>::new();
+        let mut cursor = CursorMut::new(firmware.as_mut());
+        let ((m_major, m_minor, m_build), (d_major, d_minor, d_build)) = lepton_firmware_version;
 
-        let (lat, lng) = device_config.config().location;
-        let mut header = Cptv2Header {
+        let _ = write!(
+            &mut cursor,
+            "{m_major}.{m_minor}.{m_build}:{d_major}.{d_minor}.{d_build}:{FIRMWARE_VERSION}",
+        );
+
+        let status_recording =
+            if is_startup_status_recording || is_shutdown_status_recording || is_user_requested {
+                let status = if is_startup_status_recording {
+                    info!("Creating startup status recording");
+                    MaybeZeroTerminatedString::new_with_bytes("status: startup".as_bytes())
+                } else if is_shutdown_status_recording {
+                    info!("Creating shutdown status recording");
+                    MaybeZeroTerminatedString::new_with_bytes("status: shutdown".as_bytes())
+                } else {
+                    info!("Creating user requested test recording");
+                    MaybeZeroTerminatedString::new_with_bytes("test: true".as_bytes())
+                };
+
+                Some(status)
+            } else {
+                None
+            };
+
+        let (lat, lng) = config.config().location;
+        Cptv2Header {
             status_recording,
             timestamp,
-            device_name: [0; 63],
-            model: [0; 30],
-            device_id: device_config.config().device_id,
+            device_name: MaybeZeroTerminatedString::new_with_bytes(config.device_name_bytes()),
+            model: MaybeZeroTerminatedString::new_with_bytes(if lepton_version == 35 {
+                &b"lepton3.5"[..]
+            } else {
+                &b"lepton3"[..]
+            }),
+            device_id: config.config().device_id,
             serial_number: lepton_serial,
-            firmware_version: Some(firmware),
+            firmware_version: firmware,
             latitude: Some(lat),
             longitude: Some(lng),
-            loc_timestamp: device_config.config().location_timestamp,
-            altitude: device_config.config().location_altitude,
-            accuracy: device_config.config().location_accuracy,
+            loc_timestamp: config.config().location_timestamp,
+            altitude: config.config().location_altitude,
+            accuracy: config.config().location_accuracy,
             total_frame_count: 0,
             min_value: u16::MAX,
             max_value: u16::MIN,
-        };
-        // NOTE: Device names longer than 30 chars are truncated
-        header.device_name[0..device_config.device_name_bytes().len()].copy_from_slice(
-            &device_config.device_name_bytes()[0..device_config.device_name_bytes().len()],
-        );
-        let model = if lepton_version == 35 {
-            &b"lepton3.5"[..]
-        } else {
-            &b"lepton3"[..]
-        };
-        header.model[0..model.len()].copy_from_slice(model);
-
-        header
+        }
     }
 }

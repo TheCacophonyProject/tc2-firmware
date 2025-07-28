@@ -4,7 +4,7 @@ pub struct HuffmanEntry {
     pub bits: u8,
 }
 
-pub const HUFFMAN_TABLE: [HuffmanEntry; 257] = [
+pub static HUFFMAN_TABLE: [HuffmanEntry; 257] = [
     HuffmanEntry { bits: 1, code: 0 },
     HuffmanEntry { bits: 5, code: 7 },
     HuffmanEntry { bits: 4, code: 5 },

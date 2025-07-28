@@ -1,28 +1,28 @@
 use crate::bsp;
+use crate::bsp::hal::gpio::FunctionSpi;
+use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
+use crate::bsp::hal::spi::Enabled;
+use crate::bsp::hal::{I2C as I2CInterface, Spi};
+use crate::bsp::pac::{RESETS, SPI0};
+use crate::bsp::{hal::gpio::Pin, pac::I2C0};
+use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
+use crate::utils::any_as_u8_slice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
-use core::mem;
-use cortex_m::prelude::{_embedded_hal_blocking_i2c_Write, _embedded_hal_blocking_spi_Transfer};
-use cortex_m::{delay::Delay, prelude::_embedded_hal_blocking_i2c_WriteRead};
+use cortex_m::prelude::*;
+use defmt::{Format, trace};
 use defmt::{error, info, warn};
-use defmt::{trace, Format};
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
+use rp2040_hal::Timer;
 use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
 use rp2040_hal::gpio::{
     FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, PullUp, SioInput, SioOutput,
 };
+use rp2040_hal::i2c::Error;
 
-use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
-use crate::bsp::hal::gpio::FunctionSpi;
-use crate::bsp::hal::spi::Enabled;
-use crate::bsp::hal::{Spi, I2C as I2CInterface};
-use crate::bsp::pac::{RESETS, SPI0};
-use crate::bsp::{hal::gpio::Pin, pac::I2C0};
-use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
-use crate::utils::{any_as_u8_slice, u8_slice_to_u16};
-
+#[allow(clippy::unusual_byte_groupings)]
 pub enum LeptonCommandType {
     Get = 0b0000_0000_0000_00_00,
     Set = 0b0000_0000_0000_00_01,
@@ -33,11 +33,11 @@ pub type LeptonRegister = [u8; 2];
 pub type LeptonSynthesizedCommand = ([u8; 2], u16);
 pub type LeptonCommand = (u16, u16);
 const LEPTON_BOOTED: u16 = 0b100; // If the camera successfully boots up, this bit is set to 1. If this bit is 0, then the camera has not booted. A host can monitor this bit to learn when the camera has booted.
-const LEPTON_BUSY: u16 = 0b000;
+const LEPTON_BUSY: u16 = 0b001;
 const LEPTON_BOOT_MODE: u16 = 0b010; // For normal operation, this bit will be set to 1, indicating successful boot from internal ROM.
 const LEPTON_ADDRESS: u8 = 0x2a;
 
-const LEPTON_POWER_ON_REGISTER: LeptonRegister = lepton_register_val(0x0000);
+const _LEPTON_POWER_ON_REGISTER: LeptonRegister = lepton_register_val(0x0000);
 const LEPTON_STATUS_REGISTER: LeptonRegister = lepton_register_val(0x0002);
 const LEPTON_COMMAND_ID_REGISTER: LeptonRegister = lepton_register_val(0x0004);
 const LEPTON_DATA_LENGTH_REGISTER: LeptonRegister = lepton_register_val(0x0006);
@@ -67,7 +67,7 @@ const LEPTON_SUB_SYSTEM_SYS: u16 = 0b0000_0010_0000_0000;
 const LEPTON_SYS_PING_CAMERA: LeptonCommand = (0x0000, 0);
 const LEPTON_SYS_STATUS: LeptonCommand = (0x0004, 4);
 const LEPTON_SYS_GET_SERIAL: LeptonCommand = (0x0008, 4);
-const LEPTON_SYS_NUM_FRAMES_TO_AVERAGE: LeptonCommand = (0x0024, 2);
+const _LEPTON_SYS_NUM_FRAMES_TO_AVERAGE: LeptonCommand = (0x0024, 2);
 const LEPTON_SYS_FFC_STATUS: LeptonCommand = (0x0044, 2);
 const LEPTON_SYS_STATS: LeptonCommand = (0x002C, 4);
 const LEPTON_SYS_TELEMETRY_ENABLE_STATE: LeptonCommand = (0x0018, 2);
@@ -80,21 +80,21 @@ const LEPTON_VID_FOCUS_ENABLE_STATE: LeptonCommand = (0x000C, 2);
 const LEPTON_AGC_ENABLE_STATE: LeptonCommand = (0x0000, 2);
 const LEPTON_OEM_GPIO_MODE: LeptonCommand = (0x0054, 2);
 const LEPTON_OEM_GPIO_VSYNC_PHASE_DELAY: LeptonCommand = (0x0058, 2);
-const LEPTON_RAD_SPOT_METER_ROI: LeptonCommand = (0x00CC, 4);
+const _LEPTON_RAD_SPOT_METER_ROI: LeptonCommand = (0x00CC, 4);
 const LEPTON_RAD_ENABLE_STATE: LeptonCommand = (0x0010, 2);
 const LEPTON_RAD_TLINEAR_ENABLE_STATE: LeptonCommand = (0x00C0, 2);
-const LEPTON_OEM_REBOOT: LeptonCommand = (0x0040, 0);
+const _LEPTON_OEM_REBOOT: LeptonCommand = (0x0040, 0);
 const LEPTON_OEM_BAD_PIXEL_REPLACEMENT: LeptonCommand = (0x006C, 2);
 const LEPTON_OEM_CAMERA_SOFTWARE_REVISION: LeptonCommand = (0x0020, 4);
 const LEPTON_OEM_TEMPORAL_FILTER: LeptonCommand = (0x0070, 2);
 const LEPTON_OEM_COLUMN_NOISE_FILTER: LeptonCommand = (0x0074, 2);
 const LEPTON_OEM_PIXEL_NOISE_FILTER: LeptonCommand = (0x0078, 2);
-const LEP_OEM_VIDEO_OUTPUT_SOURCE: LeptonCommand = (0x002c, 2);
+const _LEP_OEM_VIDEO_OUTPUT_SOURCE: LeptonCommand = (0x002c, 2);
 const LEPTON_OEM_POWER_DOWN: LeptonCommand = (0x0000, 0);
 const LEPTON_OEM_VIDEO_OUTPUT_ENABLE: LeptonCommand = (0x0024, 2);
 
 // Should be able to just read into these automatically.
-const LEPTON_DATA_1_REGISTER: LeptonRegister = lepton_register_val(0x000A);
+// const LEPTON_DATA_1_REGISTER: LeptonRegister = lepton_register_val(0x000A);
 // const LEPTON_DATA_2_REGISTER: LeptonRegister = lepton_register_val(0x000C);
 // const LEPTON_DATA_3_REGISTER: LeptonRegister = lepton_register_val(0x000E);
 // const LEPTON_DATA_4_REGISTER: LeptonRegister = lepton_register_val(0x0010);
@@ -155,6 +155,7 @@ pub enum LeptonError {
 }
 
 impl LeptonError {
+    #[allow(clippy::enum_glob_use)]
     fn from_i8(value: i8) -> LeptonError {
         use LeptonError::*;
         match value {
@@ -219,6 +220,8 @@ type PowerDown = Pin<Gpio28, FunctionSio<SioOutput>, PullDown>;
 type Reset = Pin<Gpio29, FunctionSio<SioOutput>, PullDown>;
 type ClkDisable = Pin<Gpio27, FunctionSio<SioOutput>, PullDown>;
 type MasterClk = Pin<Gpio26, FunctionSio<SioInput>, PullNone>;
+
+#[allow(dead_code)]
 pub struct LeptonModule {
     spi: Option<Spi<Enabled, SPI0, (SpiTx, SpiRx, SpiClk), 16>>,
     cs: Option<SpiCs>,
@@ -230,9 +233,11 @@ pub struct LeptonModule {
     clk_disable: ClkDisable,
     master_clk: MasterClk,
     is_powered_on: bool,
+    timer: Timer,
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 enum FFCShutterMode {
     Manual = 0,
     Auto = 1,
@@ -240,6 +245,7 @@ enum FFCShutterMode {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 enum FFCTempLockoutState {
     Inactive = 0,
     High = 1,
@@ -269,6 +275,7 @@ impl From<u8> for FFCStatus {
 
 #[repr(C)]
 #[derive(PartialEq)]
+#[allow(dead_code)]
 enum LepSysEnable {
     Disable = 0,
     Enable = 1,
@@ -303,25 +310,31 @@ impl Default for FFCState {
     }
 }
 
-impl FFCState {
-    pub fn ffc_is_needed(&self) -> bool {
-        self.ffc_desired == LepSysEnable::Enable
-    }
+#[derive(Default)]
+pub struct LeptonFirmwareInfo {
+    pub gpp_major: u8,
+    pub gpp_minor: u8,
+    pub gpp_build: u8,
+    pub dsp_major: u8,
+    pub dsp_minor: u8,
+    pub dsp_build: u8,
 }
+
+type EnabledLeptonSpiPeripheral = Spi<
+    Enabled,
+    SPI0,
+    (
+        Pin<Gpio23, FunctionSpi, PullDown>,
+        Pin<Gpio20, FunctionSpi, PullDown>,
+        Pin<Gpio22, FunctionSpi, PullDown>,
+    ),
+    16,
+>;
 
 impl LeptonModule {
     pub fn new(
         i2c: LeptonCciI2c,
-        spi: Spi<
-            Enabled,
-            SPI0,
-            (
-                Pin<Gpio23, FunctionSpi, PullDown>,
-                Pin<Gpio20, FunctionSpi, PullDown>,
-                Pin<Gpio22, FunctionSpi, PullDown>,
-            ),
-            16,
-        >,
+        spi: EnabledLeptonSpiPeripheral,
         cs: Pin<Gpio21, FunctionSpi, PullDown>,
         vsync: Vsync,
         power_enable: Pin<Gpio18, FunctionSio<SioOutput>, PullDown>,
@@ -329,6 +342,7 @@ impl LeptonModule {
         reset: Pin<Gpio29, FunctionSio<SioOutput>, PullDown>,
         clk_disable: Pin<Gpio27, FunctionSio<SioOutput>, PullDown>,
         master_clk: Pin<Gpio26, FunctionSio<SioInput>, PullNone>,
+        timer: Timer,
     ) -> LeptonModule {
         LeptonModule {
             spi: Some(spi),
@@ -341,10 +355,11 @@ impl LeptonModule {
             master_clk,
             cci: i2c,
             is_powered_on: false,
+            timer,
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&mut self) -> Result<(), &'static str> {
         /*
             a. Wait 950 milliseconds minimum after power on, clocks applied, and RESET_L de-asserted
                 • If the camera has an attached shutter, the minimum wait period should be
@@ -357,55 +372,60 @@ impl LeptonModule {
                 • If Bit 0 is 1, then the interface is busy, poll until Bit 0 becomes 0
                 • If Bit 0 is 0, then the interface is ready for receiving commands.
         */
-        info!("=== Init lepton module ===");
-        info!("Disable FFC");
         // NOTE: It's actually quite good if we don't have FFC interrupt the video feed - we can
         //  just discard those frames later based on the telemetry, and this helps with sync.
         let success = self.disable_automatic_ffc();
-        if !success.is_ok() {
-            warn!("{}", success);
+        if success.is_err() {
+            return Err("Could not disable automatic FFC");
         }
 
-        info!("Enable telemetry");
+        //let mut t_enabled = false;
         let success = self.enable_telemetry();
-        if !success.is_ok() {
-            warn!("{}", success);
+        if success.is_err() {
+            warn!("Could not enable telemetry");
         }
-        info!("Telemetry enabled? {}", self.telemetry_enabled());
-        info!("Telemetry location? {}", self.telemetry_location());
-        info!("Enable post-processing");
+        let telemetry_enabled = self.telemetry_enabled();
+        if let Ok(telemetry_enabled) = telemetry_enabled {
+            if !telemetry_enabled {
+                return Err("Telemetry not set");
+            }
+        } else {
+            return Err("Telemetry not set");
+        }
+        let telemetry_location = self.telemetry_location();
+        if let Ok(telemetry_location) = telemetry_location {
+            if telemetry_location != TelemetryLocation::Header {
+                return Err("Telemetry not in header");
+            }
+        } else {
+            return Err("Telemetry not in header");
+        }
         let success = self.enable_post_processing();
-        if !success.is_ok() {
-            warn!("{}", success);
+        if success.is_err() {
+            warn!("Could not set post processing");
         }
-        //let _ = self.disable_t_linear();
+        let radiometry_enabled = self.radiometric_mode_enabled();
+        if let Ok(radiometry_enabled) = radiometry_enabled {
+            if !radiometry_enabled {
+                return Err("Radiometry not enabled");
+            }
+        } else {
+            return Err("Radiometry not enabled");
+        }
 
-        let success = self.radiometric_mode_enabled();
-        info!("Radiometry enabled? {}", success);
-        if !success.is_ok() {
-            warn!("{}", success);
-        }
-        info!("Enable vsync");
         let success = self.enable_vsync();
-        if !success.is_ok() {
-            warn!("{}", success);
+        if success.is_err() {
+            warn!("Could not enable vsync");
         }
-        info!("Vsync enabled? {}", self.vsync_enabled());
-    }
-
-    fn setup_spot_meter_roi(&mut self) -> Result<bool, LeptonError> {
-        // Change spot meter ROI so we can get scene stats per frame
-        self.set_attribute(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_RAD,
-                LEPTON_RAD_SPOT_METER_ROI,
-                LeptonCommandType::Set,
-                true,
-            ),
-            //  [startRow, startCol, endRow, endCol]
-            //&[0, 0, 119, 159],
-            &[79, 59, 80, 60], // If this is set to anything but the default 2x2 pixels, we get visual glitches in the video feed :-/
-        )
+        let vsync_enabled = self.vsync_enabled();
+        if let Ok(vsync_enabled) = vsync_enabled {
+            if !vsync_enabled {
+                return Err("Vsync not enabled");
+            }
+        } else {
+            return Err("Vsync not enabled");
+        }
+        Ok(())
     }
 
     fn enable_post_processing(&mut self) -> Result<bool, LeptonError> {
@@ -420,7 +440,7 @@ impl LeptonModule {
             ),
             1,
         );
-        if !success.is_ok() {
+        if success.is_err() {
             warn!("{}", success);
         }
 
@@ -433,7 +453,7 @@ impl LeptonModule {
             ),
             1,
         );
-        if !success.is_ok() {
+        if success.is_err() {
             warn!("{}", success);
         }
 
@@ -446,7 +466,7 @@ impl LeptonModule {
             ),
             1,
         );
-        if !success.is_ok() {
+        if success.is_err() {
             warn!("{}", success);
         }
 
@@ -459,7 +479,7 @@ impl LeptonModule {
             ),
             1,
         );
-        if !success.is_ok() {
+        if success.is_err() {
             warn!("{}", success);
         }
         success
@@ -473,7 +493,7 @@ impl LeptonModule {
                 LeptonCommandType::Set,
                 true,
             ),
-            if enabled { 1 } else { 0 },
+            i32::from(enabled),
         )
     }
 
@@ -486,21 +506,8 @@ impl LeptonModule {
         ))
     }
 
-    fn disable_t_linear(&mut self) -> Result<bool, LeptonError> {
-        self.set_attribute_i32(
-            lepton_command(
-                LEPTON_SUB_SYSTEM_RAD,
-                LEPTON_RAD_TLINEAR_ENABLE_STATE,
-                LeptonCommandType::Set,
-                true,
-            ),
-            0,
-        )
-    }
-
     pub fn reset_spi(
         &mut self,
-        delay: &mut Delay,
         resets: &mut RESETS,
         freq: HertzU32,
         baudrate: HertzU32,
@@ -516,13 +523,13 @@ impl LeptonModule {
         let mut sck = sck.into_push_pull_output();
         cs.set_high().unwrap();
         sck.set_high().unwrap(); // SCK is high when idle
-        delay.delay_ms(200);
+        self.timer.delay_ms(200);
         cs.set_low().unwrap();
         sck.set_low().unwrap();
         self.cs = Some(cs.into_function::<FunctionSpi>());
         let sck = sck.into_function::<FunctionSpi>();
 
-        self.spi = Some(Spi::new(spi, (tx, rx, sck)).init(resets, freq, baudrate, &MODE_3));
+        self.spi = Some(Spi::new(spi, (tx, rx, sck)).init(resets, freq, baudrate, MODE_3));
 
         if print {
             info!("Finished resetting spi");
@@ -530,10 +537,10 @@ impl LeptonModule {
     }
 
     pub fn transfer<'w>(&mut self, words: &'w mut [u16]) -> Result<&'w [u16], Infallible> {
-        return self.spi.as_mut().unwrap().transfer(words);
+        self.spi.as_mut().unwrap().transfer(words)
     }
 
-    pub fn wait_for_ffc_status_ready(&mut self, delay: &mut Delay) -> bool {
+    pub fn wait_for_ffc_status_ready(&mut self) -> bool {
         loop {
             match self.get_attribute(lepton_command(
                 LEPTON_SUB_SYSTEM_SYS,
@@ -544,12 +551,12 @@ impl LeptonModule {
                 Ok((ffc_state, length)) => {
                     let ffc_state = BigEndian::read_i32(&ffc_state[..((length * 2) as usize)]);
                     info!("FFC state {}", ffc_state);
-                    delay.delay_ms(1);
+                    self.timer.delay_ms(1);
                     if ffc_state == 0 {
                         return true;
                     }
                 }
-                Err(err) => {
+                Err(_) => {
                     return false;
                 }
             }
@@ -566,13 +573,14 @@ impl LeptonModule {
             Ok((serial, length)) => {
                 let serial = LittleEndian::read_u64(&serial[..((length * 2) as usize)]);
                 // In practice, we hope serial numbers are less than 32bits.
+                #[allow(clippy::cast_possible_truncation)]
                 Ok(serial as u32)
             }
             Err(err) => Err(err),
         }
     }
 
-    pub fn get_firmware_version(&mut self) -> Result<((u8, u8, u8), (u8, u8, u8)), LeptonError> {
+    pub fn get_firmware_version(&mut self) -> Result<LeptonFirmwareInfo, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_OEM,
             LEPTON_OEM_CAMERA_SOFTWARE_REVISION,
@@ -588,10 +596,14 @@ impl LeptonModule {
                 let dsp_major = firmware_version[0];
                 let dsp_minor = firmware_version[1];
                 let dsp_build = firmware_version[2];
-                Ok((
-                    (gpp_major, gpp_minor, gpp_build),
-                    (dsp_major, dsp_minor, dsp_build),
-                ))
+                Ok(LeptonFirmwareInfo {
+                    gpp_major,
+                    gpp_minor,
+                    gpp_build,
+                    dsp_major,
+                    dsp_minor,
+                    dsp_build,
+                })
             }
             Err(err) => {
                 error!("Err {}", err);
@@ -622,7 +634,7 @@ impl LeptonModule {
 
     pub fn enable_telemetry(&mut self) -> Result<bool, LeptonError> {
         // Enable telemetry
-        let success = self.set_attribute_i32(
+        self.set_attribute_i32(
             lepton_command(
                 LEPTON_SUB_SYSTEM_SYS,
                 LEPTON_SYS_TELEMETRY_ENABLE_STATE,
@@ -630,10 +642,7 @@ impl LeptonModule {
                 false,
             ),
             1,
-        );
-        if !success.is_ok() {
-            return success;
-        }
+        )?;
         // Set location to header
         self.set_attribute_i32(
             lepton_command(
@@ -648,7 +657,7 @@ impl LeptonModule {
 
     pub fn disable_automatic_ffc(&mut self) -> Result<bool, LeptonError> {
         let ffc_struct = FFCState::default();
-        let ffc_struct_bytes = unsafe { u8_slice_to_u16(&any_as_u8_slice(&ffc_struct)) };
+        let ffc_struct_bytes = bytemuck::cast_slice(unsafe { any_as_u8_slice(&ffc_struct) });
         // Enable telemetry
         self.set_attribute(
             lepton_command(
@@ -661,47 +670,6 @@ impl LeptonModule {
         )
     }
 
-    pub fn get_ffc_state(&mut self) -> Result<FFCState, LeptonError> {
-        match self.get_attribute(lepton_command(
-            LEPTON_SUB_SYSTEM_SYS,
-            LEPTON_SYS_FFC_SHUTTER_MODE,
-            LeptonCommandType::Get,
-            false,
-        )) {
-            Ok((state, _length)) => {
-                let struct_size = mem::size_of::<FFCState>();
-                let mut ffc_state = [0u8; 20];
-                ffc_state.copy_from_slice(&state[0..struct_size]);
-                let ffc_state: FFCState = unsafe { mem::transmute(ffc_state) };
-                Ok(ffc_state)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    pub fn get_ffc_status(&mut self) -> Result<FFCStatus, LeptonError> {
-        match self.get_attribute(lepton_command(
-            LEPTON_SUB_SYSTEM_SYS,
-            LEPTON_SYS_FFC_STATUS,
-            LeptonCommandType::Get,
-            false,
-        )) {
-            Ok((state, length)) => {
-                let ffc_status = LittleEndian::read_u32(&state[..((length * 2) as usize)]);
-                let ffc_status: FFCStatus = match ffc_status {
-                    0 => FFCStatus::NeverCommanded,
-                    1 => FFCStatus::Imminent,
-                    2 => FFCStatus::InProgress,
-                    3 => FFCStatus::Done,
-                    _ => panic!("Unknown FFC Status {}", ffc_status),
-                };
-                Ok(ffc_status)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    // TODO: Get FFC desired from camera struct.
     pub fn do_ffc(&mut self) -> Result<bool, LeptonError> {
         self.execute_command_non_blocking(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
@@ -817,35 +785,17 @@ impl LeptonModule {
         ))
     }
 
-    pub fn reboot(&mut self, delay: &mut Delay) -> bool {
-        warn!("Rebooting lepton module");
-        let success = self.execute_command(lepton_command(
-            LEPTON_SUB_SYSTEM_OEM,
-            LEPTON_OEM_REBOOT,
-            LeptonCommandType::Run,
-            true,
-        ));
-        if success.is_err() {
-            warn!("Error {}", success);
-        }
-
-        info!("Waiting 5 seconds");
-        delay.delay_ms(5000);
-        self.init();
-        success.is_ok()
-    }
-
     pub fn is_awake(&self) -> bool {
         self.is_powered_on
     }
 
-    pub fn power_down_sequence(&mut self, delay: &mut Delay) {
+    pub fn power_down_sequence(&mut self) {
         // Putting lepton into standby mode, uses about 5mW in standby mode.
         trace!("power down asserted");
         self.power_down.set_low().unwrap();
 
         // Datasheet says to wait at least 100ms before turning off clock after power down.
-        delay.delay_ms(100);
+        self.timer.delay_ms(100);
         trace!("clk disabled");
         self.clk_disable.set_low().unwrap();
 
@@ -853,40 +803,43 @@ impl LeptonModule {
         trace!("power off");
         self.power_enable.set_low().unwrap();
         self.is_powered_on = false;
-        delay.delay_ms(200);
+        self.timer.delay_ms(200);
     }
 
-    pub fn power_on(&mut self, delay: &mut Delay) {
+    pub fn power_on(&mut self) {
         self.power_enable.set_low().unwrap();
-        delay.delay_ms(100);
+        self.timer.delay_ms(100);
         self.clk_disable.set_low().unwrap();
         self.power_enable.set_high().unwrap();
-        delay.delay_ms(100);
+        self.timer.delay_ms(100);
     }
 
     // Page 18 https://www.flir.com/globalassets/imported-assets/document/flir-lepton-engineering-datasheet.pdf
-    pub fn start_up_sequence(&mut self, delay: &mut Delay) {
+    pub fn start_up_sequence(&mut self) {
         self.power_down.set_high().unwrap();
-        delay.delay_ms(1);
+        self.timer.delay_ms(1);
         self.reset.set_low().unwrap();
-        delay.delay_ms(1);
+        self.timer.delay_ms(1);
         self.clk_disable.set_high().unwrap();
-        delay.delay_ms(1);
+        self.timer.delay_ms(1);
         self.reset.set_high().unwrap();
     }
 
-    pub fn cci_init(&mut self, delay: &mut Delay) {
+    pub fn cci_init(&mut self) {
         trace!("de-assert reset");
-        delay.delay_ms(2000);
+        self.timer.delay_ms(2000);
         trace!("Wait for ready");
         self.wait_for_ready(false);
-        self.init();
+        while let Err(e) = self.init() {
+            error!("{:?}", e);
+            self.cci_init();
+        }
     }
 
-    pub fn power_on_sequence(&mut self, delay: &mut Delay) {
-        self.power_on(delay);
-        self.start_up_sequence(delay);
-        self.cci_init(delay);
+    pub fn power_on_sequence(&mut self) {
+        self.power_on();
+        self.start_up_sequence();
+        self.cci_init();
         self.is_powered_on = true;
     }
 
@@ -921,7 +874,7 @@ impl LeptonModule {
     }
 
     pub fn enable_vsync(&mut self) -> Result<bool, LeptonError> {
-        let success = self.set_attribute_i32(
+        self.set_attribute_i32(
             lepton_command(
                 LEPTON_SUB_SYSTEM_OEM,
                 LEPTON_OEM_GPIO_VSYNC_PHASE_DELAY,
@@ -929,10 +882,7 @@ impl LeptonModule {
                 true,
             ),
             0,
-        );
-        if !success.is_ok() {
-            return success;
-        }
+        )?;
 
         // Set the phase to -1 line, and see if we have less reboots
         self.set_attribute_i32(
@@ -990,12 +940,16 @@ impl LeptonModule {
                 Ok(()) => {
                     camera_status = BigEndian::read_u16(&readbuf);
                     if print {
-                        info!("Booted {}", camera_status & LEPTON_BOOTED != 0);
-                        info!("Busy {}", camera_status & LEPTON_BUSY != 0);
-                        info!("Boot mode {}", camera_status & LEPTON_BOOT_MODE != 0);
+                        info!("Booted {}", camera_status & LEPTON_BOOTED == LEPTON_BOOTED);
+                        info!("Busy {}", camera_status & LEPTON_BUSY == LEPTON_BUSY);
+                        info!(
+                            "Boot mode {}",
+                            camera_status & LEPTON_BOOT_MODE == LEPTON_BOOT_MODE
+                        );
                         info!("Camera status {:#018b}", camera_status);
                     }
-                    camera_status & (LEPTON_BOOTED | LEPTON_BOOT_MODE | LEPTON_BUSY) != 0
+                    camera_status & (LEPTON_BOOTED | LEPTON_BOOT_MODE | LEPTON_BUSY)
+                        == LEPTON_BOOTED | LEPTON_BOOT_MODE
                 }
                 Err(e) => {
                     warn!("i2c Err {:?}", e);
@@ -1003,17 +957,16 @@ impl LeptonModule {
                 }
             } {
                 return LeptonError::from_i8((camera_status >> 8) as i8);
-            } else {
-                failures += 1;
-                if failures > 100 {
-                    return LeptonError::from_i8((camera_status >> 8) as i8);
-                }
-                //warn!("i2c error");
-                if print {
-                    info!("Booted {:#018b}", camera_status & LEPTON_BOOTED);
-                    info!("Boot mode {:#018b}", camera_status & LEPTON_BOOT_MODE);
-                    info!("Busy {:#018b}", camera_status & LEPTON_BUSY);
-                }
+            }
+            failures += 1;
+            if failures > 100 {
+                return LeptonError::from_i8((camera_status >> 8) as i8);
+            }
+            //warn!("i2c error");
+            if print {
+                info!("Booted {:#018b}", camera_status & LEPTON_BOOTED);
+                info!("Boot mode {:#018b}", camera_status & LEPTON_BOOT_MODE);
+                info!("Busy {:#018b}", camera_status & LEPTON_BUSY);
             }
         }
     }
@@ -1026,25 +979,22 @@ impl LeptonModule {
         if success != LeptonError::Ok {
             return Err(success);
         }
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok(false);
         }
 
         let success = self.wait_for_ready(false);
-        if success != LeptonError::Ok {
-            Err(success)
-        } else {
+        if success == LeptonError::Ok {
             Ok(true)
+        } else {
+            Err(success)
         }
     }
 
@@ -1053,16 +1003,12 @@ impl LeptonModule {
         (command, _length): LeptonSynthesizedCommand,
     ) -> Result<bool, LeptonError> {
         self.wait_for_ready(false);
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-                // TODO
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok(false);
@@ -1071,7 +1017,13 @@ impl LeptonModule {
         if success != LeptonError::Ok {
             return Err(success);
         }
-        return Ok(true);
+        Ok(true)
+    }
+
+    fn write(&mut self, payload: &[u8]) -> Result<(), Error> {
+        let result = self.cci.write(LEPTON_ADDRESS, payload);
+        while self.cci.tx_fifo_used() != 0 {}
+        result
     }
 
     fn get_attribute(
@@ -1081,15 +1033,12 @@ impl LeptonModule {
         self.wait_for_ready(false);
         let len = lepton_register_val(length);
         let mut buf = [0u8; 32];
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_DATA_LENGTH_REGISTER[0],
-                LEPTON_DATA_LENGTH_REGISTER[1],
-                len[0],
-                len[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_DATA_LENGTH_REGISTER[0],
+            LEPTON_DATA_LENGTH_REGISTER[1],
+            len[0],
+            len[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok((buf, 0));
@@ -1099,15 +1048,12 @@ impl LeptonModule {
             //warn!("Set attribute error {}", success);
             return Err(success);
         }
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok((buf, 0));
@@ -1137,11 +1083,9 @@ impl LeptonModule {
 
         // Each u16 needs to be read in order before we can read out a u32 properly
         for chunk in buf.chunks_exact_mut(2) {
-            let tmp = chunk[0];
-            chunk[0] = chunk[1];
-            chunk[1] = tmp;
+            chunk.swap(0, 1);
         }
-        return Ok((buf, length));
+        Ok((buf, length))
     }
 
     fn set_attribute_i32(
@@ -1149,6 +1093,7 @@ impl LeptonModule {
         command: LeptonSynthesizedCommand,
         val: i32,
     ) -> Result<bool, LeptonError> {
+        #[allow(clippy::cast_sign_loss)]
         self.set_attribute(
             command,
             &[(val & 0xffff) as u16, (val >> 16 & 0xffff) as u16],
@@ -1167,15 +1112,12 @@ impl LeptonModule {
         //self.wait_for_ffc_status_ready();
         let len = lepton_register_val(length);
 
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_DATA_LENGTH_REGISTER[0],
-                LEPTON_DATA_LENGTH_REGISTER[1],
-                len[0],
-                len[1],
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_DATA_LENGTH_REGISTER[0],
+            LEPTON_DATA_LENGTH_REGISTER[1],
+            len[0],
+            len[1],
+        ]);
 
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
@@ -1189,12 +1131,10 @@ impl LeptonModule {
 
         for (index, word) in words.iter().enumerate() {
             // Data reg 0
+            #[allow(clippy::cast_possible_truncation)]
             let register_address = (0x0008u16 + (index * 2) as u16).to_be_bytes();
             let word = word.to_be_bytes();
-            let success = self.cci.write(
-                LEPTON_ADDRESS,
-                &[register_address[0], register_address[1], word[0], word[1]],
-            );
+            let success = self.write(&[register_address[0], register_address[1], word[0], word[1]]);
             if success.is_err() {
                 warn!("i2c Write error {:?}", success.err().unwrap());
                 return Ok(false);
@@ -1206,16 +1146,12 @@ impl LeptonModule {
             return Err(success);
         }
 
-        let success = self.cci.write(
-            LEPTON_ADDRESS,
-            &[
-                LEPTON_COMMAND_ID_REGISTER[0],
-                LEPTON_COMMAND_ID_REGISTER[1],
-                command[0],
-                command[1],
-                // TODO
-            ],
-        );
+        let success = self.write(&[
+            LEPTON_COMMAND_ID_REGISTER[0],
+            LEPTON_COMMAND_ID_REGISTER[1],
+            command[0],
+            command[1],
+        ]);
         if success.is_err() {
             warn!("i2c Write error {:?}", success.err().unwrap());
             return Ok(false);
@@ -1228,10 +1164,11 @@ impl LeptonModule {
         // Now read out length registers, and assemble them into the return type that we want.
 
         // Now read the status register to see if it worked?
-        return Ok(true);
+        Ok(true)
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 const fn lepton_register_val(cmd: u16) -> LeptonRegister {
     let mut buf = [0; 2];
     buf[0] = (cmd >> 8) as u8;
@@ -1247,7 +1184,7 @@ pub const fn lepton_command(
 ) -> LeptonSynthesizedCommand {
     let mut synthesized_command = sub_system | command.0 | command_type as u16;
     if is_oem {
-        synthesized_command |= synthesized_command | LEPTON_COMMAND_OEM_BIT;
+        synthesized_command |= LEPTON_COMMAND_OEM_BIT;
     }
     (lepton_register_val(synthesized_command), command.1)
 }
@@ -1263,54 +1200,6 @@ pub struct SceneStats {
 pub enum TelemetryLocation {
     Header,
     Footer,
-}
-
-#[derive(Debug, Format)]
-pub struct Telemetry {
-    pub revision: [u8; 2],
-    pub frame_num: u32,
-    pub msec_on: u32,
-    pub msec_since_last_ffc: u32,
-    pub time_at_last_ffc: u32,
-    pub fpa_temp_c: f32,
-    pub fpa_temp_c_at_last_ffc: f32,
-    pub ffc_status: FFCStatus,
-}
-
-struct CentiK {
-    inner: u16,
-}
-
-pub fn read_telemetry(buf: &[u8]) -> Telemetry {
-    let telemetry_revision = LittleEndian::read_u16(&buf[0..2]);
-    let frame_num = LittleEndian::read_u32(&buf[40..44]);
-    let msec_on = LittleEndian::read_u32(&buf[2..6]);
-    let time_at_last_ffc = LittleEndian::read_u32(&buf[60..64]);
-    let msec_since_last_ffc = if msec_on > time_at_last_ffc {
-        msec_on - time_at_last_ffc
-    } else {
-        0
-    };
-    let status_bits = LittleEndian::read_u32(&buf[6..10]);
-    let ffc_state = (((status_bits >> 4) & 0b11) as u8).into();
-    let fpa_temp_kelvin_x_100 = LittleEndian::read_u16(&buf[48..=49]);
-    let fpa_temp_kelvin_x_100_at_last_ffc = LittleEndian::read_u16(&buf[58..=59]);
-
-    let fpa_temp_c = (fpa_temp_kelvin_x_100 as f32 / 100.0) - 273.15;
-    let fpa_temp_c_at_last_ffc = (fpa_temp_kelvin_x_100_at_last_ffc as f32 / 100.0) - 273.15;
-    Telemetry {
-        revision: [
-            (telemetry_revision << 8) as u8,
-            (telemetry_revision & 0x0f) as u8,
-        ],
-        frame_num,
-        msec_on,
-        time_at_last_ffc,
-        msec_since_last_ffc,
-        fpa_temp_c,
-        fpa_temp_c_at_last_ffc,
-        ffc_status: ffc_state,
-    }
 }
 
 pub struct LeptonPins {
@@ -1334,16 +1223,16 @@ pub struct LeptonPins {
 pub fn init_lepton_module(
     spi_peripheral: SPI0,
     ic2_peripheral: I2C0,
-    system_clock_freq_hz: u32,
+    system_clock_freq_hz: HertzU32,
     resets: &mut RESETS,
-    delay: &mut Delay,
+    timer: Timer,
     pins: LeptonPins,
 ) -> LeptonModule {
     let spi = Spi::new(spi_peripheral, (pins.tx, pins.rx, pins.clk)).init(
         resets,
-        system_clock_freq_hz.Hz(),
+        system_clock_freq_hz,
         LEPTON_SPI_CLOCK_FREQ.Hz(),
-        &MODE_3,
+        MODE_3,
     );
     let mut lepton = LeptonModule::new(
         bsp::hal::I2C::i2c0(
@@ -1352,7 +1241,7 @@ pub fn init_lepton_module(
             pins.scl,
             100.kHz(),
             resets,
-            system_clock_freq_hz.Hz(),
+            system_clock_freq_hz,
         ),
         spi,
         pins.cs,
@@ -1362,6 +1251,7 @@ pub fn init_lepton_module(
         pins.reset,
         pins.clk_disable,
         pins.master_clk,
+        timer,
     );
 
     // TODO: When going dormant, can we make sure we don't have any gpio pins in a pullup/down mode.
@@ -1369,8 +1259,8 @@ pub fn init_lepton_module(
         .vsync
         .set_dormant_wake_enabled(Interrupt::EdgeHigh, false);
     info!("Lepton startup sequence");
-    lepton.power_down_sequence(delay);
-    lepton.power_on_sequence(delay);
+    lepton.power_down_sequence();
+    lepton.power_on_sequence();
     // Set wake from dormant on vsync
     lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
     lepton

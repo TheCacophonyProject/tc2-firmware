@@ -24,7 +24,7 @@ impl<'a> Cursor<'a> {
     }
     pub fn remaining_slice(&self) -> &[u8] {
         let len = self.pos.min(self.inner.as_ref().len());
-        &self.inner.as_ref()[len..]
+        &self.inner[len..]
     }
 
     pub fn read_u32(&mut self) -> u32 {
@@ -61,27 +61,13 @@ impl<'a> CursorMut<'a> {
     pub fn new(inner: &'a mut [u8]) -> CursorMut<'a> {
         CursorMut { pos: 0, inner }
     }
-    pub const fn position(&self) -> usize {
-        self.pos
-    }
-    pub fn set_position(&mut self, pos: usize) {
-        self.pos = pos;
-    }
-    pub fn remaining_slice(&mut self) -> &mut [u8] {
-        let len = self.pos.min(self.inner.as_mut().len());
-        &mut self.inner.as_mut()[len..]
-    }
-
-    pub fn data(&mut self) -> &mut [u8] {
-        &mut self.inner.as_mut()[..self.pos]
-    }
 
     pub fn write_bytes(&mut self, bytes: &[u8]) -> fmt::Result {
         // Skip over already-copied data
         let remainder = &mut self.inner[self.pos..];
         // Check if there is space remaining (return error instead of panicking)
         if remainder.len() < bytes.len() {
-            return Err(core::fmt::Error);
+            return Err(fmt::Error);
         }
         // Make the two slices the same length
         let remainder = &mut remainder[..bytes.len()];
@@ -95,15 +81,15 @@ impl<'a> CursorMut<'a> {
     }
 }
 
-impl<'a> ErrorType for Cursor<'a> {
+impl ErrorType for Cursor<'_> {
     type Error = embedded_io::ErrorKind;
 }
 
-impl<'a> ErrorType for CursorMut<'a> {
+impl ErrorType for CursorMut<'_> {
     type Error = embedded_io::ErrorKind;
 }
 
-impl<'a> Read for Cursor<'a> {
+impl Read for Cursor<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let n = Read::read(&mut self.remaining_slice(), buf).unwrap();
         self.pos += n;
@@ -118,7 +104,7 @@ impl<'a> Read for Cursor<'a> {
     }
 }
 
-impl<'a> fmt::Write for CursorMut<'a> {
+impl fmt::Write for CursorMut<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let bytes = s.as_bytes();
 

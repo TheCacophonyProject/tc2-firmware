@@ -1,36 +1,39 @@
 [package]
-edition = "2021"
+edition = "2024"
 name = "tc2-firmware"
-version = "0.1.0"
+version = "0.9.0"
 resolver = "2"
+
+[[bin]]
+name = "tc2-firmware"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
 
 [dependencies]
 
 # bsp dependencies: from rp-hal-boards/rp-pico
-cortex-m = "0.7.2"
+cortex-m = "0.7.7"
 rp2040-boot2 = { version = "0.3.0", optional = true }
-cortex-m-rt = { version = "0.7", optional = true }
-usb-device= "0.2.9"
+cortex-m-rt = { version = "0.7.5", optional = true }
 
 # our dependencies
-embedded-hal = { version = "0.2.7", features = ["unproven"] }
-embedded-io = "0.5.0"
-defmt = "=0.3.2"
-defmt-rtt = "0.4"
-panic-probe = { version = "0.3.1", features = ["print-defmt"] }
-byteorder = { version = "1.4.3", default-features = false }
-byte-slice-cast = { version = "1.2.1", default-features = false }
+embedded-hal = { version = "1.0.0" }
+embedded-io = "0.6.1"
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+byteorder = { version = "1.5.0", default-features = false }
+bytemuck = "1.23.1"
 
-numtoa = "0.2.4"
-critical-section = "1.1.1"
-fugit = "0.3.6"
-crc = "3.0.1"
-chrono = { version  = "0.4.31", default-features = false }
-num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+critical-section = "1.2.0"
+fugit = "0.3.7"
+crc = "3.3.0"
+chrono = { version  = "0.4.41", default-features = false }
+num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 
-rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "bcb7683512363d0bf17675217bbafe7b050b7dcb", features = ["defmt", "eh1_0_alpha"] }
-#rp2040-hal = "0.9.0"
-pcf8563 = "0.1.2"
+rp2040-hal = "0.11.0"
 
 pio = "0.2.1"
 pio-proc = "0.2.1"
@@ -38,7 +41,7 @@ picorand = "0.1.2"
 
 [features]
 # This is the set of features we enable by default
-default = ["boot2", "rt", "critical-section-impl", "rom-func-cache"]
+default = ["boot2", "rt", "critical-section-impl", "rom-func-cache", "defmt", "rom-v2-intrinsics"]
 
 # critical section that is safe for multicore use
 critical-section-impl = ["rp2040-hal/critical-section-impl"]
@@ -48,6 +51,8 @@ boot2 = ["rp2040-boot2"]
 
 # Minimal startup / runtime for Cortex-M microcontrollers
 rt = ["cortex-m-rt","rp2040-hal/rt"]
+
+defmt = ["rp2040-hal/defmt"]
 
 # This enables a fix for USB errata 5: USB device fails to exit RESET state on busy USB bus.
 # Only required for RP2040 B0 and RP2040 B1, but it also works for RP2040 B2 and above
@@ -61,9 +66,6 @@ disable-intrinsics = ["rp2040-hal/disable-intrinsics"]
 
 # This enables ROM functions for f64 math that were not present in the earliest RP2040s
 rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
-
-#defmt = ["rp2040-hal/defmt"]
-#eh1_0_alpha = ["rp2040-hal/eh1_0_alpha"]
 
 # cargo build/run
 [profile.dev]

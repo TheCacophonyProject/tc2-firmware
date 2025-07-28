@@ -1,5 +1,5 @@
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use defmt::{info, Format};
+use defmt::{Format, info};
 
 const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;
@@ -15,7 +15,7 @@ fn trigger_threshold(is_daytime: bool) -> u16 {
         NIGHTTIME_TRIGGER_THRESHOLD
     }
 }
-type HotMap = [(bool, u16); 64];
+type HotMap = [(u8, u16); 64];
 pub struct MotionTracking {
     pub hot_map: HotMap,
     pub hot_count: u8,      // How many total segments are hot
@@ -31,7 +31,7 @@ impl MotionTracking {
         MotionTracking {
             hot_edge_count: 0,
             hot_count: 0,
-            hot_map: [(false, 0u16); 64],
+            hot_map: [(0u8, 0u16); 64],
             timeout_in_n_frames: None,
             triggered_this_frame: false,
             max_delta_variance: 0,
@@ -40,15 +40,13 @@ impl MotionTracking {
     }
 
     fn with_previous(other: &MotionTracking) -> MotionTracking {
-        let next_timeout =
-            other.timeout_in_n_frames.map_or(
-                None,
-                |timeout| if timeout == 0 { None } else { Some(timeout) },
-            );
+        let next_timeout = other
+            .timeout_in_n_frames
+            .and_then(|timeout| if timeout == 0 { None } else { Some(timeout) });
         MotionTracking {
             hot_edge_count: 0,
             hot_count: 0,
-            hot_map: [(false, 0u16); 64],
+            hot_map: [(0u8, 0u16); 64],
             timeout_in_n_frames: next_timeout,
             triggered_this_frame: false,
             cumulative_motion: other.cumulative_motion,
@@ -60,6 +58,10 @@ impl MotionTracking {
         self.hot_count != 0
     }
 
+    fn is_not_triggering(&self) -> bool {
+        !self.is_triggering()
+    }
+
     fn is_triggering_on_apron_only(&self) -> bool {
         self.hot_count != 0 && self.hot_edge_count == self.hot_count
     }
@@ -68,24 +70,8 @@ impl MotionTracking {
         self.timeout_in_n_frames.is_some_and(|count| count == 0)
     }
 
-    pub fn has_triggered(&self) -> bool {
-        self.timeout_in_n_frames.is_some()
-    }
-
     pub fn got_new_trigger(&self) -> bool {
         self.triggered_this_frame
-    }
-
-    pub fn hot_bits(&self) -> [u8; 8] {
-        let mut bytes = [0u8; 8];
-        for y in 0..SEG_DIV {
-            for x in 0..SEG_DIV {
-                if self.hot_map[(y * SEG_DIV) + x].0 {
-                    bytes[y] |= 1 << x;
-                }
-            }
-        }
-        bytes
     }
 
     pub fn was_false_positive(&self) -> bool {
@@ -95,20 +81,21 @@ impl MotionTracking {
 
 // NOTE: If there was an FFC event in the last second, don't try to call this.
 //  FFC events will never be called during a recording (though maybe during a pause?)
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::ref_option)]
 pub fn track_motion(
     current_frame: &[u16],
     prev_frame: &[u16],
     prev_frame_stats: &Option<MotionTracking>,
-    is_daytime: bool,
     mask: &DetectionMask,
 ) -> MotionTracking {
     //  The hot map stores whether a segment is currently triggering, and what it's previous
     //  (pre-triggering) max value was.
     let mut motion_tracking = match prev_frame_stats {
-        Some(ref stats) => MotionTracking::with_previous(&stats),
+        Some(stats) => MotionTracking::with_previous(stats),
         None => MotionTracking::new(),
     };
-    let trigger_threshold_val = trigger_threshold(is_daytime);
+    let trigger_threshold_val = trigger_threshold(true);
 
     for seg_y in 0..SEG_DIV {
         let line = seg_y * SEG_DIV;
@@ -132,11 +119,9 @@ pub fn track_motion(
                         let is_rightmost = xx == 159;
                         let x_edge = is_leftmost || is_rightmost;
                         let mod_x = if x_edge { 30 } else { 0 };
-                        let curr_px = current_frame[idx] as i32;
-                        let prev_px = prev_frame[idx] as i32;
+                        let curr_px = i32::from(current_frame[idx]);
+                        let prev_px = i32::from(prev_frame[idx]);
                         let delta = curr_px - prev_px;
-                        // TODO: Adjust thresholds for lepton3, since it has different scaling.
-                        //  Check dynamic range of lepton3 vs lepton3.5 recordings to understand the mapping.
                         let delta_is_over_threshold = if x_edge || y_edge {
                             seg_max = seg_max.max(curr_px - ATTENUATION_OFFSET);
                             delta > 50 + mod_x + mod_y
@@ -154,19 +139,25 @@ pub fn track_motion(
             // Because things are usually smaller/further away towards the top of the frame,
             // we may want to allow triggering on smaller amounts of motion at the top of the
             // frame.  This could be a more graduated falloff.
-            let motion_threshold = if y < 30 {
-                2
-            } else if y < 60 {
-                2
-            } else {
-                3
+            #[allow(clippy::if_same_then_else)]
+            let motion_threshold = {
+                if y < 30 {
+                    2
+                } else if y < 60 {
+                    2
+                } else {
+                    3
+                }
             };
 
+            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_sign_loss)]
             let seg_val = seg_max.max(0) as u16;
             if let Some(prev_frame_stats) = &prev_frame_stats {
                 let (mut hot, mut pre_hot_val) = prev_frame_stats.hot_map[segment_index];
                 // TODO: Possibly the segments should overlap each other slightly?
-                let segment_diff = (seg_val as i32 - pre_hot_val as i32).max(0) as u16;
+
+                let segment_diff = seg_val.saturating_sub(pre_hot_val);
 
                 motion_tracking.max_delta_variance =
                     motion_tracking.max_delta_variance.max(segment_diff);
@@ -175,25 +166,36 @@ pub fn track_motion(
                 if triggers {
                     motion_tracking.cumulative_motion += motion_count;
                 }
-                if !hot {
+                let is_hot = hot & 0b1000_0000 != 0;
+                if !is_hot {
                     if triggers {
-                        hot = true;
+                        hot = 0b1000_0000;
                         // val gets used from previous frame: keeping the value pre-hot,
                         // so that we keep triggering
                     } else {
                         // Update pre-hot val
                         pre_hot_val = seg_val;
                     }
-                } else if hot && seg_val < pre_hot_val + 10 && motion_count < 2 {
-                    // TODO: Tune values for lepton3
+                } else if is_hot && seg_val < pre_hot_val + 10 && motion_count < 2 {
                     // Needs to drop by 10 to un-trigger hot, and have very little motion.
-                    hot = false;
+                    hot = 0;
                     // Update the max value with the new value.
                     pre_hot_val = seg_val;
+                } else if is_hot && seg_val < pre_hot_val + 50 && motion_count < 2 {
+                    // NOTE: Keep track of number of frames motion was low for, and after 15s
+                    //  unset hot.
+                    let hot_with_no_motion_count = hot & 0b0111_1111;
+                    if hot_with_no_motion_count + 1 >= 127 {
+                        //pre_hot_val = seg_val;
+                        hot = 0;
+                    } else {
+                        hot = 0b1000_0000 | ((hot_with_no_motion_count + 1) & 0b0111_1111);
+                    }
                 }
                 // NOTE: implicit else when hot – Stays hot, and value stays the same, which should be the previous value before it
                 // went hot.
-                if hot {
+                let is_hot = hot & 0b1000_0000 != 0;
+                if is_hot {
                     motion_tracking.hot_count += 1;
                     // We got motion, so reset timeout
                     if motion_tracking.timeout_in_n_frames.is_some() {
@@ -210,14 +212,14 @@ pub fn track_motion(
                 motion_tracking.hot_map[segment_index] = (hot, pre_hot_val);
             } else {
                 // Seed the initial values
-                motion_tracking.hot_map[segment_index] = (false, seg_val);
+                motion_tracking.hot_map[segment_index] = (0, seg_val);
             }
         }
     }
 
     if let Some(prev_frame_stats) = &prev_frame_stats {
         // If we're no longer triggering, maybe start decrementing a timeout to stop recording.
-        if !motion_tracking.is_triggering() {
+        if motion_tracking.is_not_triggering() {
             // All the previous hot segments here on edges, so the subject has left the frame.
             if prev_frame_stats.is_triggering_on_apron_only() {
                 // TODO: Actually when recording, we'd pause here for a while without
@@ -233,7 +235,7 @@ pub fn track_motion(
             if let Some(timeout_in_n_frames) = motion_tracking.timeout_in_n_frames.as_mut() {
                 *timeout_in_n_frames -= 1;
             }
-        } else if !prev_frame_stats.is_triggering() {
+        } else if prev_frame_stats.is_not_triggering() {
             motion_tracking.triggered_this_frame = true;
         }
     }
@@ -257,6 +259,7 @@ impl DetectionMask {
         self.inner[self.length..self.length + piece.len()].copy_from_slice(piece);
         self.length += piece.len();
     }
+    #[allow(clippy::large_types_passed_by_value)]
     pub fn new(mask: Option<[u8; 2400]>) -> DetectionMask {
         let length = if mask.is_some() { 2400 } else { 0 };
         DetectionMask {
@@ -264,21 +267,8 @@ impl DetectionMask {
             length,
         }
     }
-    pub fn is_masked_at_pos(&self, x: usize, y: usize) -> bool {
-        let index = (y * 160) + x;
-        self.inner[index >> 3] & (1 << (index % 8)) != 0
-    }
-
-    pub fn set_index(&mut self, index: usize) {
-        self.inner[index >> 3] |= 1 << (index % 8);
-    }
-
-    pub fn set_pos(&mut self, x: usize, y: usize) {
-        let i = (y * 160) + x;
-        self.inner[i >> 3] |= 1 << (i % 8);
-    }
-
     #[inline(always)]
+    #[allow(clippy::inline_always)]
     pub fn is_masked_at_index(&self, index: usize) -> bool {
         let group = self.inner[index >> 3];
         group != 0 && group & (1 << (index % 8)) != 0

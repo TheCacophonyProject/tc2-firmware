@@ -1,35 +1,32 @@
+use core::mem;
+use cortex_m::asm::nop;
+use fugit::ExtU32;
+use rp2040_hal::Watchdog;
+
 pub unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    core::slice::from_raw_parts((p as *const T) as *const u8, core::mem::size_of::<T>())
-}
-pub unsafe fn any_as_u8_slice_mut<T: Sized>(p: &mut T) -> &mut [u8] {
-    core::slice::from_raw_parts_mut((p as *mut T) as *mut u8, core::mem::size_of::<T>())
+    unsafe { core::slice::from_raw_parts(core::ptr::from_ref::<T>(p).cast::<u8>(), size_of::<T>()) }
 }
 
-pub unsafe fn u8_slice_to_u16(p: &[u8]) -> &[u16] {
-    core::slice::from_raw_parts((p as *const [u8]) as *const u16, p.len() / 2)
+pub unsafe fn extend_lifetime<'b>(r: &'b [u8]) -> &'static [u8] {
+    unsafe { mem::transmute::<&'b [u8], &'static [u8]>(r) }
 }
 
-pub unsafe fn u16_slice_to_u8(p: &[u16]) -> &[u8] {
-    core::slice::from_raw_parts((p as *const [u16]) as *const u8, p.len() * 2)
+pub unsafe fn extend_lifetime_generic<'b, T>(r: &'b T) -> &'static T {
+    unsafe { mem::transmute::<&'b T, &'static T>(r) }
 }
 
-pub unsafe fn u16_slice_to_u8_mut(p: &mut [u16]) -> &mut [u8] {
-    core::slice::from_raw_parts_mut((p as *mut [u16]) as *mut u8, p.len() * 2)
+pub unsafe fn extend_lifetime_generic_mut<'b, T>(r: &'b mut T) -> &'static mut T {
+    unsafe { mem::transmute::<&'b mut T, &'static mut T>(r) }
 }
 
-pub unsafe fn i32_slice_to_u8(p: &[i32]) -> &[u8] {
-    core::slice::from_raw_parts((p as *const [i32]) as *const u8, p.len() * 4)
-}
-pub unsafe fn u64_to_u16(p: &u64) -> &[u16] {
-    core::slice::from_raw_parts((p as *const u64) as *const u16, 4)
-}
-pub unsafe fn u32_slice_to_u8(p: &[u32]) -> &[u8] {
-    core::slice::from_raw_parts((p as *const [u32]) as *const u8, p.len() * 4)
-}
-pub unsafe fn u8_slice_to_u32(p: &[u8]) -> &[u32] {
-    core::slice::from_raw_parts((p as *const [u8]) as *const u32, p.len() / 4)
+pub unsafe fn extend_lifetime_mut<'b>(r: &'b mut [u8]) -> &'static mut [u8] {
+    unsafe { mem::transmute::<&'b mut [u8], &'static mut [u8]>(r) }
 }
 
-pub unsafe fn any_as_u32_slice<T: Sized>(p: &T) -> &'static [u32] {
-    core::slice::from_raw_parts((p as *const T) as *const u32, core::mem::size_of::<T>() / 4)
+pub fn restart(watchdog: &mut Watchdog) -> ! {
+    // Is this long enough to print any message to the terminal about why we're restarting?
+    watchdog.start(500.millis());
+    loop {
+        nop();
+    }
 }
