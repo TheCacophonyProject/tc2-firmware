@@ -3,7 +3,7 @@ use crate::event_logger::{Event, EventLogger};
 use crate::onboard_flash::OnboardFlash;
 use crate::sub_tasks::FormattedTime;
 use chrono::{DateTime, Duration, Utc};
-use defmt::{Format, Formatter, error, warn};
+use defmt::{Format, Formatter, error};
 use rp2040_hal::Timer;
 use rp2040_hal::timer::Instant;
 
@@ -55,12 +55,6 @@ impl SyncedDateTime {
                 if new_time.date_time_utc > self.date_time_utc
                     && new_time.date_time_utc < self.date_time_utc + Duration::minutes(15)
                 {
-                    if (new_time.date_time() - self.date_time()) > Duration::seconds(2) {
-                        warn!(
-                            "Time drift {}µs",
-                            (new_time.date_time() - self.date_time()).num_microseconds()
-                        );
-                    }
                     *self = new_time;
                 }
             }

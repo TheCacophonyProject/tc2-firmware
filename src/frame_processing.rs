@@ -740,8 +740,10 @@ pub fn thermal_motion_task(
             if let Err(e) = i2c.started_recording() {
                 error!("Error setting recording flag on attiny: {}", e);
             }
-            let is_startup_status = bk.status_recording == StatusRecordingState::MakingStartup;
-            let is_shutdown_status = bk.status_recording == StatusRecordingState::MakingShutdown;
+            let is_startup_status = test_recording_in_progress.is_none()
+                && bk.status_recording == StatusRecordingState::MakingStartup;
+            let is_shutdown_status = test_recording_in_progress.is_none()
+                && bk.status_recording == StatusRecordingState::MakingShutdown;
 
             error!("Starting new recording at frame #{}", &telemetry.frame_num);
             info!("{:?}", telemetry);

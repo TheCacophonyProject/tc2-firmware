@@ -27,6 +27,7 @@ pub fn maybe_offload_events(
     if events.has_events_to_offload() {
         let event_indices = events.event_range();
         let total_events = event_indices.end;
+        let mut events_sent = 0;
         warn!("Attempting to transfer {} events", total_events);
         'transfer_all_events: for event_index in event_indices {
             watchdog.feed();
@@ -45,9 +46,10 @@ pub fn maybe_offload_events(
                             &event_bytes,
                             current_crc,
                             dma,
-                            None, // FIXME: Do we want progress here?
+                            None,
                         );
                         if did_transfer {
+                            events_sent += 1;
                             if attempts > 0 {
                                 warn!("File part took multiple attempts: {}", attempts);
                             }
@@ -69,7 +71,7 @@ pub fn maybe_offload_events(
                 }
             }
         }
-        info!("Offloaded {} event(s)", total_events);
+        info!("Offloaded {} event(s)", events_sent);
         if success {
             events.clear(fs);
             events.log(Event::OffloadedLogs, time, fs);
@@ -165,15 +167,13 @@ fn offload_recordings_and_events(
     // do some offloading.
     let mut file_count = 0;
     let mut success: bool = true;
-    // TODO: Could speed this up slightly using cache_random_read interleaving on flash storage.
-    //  Probably doesn't matter though.
-
     let mut interrupted_by_user = false;
     while has_file {
         if let Ok(offload_flag_set) = i2c.offload_flag_is_set() {
             if !offload_flag_set {
                 warn!("Offload interrupted by user");
                 // We were interrupted by the rPi,
+                success = false;
                 interrupted_by_user = true;
                 break;
             }
@@ -326,7 +326,7 @@ fn offload_recordings_and_events(
             }
         }
 
-        if !file_ended && !interrupted_by_user {
+        if !file_ended {
             info!(
                 "Incomplete file at block {} erasing",
                 fs.file_start_block_index
@@ -347,6 +347,7 @@ fn offload_recordings_and_events(
         if only_last_file {
             break;
         }
+
         has_file = fs.begin_offload_reverse();
     }
 
@@ -355,10 +356,10 @@ fn offload_recordings_and_events(
     }
 
     watchdog.feed();
+    if interrupted_by_user {
+        events.log(Event::FileOffloadInterruptedByUser, time, fs);
+    }
     if success {
-        if interrupted_by_user {
-            events.log(Event::FileOffloadInterruptedByUser, time, fs);
-        }
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
