@@ -1,7 +1,7 @@
 use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{Event, EventLogger};
 use crate::onboard_flash::OnboardFlash;
-use crate::sub_tasks::FormattedTime;
+use crate::sub_tasks::FormattedNZTime;
 use chrono::{DateTime, Duration, Utc};
 use defmt::{Format, Formatter, error};
 use rp2040_hal::Timer;
@@ -17,7 +17,7 @@ pub struct SyncedDateTime {
 
 impl Format for SyncedDateTime {
     fn format(&self, fmt: Formatter) {
-        defmt::write!(fmt, "{}", FormattedTime(self.date_time_utc));
+        defmt::write!(fmt, "{}", FormattedNZTime(self.date_time_utc));
     }
 }
 

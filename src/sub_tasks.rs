@@ -10,7 +10,7 @@ use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Formatter, info, unreachable, warn};
 
@@ -109,18 +109,36 @@ pub fn offload_all_recordings_and_events(
     offload_recordings_and_events(fs, pi_spi, resets, dma, i2c, events, time, watchdog, false)
 }
 
-pub struct FormattedTime(pub DateTime<Utc>);
-impl defmt::Format for FormattedTime {
+pub struct FormattedNZTime(pub DateTime<Utc>);
+impl defmt::Format for FormattedNZTime {
     fn format(&self, fmt: Formatter) {
+        // Very crude daylight savings calc, will be off by an hour sometimes at the
+        // beginning of April and end of September – but that's okay, it's just for debug display.
+        let month = self.0.month();
+        let day = self.0.day();
+        let nzdt = if month <= 4 || month > 10 {
+            true
+        } else if (month == 4 && day >= 7) || (month == 10 && day <= 23) {
+            false
+        } else {
+            false
+        };
+        let approx_nz_time = if nzdt {
+            self.0 + Duration::hours(13)
+        } else {
+            self.0 + Duration::hours(12)
+        };
+
         defmt::write!(
             fmt,
-            "DateTime: {}-{}-{} {}:{}:{} UTC",
-            self.0.year(),
-            self.0.month(),
-            self.0.day(),
-            self.0.hour(),
-            self.0.minute(),
-            self.0.second()
+            "DateTime: {}-{}-{} {}:{}:{} {}",
+            approx_nz_time.year(),
+            approx_nz_time.month(),
+            approx_nz_time.day(),
+            approx_nz_time.hour(),
+            approx_nz_time.minute(),
+            approx_nz_time.second(),
+            if nzdt { "NZDT" } else { "NZST" },
         );
     }
 }
@@ -240,7 +258,7 @@ fn offload_recordings_and_events(
                             "First file part at {}:{}, written at {}",
                             block,
                             page,
-                            FormattedTime(timestamp)
+                            FormattedNZTime(timestamp)
                         );
                     } else {
                         info!("First file part at {}:{}", block, page,);
