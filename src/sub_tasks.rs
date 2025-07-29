@@ -10,7 +10,7 @@ use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Formatter, info, unreachable, warn};
 
