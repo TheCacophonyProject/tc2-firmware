@@ -750,7 +750,7 @@ pub fn push_header_iterator(header: &Cptv2Header) -> impl Iterator<Item = u8> {
             &header.device_name,
             FieldType::DeviceName,
         ))
-        .chain(push_field_iterator(&[b"flir"], FieldType::Brand))
+        .chain(push_field_iterator(b"flir", FieldType::Brand))
         .chain(push_field_iterator(&header.model, FieldType::Model))
         .chain(push_field_iterator(&header.device_id, FieldType::DeviceID))
         .chain(push_field_iterator(

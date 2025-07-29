@@ -21,6 +21,7 @@ use core::cell::RefCell;
 use crate::bsp;
 use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
+use crate::sub_tasks::FormattedNZTime;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use cortex_m::asm::nop;
@@ -318,7 +319,7 @@ pub fn thermal_motion_task(
     config: &DeviceConfig,
     mut events: EventLogger,
     mut time: SyncedDateTime,
-    current_recording_window: RecordingWindow,
+    mut current_recording_window: RecordingWindow,
     recording_mode: RecordingMode,
 ) -> ! {
     info!("=== Core 0 Thermal Motion start ===");
@@ -427,6 +428,17 @@ pub fn thermal_motion_task(
         } else {
             None
         };
+    if config.is_continous_recorder() && current_recording_window.0 > time.date_time() {
+        // Move the start of the window back so we're always in it,
+        // no matter what the startup time is.
+        current_recording_window = (time.date_time(), current_recording_window.1);
+    }
+
+    info!(
+        "Current recording window {} - {}",
+        FormattedNZTime(current_recording_window.0),
+        FormattedNZTime(current_recording_window.1)
+    );
 
     info!(
         "Current time is in recording window? {}",
