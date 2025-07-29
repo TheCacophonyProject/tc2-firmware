@@ -10,7 +10,7 @@ use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc, Weekday};
 use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Formatter, info, unreachable, warn};
 
@@ -116,12 +116,10 @@ impl defmt::Format for FormattedNZTime {
         // beginning of April and end of September – but that's okay, it's just for debug display.
         let month = self.0.month();
         let day = self.0.day();
-        let nzdt = if month <= 4 || month > 10 {
-            true
-        } else if (month == 4 && day >= 7) || (month == 10 && day <= 23) {
-            false
+        let nzdt = if (4..=10).contains(&month) {
+            (month == 4 && day < 7) || (month == 10 && day > 23)
         } else {
-            false
+            true
         };
         let approx_nz_time = if nzdt {
             self.0 + Duration::hours(13)
