@@ -63,11 +63,9 @@ use rp2040_hal::pio::PIOExt;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 21;
+pub const FIRMWARE_VERSION: u32 = 22;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version.
 // TODO Check against minor version also.
-
-// got funny results at 150 for audio seems to work better at 125
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 10; // 10 mins between FFCs
 
@@ -217,7 +215,8 @@ fn main() -> ! {
         &mut peripherals.RESETS,
         &mut peripherals.DMA,
         &mut watchdog,
-        events.count(),
+        &mut events,
+        &time,
     );
     if let Err(e) = dc_result {
         error!("{}", e);

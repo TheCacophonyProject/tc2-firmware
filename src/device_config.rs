@@ -2,8 +2,8 @@ use crate::byte_slice_cursor::Cursor;
 use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use defmt::{Format, Formatter, error};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use defmt::{Format, Formatter};
 use embedded_io::Read;
 
 #[derive(PartialEq)]
@@ -44,6 +44,7 @@ impl SmallString {
 }
 
 #[derive(Format, PartialEq, Copy, Clone)]
+#[repr(u8)]
 pub enum AudioMode {
     Disabled = 0,
     AudioOnly = 1,
@@ -99,7 +100,7 @@ impl DeviceConfigInner {
     pub fn time_is_in_recording_window(
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
-        window: Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>,
+        window: Option<RecordingWindow>,
     ) -> bool {
         if self.is_audio_only_device() {
             // Audio only devices are never in the recording window.
@@ -148,7 +149,7 @@ impl DeviceConfigInner {
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &chrono::DateTime<Utc>,
-    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), ()> {
+    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), &'static str> {
         // NOTE: This is an expensive function on rp2040, taking ~6ms, so don't call it in a hot loop.
         let (is_absolute_start, mut start_offset) = self.start_recording_time;
         let (is_absolute_end, mut end_offset) = self.end_recording_time;
@@ -210,8 +211,7 @@ impl DeviceConfigInner {
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
                 (Some(yesterday_sunset), Some(today_sunrise))
             } else {
-                error!("Unable to calculate relative time window");
-                return Err(());
+                return Err("Unable to calculate relative time window");
             }
         } else {
             (None, None)
@@ -245,15 +245,15 @@ impl DeviceConfigInner {
 
         if is_absolute_start || is_absolute_end {
             let start_minus_one_day = start_time - Duration::days(1);
-            let mut start_plus_one_day = start_time + Duration::days(1);
             let mut end_minus_one_day = end_time - Duration::days(1);
             let end_plus_one_day = end_time + Duration::days(1);
 
+            if end_time == start_time {
+                start_time = start_minus_one_day;
+            }
+
             if start_minus_one_day > end_minus_one_day {
                 end_minus_one_day += Duration::days(1);
-            }
-            if start_plus_one_day > end_plus_one_day {
-                start_plus_one_day = start_time;
             }
             if end_minus_one_day > *now_utc {
                 if is_absolute_start {
@@ -266,13 +266,28 @@ impl DeviceConfigInner {
             if end_time < start_time && is_absolute_end {
                 end_time = end_plus_one_day;
             }
+            if is_absolute_start && is_absolute_end && start_time >= end_time {
+                start_time -= Duration::days(1);
+            }
+            if is_absolute_start
+                && is_absolute_end
+                && *now_utc < start_time
+                && now_utc.hour() >= end_time.hour()
+                && now_utc.minute() >= end_time.minute()
+            {
+                start_time -= Duration::days(1);
+                end_time -= Duration::days(1);
+            }
             if *now_utc > end_time {
                 if is_absolute_start {
-                    start_time = start_plus_one_day;
+                    start_time += Duration::days(1);
                 }
                 if is_absolute_end {
-                    end_time = end_plus_one_day;
+                    end_time += Duration::days(1);
                 }
+            }
+            if end_time - start_time > Duration::days(1) {
+                end_time -= Duration::days(1);
             }
         }
         Ok((start_time, end_time))
@@ -419,7 +434,7 @@ impl DeviceConfig {
         self.config_inner.is_audio_device()
     }
 
-    pub fn is_continous_recorder(&self) -> bool {
+    pub fn is_continuous_recorder(&self) -> bool {
         self.config_inner.is_continuous_recorder()
     }
 
@@ -467,7 +482,7 @@ impl DeviceConfig {
     }
 
     pub fn use_low_power_mode(&self) -> bool {
-        self.config_inner.use_low_power_mode
+        self.config_inner.use_low_power_mode || self.config_inner.audio_mode == AudioMode::AudioOnly
     }
 
     pub fn use_high_power_mode(&self) -> bool {
@@ -477,7 +492,7 @@ impl DeviceConfig {
     pub fn next_or_current_recording_window(
         &self,
         now_utc: &chrono::DateTime<Utc>,
-    ) -> Result<RecordingWindow, ()> {
+    ) -> Result<RecordingWindow, &'static str> {
         self.config_inner.next_or_current_recording_window(now_utc)
     }
 
@@ -508,9 +523,6 @@ impl DeviceConfig {
         &self,
         date_time_utc: &chrono::DateTime<Utc>,
     ) -> bool {
-        if self.is_continous_recorder() {
-            return true;
-        }
         self.time_is_in_recording_window(date_time_utc, None)
     }
 

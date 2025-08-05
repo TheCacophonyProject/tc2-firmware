@@ -239,7 +239,6 @@ pub fn record_thermal(
 
     watchdog.feed();
     watchdog.disable();
-    let is_high_power_mode = config.use_high_power_mode();
     let timer = time.get_timer();
     let _ = core_1.spawn(core1_stack.take().unwrap(), move || {
         lepton_core1_task(
@@ -319,7 +318,7 @@ pub fn thermal_motion_task(
     config: &DeviceConfig,
     mut events: EventLogger,
     mut time: SyncedDateTime,
-    mut current_recording_window: RecordingWindow,
+    current_recording_window: RecordingWindow,
     recording_mode: RecordingMode,
 ) -> ! {
     info!("=== Core 0 Thermal Motion start ===");
@@ -356,7 +355,6 @@ pub fn thermal_motion_task(
     let crc_table = make_crc_table();
 
     // Copy huffman table into ram for faster access.
-    // TODO: See if this actually affects write speed.
     let mut huffman_table = [HuffmanEntry { code: 0, bits: 0 }; 257];
     huffman_table.copy_from_slice(&HUFFMAN_TABLE[..]);
 
@@ -367,12 +365,13 @@ pub fn thermal_motion_task(
         &mut peripherals.RESETS,
         &mut sio,
     );
+
     let mut bk = {
         let made_startup_status_recording = (fs.file_types_found.has_type(FileType::CptvStartup)
             && fs.last_startup_recording_time.is_some()
             && fs.last_startup_recording_time.unwrap() > current_recording_window.0)
             || events
-                .latest_event_of_kind(Event::OffloadedRecording, &mut fs)
+                .latest_event_of_kind(Event::OffloadedRecording(FileType::CptvScheduled), &mut fs)
                 .is_some_and(|e| {
                     e.timestamp()
                         .is_some_and(|time| time > current_recording_window.0)
@@ -391,6 +390,11 @@ pub fn thermal_motion_task(
             "Initial status recording state: {:?}",
             status_recording_state
         );
+        if config.use_high_power_mode() {
+            info!("High power mode");
+        } else {
+            info!("Low power mode");
+        }
 
         BookkeepingState {
             is_recording_on_rpi: false,
@@ -428,31 +432,17 @@ pub fn thermal_motion_task(
         } else {
             None
         };
-    if config.is_continous_recorder() && current_recording_window.0 > time.date_time() {
-        // Move the start of the window back so we're always in it,
-        // no matter what the startup time is.
-        current_recording_window = (time.date_time(), current_recording_window.1);
-    }
 
     info!(
-        "Current recording window {} - {}",
+        "Current recording window {} - {}, Window is active: {}",
         FormattedNZTime(current_recording_window.0),
-        FormattedNZTime(current_recording_window.1)
-    );
-
-    info!(
-        "Current time is in recording window? {}",
+        FormattedNZTime(current_recording_window.1),
         config.time_is_in_supplied_recording_window(&time.date_time(), current_recording_window)
     );
 
     // Enable raw frame transfers to pi – if not already enabled.
     pi_spi.enable_pio_spi();
-    info!(
-        "Entering recording loop.  Made start up status recording: {}",
-        fs.file_types_found.has_type(FileType::CptvStartup)
-            && fs.last_startup_recording_time.is_some()
-            && fs.last_startup_recording_time.unwrap() > current_recording_window.0
-    );
+    info!("Entering recording loop.");
     #[allow(unused_labels)]
     'recording_loop: loop {
         let input = sio.fifo.read_blocking();
@@ -541,8 +531,11 @@ pub fn thermal_motion_task(
         }
         // NOTE: In low power mode, don't try to start recordings/motion detection
         //  until frames have stabilised.
-        let should_record_to_flash =
-            frame_is_valid && telemetry_is_valid && past_ffc_event && config.use_low_power_mode();
+        let should_record_to_flash = frame_is_valid
+            && telemetry_is_valid
+            && past_ffc_event
+            && (config.use_low_power_mode()
+                || (test_recording.is_some() || test_recording_in_progress.is_some()));
 
         // FIXME: What happens if we're in the middle of recording a cptv file and
         //  we get an invalid frame header?  Maybe this doesn't happen in practice?
@@ -574,6 +567,7 @@ pub fn thermal_motion_task(
             if bk.status_recording.is_pending()
                 && !should_start_new_recording
                 && cptv_stream.is_none()
+                && !fs.is_nearly_full_for_thermal_recordings()
                 && is_inside_recording_window
             {
                 bk.status_recording.next_state();
@@ -586,7 +580,10 @@ pub fn thermal_motion_task(
                 info!("Would end recording, but outside window");
             }
 
-            if !should_start_new_recording && test_recording.is_some() {
+            if !should_start_new_recording
+                && test_recording.is_some()
+                && !fs.is_nearly_full_for_thermal_recordings()
+            {
                 // Take test recording.
                 test_recording_in_progress = test_recording.take();
                 should_start_new_recording = true;
@@ -726,7 +723,7 @@ pub fn thermal_motion_task(
             }
         }
         // if starting a new recording will handle this differently below
-        if should_record_to_flash && !should_start_new_recording {
+        if !should_start_new_recording {
             // TIME: 2ms
             prev_frame.copy_from_slice(current_raw_frame);
         }
@@ -1061,6 +1058,8 @@ fn do_periodic_bookkeeping(
             }
         } else if is_inside_recording_window && config.use_high_power_mode() {
             if camera_state.is_ok_and(CameraState::pi_is_powered_off) {
+                info!("In high power window and pi is powered off, so restart");
+                time.get_timer().delay_ms(1000);
                 // Restart so that we'll power the rPi back on
                 request_restart(sio);
             }

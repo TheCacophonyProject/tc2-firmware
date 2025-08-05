@@ -208,7 +208,7 @@ fn offload_recordings_and_events(
         // we can't be transferring more to the back buffer from the flash.  So what's the point
         // of having a complex double buffering system?
         if !interrupted_by_user {
-            'outer: while let Some(file_part) = fs.get_file_part() {
+            'outer: while let Some(file_part) = fs.get_file_part(events, time) {
                 let FilePartReturn {
                     part,
                     crc16,
@@ -312,7 +312,7 @@ fn offload_recordings_and_events(
                         break 'transfer_part;
                     }
                     attempts += 1;
-                    if attempts > 100 {
+                    if attempts > 200 {
                         success = false;
                         break 'transfer_part;
                     }
@@ -322,7 +322,11 @@ fn offload_recordings_and_events(
                 if let Some(spi) = pi_spi.disable() {
                     fs.take_spi(spi, resets);
                     if is_last_page_for_file && success {
-                        events.log(Event::OffloadedRecording, time, fs);
+                        if let Some(file_type) = current_file_metadata {
+                            events.log(Event::OffloadedRecording(file_type), time, fs);
+                        } else {
+                            events.log(Event::OffloadedRecording(FileType::Unknown), time, fs);
+                        }
                     }
                 }
                 if !success {
@@ -331,6 +335,8 @@ fn offload_recordings_and_events(
 
                 part_count += 1;
                 if is_last_page_for_file {
+                    // NOTE: This could also be the *first* page of the file for
+                    //  test/status recordings.
                     file_count += 1;
                     info!("Offloaded {} file(s)", file_count);
                     watchdog.feed();
@@ -342,7 +348,7 @@ fn offload_recordings_and_events(
             }
         }
 
-        if !file_ended {
+        if !file_ended && !interrupted_by_user {
             info!(
                 "Incomplete file at block {} erasing",
                 fs.file_start_block_index
@@ -385,7 +391,9 @@ fn offload_recordings_and_events(
         fs.scan();
         file_count != 0
     } else {
-        events.log(Event::FileOffloadFailed, time, fs);
+        if !interrupted_by_user {
+            events.log(Event::FileOffloadFailed, time, fs);
+        }
         fs.scan();
         warn!("File transfer to pi failed");
         false

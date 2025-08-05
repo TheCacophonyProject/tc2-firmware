@@ -5,7 +5,7 @@ use crate::attiny_rtc_i2c::{
 use crate::audio_task::AUDIO_DEV_MODE;
 use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig};
-use crate::event_logger::{Event, EventLogger, LoggerEvent, WakeReason};
+use crate::event_logger::{Event, EventLogger, LoggerEvent, NewConfigInfo, WakeReason};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::frame_processing::THERMAL_DEV_MODE;
 use crate::onboard_flash::{FileType, OnboardFlash};
@@ -31,8 +31,10 @@ pub fn get_device_config(
     resets: &mut RESETS,
     dma: &mut DMA,
     watchdog: &mut Watchdog,
-    event_count: u16,
+    events: &mut EventLogger,
+    time: &SyncedDateTime,
 ) -> Result<(DeviceConfig, bool, bool, bool), ()> {
+    let event_count = events.count();
     let device_config: Option<DeviceConfig> = DeviceConfig::load_existing_config_from_flash(fs);
     if let Some(device_config) = &device_config {
         info!("Existing config {:#?}", device_config.config());
@@ -51,6 +53,14 @@ pub fn get_device_config(
             event_count,
         );
     if let Some(device_config) = device_config {
+        if device_config_was_updated {
+            events.log(
+                Event::Rp2040GotNewConfig(NewConfigInfo::from_config(&device_config)),
+                time,
+                fs,
+            );
+        }
+
         Ok((
             device_config,
             prioritise_frame_preview,
@@ -399,7 +409,7 @@ fn duration_since_prev_offload_greater_than_23hrs(
     time: &SyncedDateTime,
 ) -> bool {
     let duration_since_prev_offload = events
-        .latest_event_of_kind(Event::OffloadedRecording, fs)
+        .latest_event_of_kind(Event::OffloadedRecording(FileType::Unknown), fs)
         .map_or(Duration::minutes(0), |prev_event| {
             prev_event
                 .timestamp()
@@ -418,94 +428,110 @@ pub fn schedule_next_recording(
     events: &mut EventLogger,
     config: &DeviceConfig,
 ) -> Result<ScheduledAlarmTime, &'static str> {
-    let mut wakeup: DateTime<Utc>;
-    let seed: u64;
-    let current_time = time.date_time();
-
-    if config.audio_seed() > 0 {
-        wakeup = if let Some(time) = current_time
-            .with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-            .latest()
-        {
-            time
-        } else {
-            return Err("Failed to clamp current time to midnight");
-        };
-        let ts_millis = u64::try_from(wakeup.timestamp_millis())
-            .map_err(|_| "Failed to convert wakeup timestamp milliseconds to u64")?;
-        seed = u64::wrapping_add(ts_millis, u64::from(config.config().audio_seed));
-    } else {
-        let ts_seconds = u64::try_from(current_time.timestamp())
-            .map_err(|_| "Failed to convert current_time timestamp to u64")?;
-
-        seed = ts_seconds;
-        wakeup = current_time;
-    }
-    let mut rng = RNG::<WyRand, u16>::new(seed);
-    let r_max: u16 = u16::MAX;
-    // Tuned to average 32 recordings per day with a ratio of 1:3 short to long pauses.
-    let short_chance: u16 = r_max / 4;
-    let short_pause: i64 = 3 * 59;
-    let short_window: i64 = 5 * 59;
-    let long_pause: i64 = 43 * 59;
-    let long_window: i64 = 25 * 60;
-
-    // If a seed is set, always start alarm from 0am to keep consistent across devices.
-    // So will need to generate numbers until the alarm is valid
-    while wakeup <= current_time {
-        let r = rng.generate();
-        let wake_in = if AUDIO_DEV_MODE {
-            120
-        } else if r <= short_chance {
-            short_pause + (i64::from(r) * short_window) / i64::from(short_chance)
-        } else {
-            long_pause + (i64::from(r) * long_window) / i64::from(r_max)
-        };
-        wakeup += Duration::seconds(wake_in);
-    }
-
-    let mut alarm_mode = AlarmMode::Audio;
     let audio_mode = config.audio_mode();
-    if config.records_audio_and_thermal() {
-        if let Ok((start, end)) = config.next_or_current_recording_window(&current_time) {
-            info!(
-                "Checking next alarm {}:{} for rec window start {}:{}",
-                wakeup.hour(),
-                wakeup.minute(),
-                start.hour(),
-                start.minute(),
+    let current_time = time.date_time();
+    let mut wakeup: DateTime<Utc>;
+    let mut alarm_mode = AlarmMode::Audio;
+    if audio_mode == AudioMode::Disabled
+        || (audio_mode == AudioMode::AudioOrThermal && config.is_continuous_recorder())
+    {
+        let current_window = config.next_or_current_recording_window(&current_time)?;
+        alarm_mode = AlarmMode::Thermal;
+        wakeup = if config.time_is_in_supplied_recording_window(&current_time, current_window) {
+            // In the window
+            config
+                .next_recording_window_start(&(current_time + Duration::hours(24)))
+                .expect("Invalid next recording window")
+        } else {
+            info!("Setting wake up to be start of next thermal recording window");
+            assert!(
+                current_time < current_window.0,
+                "Time should be before next window"
             );
-            if wakeup >= start {
-                if start < current_time {
-                    info!("Audio mode {}", audio_mode);
-                    if audio_mode == AudioMode::AudioAndThermal {
-                        // audio recording inside recording window
-                        info!("Scheduling audio inside thermal window");
-                    } else if audio_mode == AudioMode::AudioOrThermal {
-                        if config.is_continous_recorder() {
-                            info!("Setting wake up to be start of next thermal recording window");
-                            if THERMAL_DEV_MODE {
-                                wakeup = current_time + Duration::minutes(3);
-                            } else {
-                                wakeup = config
-                                    .next_recording_window_start(&current_time)
-                                    .expect("Invalid next recording window");
-                            }
-                            alarm_mode = AlarmMode::Thermal;
-                        } else {
-                            // AudioOrThermal mode. Append audio wakeup to end of recording window.
+            assert!(
+                current_window.0 < current_time + Duration::minutes((24 * 60) + 1),
+                "Next window should be no more than 24hrs from now"
+            );
+            current_window.0
+        };
+        if THERMAL_DEV_MODE {
+            wakeup = current_time + Duration::minutes(3);
+        }
+    } else {
+        let seed: u64;
+        let current_time = time.date_time();
+
+        if config.audio_seed() > 0 {
+            wakeup = if let Some(time) = current_time
+                .with_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                .latest()
+            {
+                time
+            } else {
+                return Err("Failed to clamp current time to midnight");
+            };
+            let ts_millis = u64::try_from(wakeup.timestamp_millis())
+                .map_err(|_| "Failed to convert wakeup timestamp milliseconds to u64")?;
+            seed = u64::wrapping_add(ts_millis, u64::from(config.config().audio_seed));
+        } else {
+            let ts_seconds = u64::try_from(current_time.timestamp())
+                .map_err(|_| "Failed to convert current_time timestamp to u64")?;
+
+            seed = ts_seconds;
+            wakeup = current_time;
+        }
+        let mut rng = RNG::<WyRand, u16>::new(seed);
+        let r_max: u16 = u16::MAX;
+        // Tuned to average 32 recordings per day with a ratio of 1:3 short to long pauses.
+        let short_chance: u16 = r_max / 4;
+        let short_pause: i64 = 3 * 59;
+        let short_window: i64 = 5 * 59;
+        let long_pause: i64 = 43 * 59;
+        let long_window: i64 = 25 * 60;
+
+        // If a seed is set, always start alarm from 0am to keep consistent across devices.
+        // So will need to generate numbers until the alarm is valid
+        while wakeup <= current_time {
+            let r = rng.generate();
+            let wake_in = if AUDIO_DEV_MODE {
+                120
+            } else if r <= short_chance {
+                short_pause + (i64::from(r) * short_window) / i64::from(short_chance)
+            } else {
+                long_pause + (i64::from(r) * long_window) / i64::from(r_max)
+            };
+            wakeup += Duration::seconds(wake_in);
+        }
+        if config.records_audio_and_thermal() {
+            if let Ok((start, end)) = config.next_or_current_recording_window(&current_time) {
+                info!(
+                    "Checking next alarm {}:{} for rec window start {}:{}",
+                    wakeup.hour(),
+                    wakeup.minute(),
+                    start.hour(),
+                    start.minute(),
+                );
+                if wakeup >= start {
+                    if start < current_time {
+                        info!("Audio mode {}", audio_mode);
+                        if audio_mode == AudioMode::AudioAndThermal {
+                            // audio recording inside recording window
+                            info!("Scheduling audio inside thermal window");
+                        } else if audio_mode == AudioMode::AudioOrThermal {
+                            // AudioOrThermal mode. Append audio wakeup to end of recording window
+                            // when scheduling inside the current thermal window.
                             wakeup = end + (wakeup - current_time);
                             alarm_mode = AlarmMode::Audio;
                         }
-                    }
-                } else {
-                    info!("Setting wake up to be start of next thermal recording window");
-                    if THERMAL_DEV_MODE {
-                        wakeup = current_time + Duration::minutes(3);
                     } else {
-                        wakeup = start;
+                        info!("Setting wake up to be start of next thermal recording window");
+                        if THERMAL_DEV_MODE {
+                            wakeup = current_time + Duration::minutes(3);
+                        } else {
+                            wakeup = start;
+                        }
+                        alarm_mode = AlarmMode::Thermal;
                     }
-                    alarm_mode = AlarmMode::Thermal;
                 }
             }
         }
