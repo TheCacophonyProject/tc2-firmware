@@ -152,7 +152,6 @@ impl From<Core0Task> for u32 {
 const WAIT_N_FRAMES_FOR_STABLE: usize = 45;
 
 pub struct BookkeepingState {
-    is_recording_on_rpi: bool,
     safe_to_execute_ffc: bool,
     lost_frame_count: u32,
     startup_date_time: DateTime<Utc>,
@@ -397,7 +396,6 @@ pub fn thermal_motion_task(
         }
 
         BookkeepingState {
-            is_recording_on_rpi: false,
             status_recording: status_recording_state,
             lost_frame_count: 0,
             safe_to_execute_ffc: config.use_low_power_mode(),
@@ -856,8 +854,8 @@ pub fn thermal_motion_task(
             }
         }
 
-        let is_not_recording = !(cptv_stream.is_some() || bk.is_recording_on_rpi);
-        if is_not_recording && fs.is_too_full_to_start_new_cptv_recordings() {
+        let is_not_recording_in_low_power_mode = !cptv_stream.is_some();
+        if is_not_recording_in_low_power_mode && fs.is_too_full_to_start_new_cptv_recordings() {
             if bk.logged_fs_nearly_full.take().is_some() {
                 events.log(Event::FlashStorageNearlyFull, &time, &mut fs);
             }
@@ -867,7 +865,7 @@ pub fn thermal_motion_task(
 
         let expected_i2c_io_time_us = 2400u32;
         let start = timer.get_counter();
-        if is_not_recording
+        if is_not_recording_in_low_power_mode
             && do_periodic_bookkeeping(
                 &mut bk,
                 &mut i2c,
@@ -991,9 +989,9 @@ fn do_periodic_bookkeeping(
         // if in high power mode need to check thermal-recorder isn't recording
         if let Ok(is_recording) = i2c.get_is_recording() {
             if !is_recording {
+                info!("Safe to execute FFC in high power mode");
                 bk.safe_to_execute_ffc = true;
             }
-            bk.is_recording_on_rpi = is_recording;
         }
     } else if every_minute {
         // NOTE: Every minute when we're not recording, we try to re-sync our time with the RTC,
