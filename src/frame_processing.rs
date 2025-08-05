@@ -854,7 +854,7 @@ pub fn thermal_motion_task(
             }
         }
 
-        let is_not_recording_in_low_power_mode = !cptv_stream.is_some();
+        let is_not_recording_in_low_power_mode = cptv_stream.is_none();
         if is_not_recording_in_low_power_mode && fs.is_too_full_to_start_new_cptv_recordings() {
             if bk.logged_fs_nearly_full.take().is_some() {
                 events.log(Event::FlashStorageNearlyFull, &time, &mut fs);
