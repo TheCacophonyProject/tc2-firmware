@@ -337,7 +337,9 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
     let should_offload = if !should_offload && has_files_to_offload {
         offload_wake_reason = WakeReason::ThermalOffloadAfter24Hours;
-        duration_since_prev_offload_greater_than_23hrs(events, fs, time)
+        // If in high-power thermal mode, always offload when there are files.
+        config.use_high_power_mode()
+            || duration_since_prev_offload_greater_than_23hrs(events, fs, time)
     } else {
         should_offload
     };
