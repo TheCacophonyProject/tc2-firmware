@@ -978,10 +978,11 @@ impl Eeprom {
         let calculated_crc = self.crc_16();
         let valid = embedded_crc == calculated_crc;
         if !valid {
-            warn!(
-                "Eeprom CRC failed expected {} got {}",
-                calculated_crc, embedded_crc
-            );
+            // FIXME?
+            // warn!(
+            //     "Eeprom CRC failed expected {} got {}",
+            //     calculated_crc, embedded_crc
+            // );
         }
         valid
     }

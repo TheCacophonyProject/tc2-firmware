@@ -22,6 +22,7 @@ use crc::{CRC_16_XMODEM, Crc};
 use defmt::{Format, error, info, warn};
 
 use crate::attiny_rtc_i2c::RecordingRequestType;
+use crate::event_logger::{Event, EventLogger};
 use crate::synced_date_time::SyncedDateTime;
 use cortex_m::prelude::*;
 use embedded_hal::digital::OutputPin;
@@ -324,6 +325,7 @@ type SpiEnabledPeripheral = Spi<
 #[repr(u8)]
 #[derive(Format, PartialEq, Clone, Copy)]
 pub enum FileType {
+    Unknown = 0,
     CptvScheduled = 1 << 0,
     CptvUserRequested = 1 << 1,
     CptvStartup = 1 << 2,
@@ -334,19 +336,18 @@ pub enum FileType {
     AudioShutdown = 1 << 7,
 }
 
-impl TryFrom<u8> for FileType {
-    type Error = &'static str;
-    fn try_from(value: u8) -> Result<Self, &'static str> {
+impl From<u8> for FileType {
+    fn from(value: u8) -> Self {
         match value {
-            0b0000_0001 => Ok(FileType::CptvScheduled),
-            0b0000_0010 => Ok(FileType::CptvUserRequested),
-            0b0000_0100 => Ok(FileType::CptvStartup),
-            0b0000_1000 => Ok(FileType::CptvShutdown),
-            0b0001_0000 => Ok(FileType::AudioScheduled),
-            0b0010_0000 => Ok(FileType::AudioUserRequested),
-            0b0100_0000 => Ok(FileType::AudioStartup),
-            0b1000_0000 => Ok(FileType::AudioShutdown),
-            _ => Err("Unknown FileType"),
+            0b0000_0001 => FileType::CptvScheduled,
+            0b0000_0010 => FileType::CptvUserRequested,
+            0b0000_0100 => FileType::CptvStartup,
+            0b0000_1000 => FileType::CptvShutdown,
+            0b0001_0000 => FileType::AudioScheduled,
+            0b0010_0000 => FileType::AudioUserRequested,
+            0b0100_0000 => FileType::AudioStartup,
+            0b1000_0000 => FileType::AudioShutdown,
+            _ => FileType::Unknown,
         }
     }
 }
@@ -967,11 +968,12 @@ impl OnboardFlash {
             None
         }
     }
-    pub fn get_file_part(&mut self) -> Option<FilePartReturn> {
-        if self
-            .read_page(self.current_block_index, self.current_page_index)
-            .is_ok()
-        {
+    pub fn get_file_part(
+        &mut self,
+        events: &mut EventLogger,
+        time: &SyncedDateTime,
+    ) -> Option<FilePartReturn> {
+        if let Ok(()) = self.read_page(self.current_block_index, self.current_page_index) {
             self.read_page_from_cache(self.current_block_index);
             if self.current_page.page_is_used() {
                 let length = self.current_page.page_bytes_used();
@@ -999,6 +1001,14 @@ impl OnboardFlash {
                 None
             }
         } else {
+            events.log(
+                Event::UnrecoverableDataCorruption((
+                    self.current_block_index,
+                    u16::from(self.current_page_index),
+                )),
+                time,
+                self,
+            );
             None
         }
     }
@@ -1074,8 +1084,7 @@ impl OnboardFlash {
             // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
             // that the file spans as temporarily corrupt, so this file doesn't get read and
             // sent to the raspberry pi.  This returns no useful data.
-            // Err("unrecoverable data corruption error")
-            Ok(())
+            Err("unrecoverable data corruption error")
         }
     }
 

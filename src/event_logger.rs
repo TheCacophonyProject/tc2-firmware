@@ -1,7 +1,10 @@
+use crate::FIRMWARE_VERSION;
+use crate::device_config::{AudioMode, DeviceConfig};
 use crate::onboard_flash::{FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
+use crate::sub_tasks::FormattedNZTime;
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use core::cmp::PartialEq;
 use core::ops::Range;
 use defmt::{Format, error, info, warn};
@@ -78,7 +81,7 @@ impl DiscardedRecordingInfo {
 
     fn from_bytes(bytes: &[u8]) -> Self {
         DiscardedRecordingInfo {
-            recording_type: FileType::try_from(bytes[0]).unwrap_or(FileType::CptvScheduled),
+            recording_type: FileType::from(bytes[0]),
             num_frames: LittleEndian::read_u16(&bytes[1..=2]),
             seconds_since_last_ffc: LittleEndian::read_u16(&bytes[3..=4]),
         }
@@ -86,9 +89,47 @@ impl DiscardedRecordingInfo {
 }
 
 #[derive(Format, Copy, Clone)]
+pub struct NewConfigInfo {
+    audio_mode: AudioMode,
+    continuous_recorder: bool,
+    high_power_mode: bool,
+    firmware_version: u32,
+}
+
+impl NewConfigInfo {
+    pub fn from_config(config: &DeviceConfig) -> Self {
+        Self {
+            audio_mode: config.audio_mode(),
+            continuous_recorder: config.is_continuous_recorder(),
+            high_power_mode: config.use_high_power_mode(),
+            firmware_version: FIRMWARE_VERSION,
+        }
+    }
+
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn as_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+        bytes[0] = self.audio_mode as u8;
+        bytes[1] = u8::from(self.continuous_recorder);
+        bytes[2] = u8::from(self.high_power_mode);
+        LittleEndian::write_u32(&mut bytes[3..=6], self.firmware_version);
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        NewConfigInfo {
+            audio_mode: AudioMode::try_from(bytes[0]).unwrap_or(AudioMode::Disabled),
+            continuous_recorder: bytes[1] == 1,
+            high_power_mode: bytes[2] == 1,
+            firmware_version: LittleEndian::read_u32(&bytes[3..=6]),
+        }
+    }
+}
+
+#[derive(Format, Copy, Clone)]
 pub enum Event {
     Rp2040Sleep,
-    OffloadedRecording,
+    OffloadedRecording(FileType),
     SavedNewConfig,
     StartedSendingFramesToRpi,
     StartedRecording,
@@ -121,6 +162,8 @@ pub enum Event {
     LostFrames(u64),
     FileOffloadInterruptedByUser,
     RtcVoltageLowError,
+    Rp2040GotNewConfig(NewConfigInfo),
+    UnrecoverableDataCorruption((u16, u16)),
 }
 
 impl From<Event> for u16 {
@@ -129,7 +172,7 @@ impl From<Event> for u16 {
         use Event::*;
         match value {
             Rp2040Sleep => 1,
-            OffloadedRecording => 2,
+            OffloadedRecording(_) => 2,
             SavedNewConfig => 3,
             StartedSendingFramesToRpi => 4,
             StartedRecording => 5,
@@ -162,6 +205,8 @@ impl From<Event> for u16 {
             FileOffloadInterruptedByUser => 32,
             RtcVoltageLowError => 33,
             SetThermalAlarm(_) => 34,
+            Rp2040GotNewConfig(_) => 35,
+            UnrecoverableDataCorruption(_) => 36,
         }
     }
 }
@@ -178,7 +223,7 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
         let ext_data = LittleEndian::read_u64(payload);
         let kind = match kind {
             1 => Ok(Rp2040Sleep),
-            2 => Ok(OffloadedRecording),
+            2 => Ok(OffloadedRecording(FileType::from(payload[0]))),
             3 => Ok(SavedNewConfig),
             4 => Ok(StartedSendingFramesToRpi),
             5 => Ok(StartedRecording),
@@ -229,6 +274,11 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
                 #[allow(clippy::cast_possible_wrap)]
                 Ok(SetThermalAlarm(ext_data as i64))
             }
+            35 => Ok(Rp2040GotNewConfig(NewConfigInfo::from_bytes(payload))),
+            36 => Ok(UnrecoverableDataCorruption((
+                LittleEndian::read_u16(&payload[0..=1]),
+                LittleEndian::read_u16(&payload[2..=3]),
+            ))),
             _ => Err(()),
         }?;
         Ok(LoggerEvent { timestamp, kind })
@@ -282,6 +332,9 @@ impl LoggerEvent {
             Event::WouldDiscardAsFalsePositive(discard_info)
             | Event::ErasePartialOrCorruptRecording(discard_info) => {
                 ext_data.copy_from_slice(&discard_info.as_bytes());
+            }
+            Event::Rp2040GotNewConfig(data) => {
+                ext_data.copy_from_slice(&data.as_bytes());
             }
             _ => {}
         }
@@ -355,16 +408,11 @@ impl EventLogger {
     pub fn print_event(index: usize, event: &[u8; EVENT_LENGTH]) {
         if let Ok(event) = LoggerEvent::try_from(event) {
             let utc_time = DateTime::<Utc>::from_timestamp_micros(event.timestamp).unwrap();
-            let year = utc_time.year();
-            let month = utc_time.month();
-            let day = utc_time.day();
-            let hour = utc_time.hour();
-            let minute = utc_time.minute();
-            let second = utc_time.second();
-
             info!(
-                "Event #{}, kind {}, time {}/{}/{} {}:{}:{}",
-                index, event.kind, year, month, day, hour, minute, second
+                "Event #{}, kind {}, time {}",
+                index,
+                event.kind,
+                FormattedNZTime(utc_time),
             );
             let payload_time = match event.kind {
                 Event::SetAudioAlarm(alarm_time) | Event::SetThermalAlarm(alarm_time) => {
@@ -374,16 +422,7 @@ impl EventLogger {
                 _ => None,
             };
             if let Some(utc_time) = payload_time {
-                let year = utc_time.year();
-                let month = utc_time.month();
-                let day = utc_time.day();
-                let hour = utc_time.hour();
-                let minute = utc_time.minute();
-                let second = utc_time.second();
-                info!(
-                    "-- Alarm time {}/{}/{} {}:{}:{}",
-                    year, month, day, hour, minute, second
-                );
+                info!("-- Alarm time {}", FormattedNZTime(utc_time),);
             }
         } else {
             warn!("Unknown event kind found on flash log {:?}", event);
