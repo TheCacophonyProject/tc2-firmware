@@ -939,6 +939,7 @@ fn take_front_buffer(
 }
 
 #[allow(clippy::ref_option)]
+#[allow(clippy::too_many_lines)]
 fn do_periodic_bookkeeping(
     bk: &mut BookkeepingState,
     i2c: &mut MainI2C,
@@ -989,7 +990,7 @@ fn do_periodic_bookkeeping(
         // if in high power mode need to check thermal-recorder isn't recording
         if let Ok(is_recording) = i2c.get_is_recording() {
             if !is_recording {
-                info!("Safe to execute FFC in high power mode");
+                // info!("Safe to execute FFC in high power mode");
                 bk.safe_to_execute_ffc = true;
             }
         }
@@ -1038,11 +1039,17 @@ fn do_periodic_bookkeeping(
             if config.use_high_power_mode() {
                 // Tell rPi it is outside its recording window in high-power
                 // mode, and can go to sleep.
-                if camera_state.is_ok_and(|state| !state.pi_is_powered_off())
-                    && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
-                    && bk.logged_told_rpi_to_sleep.take().is_some()
-                {
-                    events.log(Event::ToldRpiToSleep, time, fs);
+
+                if !config.is_continuous_recorder() {
+                    if camera_state.is_ok_and(|state| !state.pi_is_powered_off())
+                        && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
+                        && bk.logged_told_rpi_to_sleep.take().is_some()
+                    {
+                        events.log(Event::ToldRpiToSleep, time, fs);
+                    }
+                } else if events.is_nearly_full() {
+                    // Restart to clear events
+                    request_restart(sio);
                 }
             }
             if i2c
