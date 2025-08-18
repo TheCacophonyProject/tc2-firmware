@@ -263,9 +263,14 @@ pub fn maybe_offload_files_and_events_on_startup(
     if rpi_is_awake {
         info!("rPi is awake and ready");
     }
-
+    let current_window = config.next_or_current_recording_window(&time.date_time());
+    if let Err(e) = &current_window {
+        error!("Couldn't get current window: {}", e);
+        restart(watchdog);
+    }
+    let current_window = current_window.unwrap();
     let is_inside_thermal_recording_window =
-        config.time_is_in_configured_recording_window(&time.date_time());
+        config.time_is_in_supplied_recording_window(&time.date_time(), current_window);
 
     if is_inside_thermal_recording_window {
         info!("Inside recording window.",);
@@ -337,8 +342,10 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
     let should_offload = if !should_offload && has_files_to_offload {
         offload_wake_reason = WakeReason::ThermalOffloadAfter24Hours;
-        // If in high-power thermal mode, always offload when there are files.
-        config.use_high_power_mode()
+        // If in high-power/24hr thermal mode, always offload when there are files.
+        (config.use_high_power_mode()
+            && (config.is_continuous_recorder()
+                || config.time_is_in_supplied_recording_window(&time.date_time(), current_window)))
             || duration_since_prev_offload_greater_than_23hrs(events, fs, time)
     } else {
         should_offload

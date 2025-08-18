@@ -224,13 +224,17 @@ fn main() -> ! {
     }
     let (config, prioritise_frame_preview, config_was_updated, force_offload_now) =
         dc_result.unwrap();
-    if config.use_high_power_mode()
-        && !i2c
+    if config.use_high_power_mode() {
+        if i2c
             .get_camera_state()
             .is_ok_and(CameraState::pi_is_waking_or_awake)
-    {
-        info!("Waking pi for high power mode");
-        let _ = wake_raspberry_pi(&mut i2c, timer, Some(&mut watchdog), None);
+        {
+            // Set the pi-needs-to-be-awake bit, just in case it's not set on startup.
+            let _ = i2c.tell_pi_to_wakeup();
+        } else {
+            info!("Waking pi for high power mode");
+            let _ = wake_raspberry_pi(&mut i2c, timer, Some(&mut watchdog), None);
+        }
     }
 
     if prioritise_frame_preview {
