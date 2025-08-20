@@ -51,6 +51,7 @@ pub fn get_device_config(
             dma,
             device_config,
             event_count,
+            watchdog,
         );
     if let Some(device_config) = device_config {
         if device_config_was_updated {
@@ -511,36 +512,36 @@ pub fn schedule_next_recording(
             };
             wakeup += Duration::seconds(wake_in);
         }
-        if config.records_audio_and_thermal() {
-            if let Ok((start, end)) = config.next_or_current_recording_window(&current_time) {
-                info!(
-                    "Checking next alarm {}:{} for rec window start {}:{}",
-                    wakeup.hour(),
-                    wakeup.minute(),
-                    start.hour(),
-                    start.minute(),
-                );
-                if wakeup >= start {
-                    if start < current_time {
-                        info!("Audio mode {}", audio_mode);
-                        if audio_mode == AudioMode::AudioAndThermal {
-                            // audio recording inside recording window
-                            info!("Scheduling audio inside thermal window");
-                        } else if audio_mode == AudioMode::AudioOrThermal {
-                            // AudioOrThermal mode. Append audio wakeup to end of recording window
-                            // when scheduling inside the current thermal window.
-                            wakeup = end + (wakeup - current_time);
-                            alarm_mode = AlarmMode::Audio;
-                        }
-                    } else {
-                        info!("Setting wake up to be start of next thermal recording window");
-                        if THERMAL_DEV_MODE {
-                            wakeup = current_time + Duration::minutes(3);
-                        } else {
-                            wakeup = start;
-                        }
-                        alarm_mode = AlarmMode::Thermal;
+        if config.records_audio_and_thermal()
+            && let Ok((start, end)) = config.next_or_current_recording_window(&current_time)
+        {
+            info!(
+                "Checking next alarm {}:{} for rec window start {}:{}",
+                wakeup.hour(),
+                wakeup.minute(),
+                start.hour(),
+                start.minute(),
+            );
+            if wakeup >= start {
+                if start < current_time {
+                    info!("Audio mode {}", audio_mode);
+                    if audio_mode == AudioMode::AudioAndThermal {
+                        // audio recording inside recording window
+                        info!("Scheduling audio inside thermal window");
+                    } else if audio_mode == AudioMode::AudioOrThermal {
+                        // AudioOrThermal mode. Append audio wakeup to end of recording window
+                        // when scheduling inside the current thermal window.
+                        wakeup = end + (wakeup - current_time);
+                        alarm_mode = AlarmMode::Audio;
                     }
+                } else {
+                    info!("Setting wake up to be start of next thermal recording window");
+                    if THERMAL_DEV_MODE {
+                        wakeup = current_time + Duration::minutes(3);
+                    } else {
+                        wakeup = start;
+                    }
+                    alarm_mode = AlarmMode::Thermal;
                 }
             }
         }

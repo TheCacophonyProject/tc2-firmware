@@ -8,11 +8,12 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
+use crate::utils::restart;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use crc::{CRC_16_XMODEM, Crc};
-use defmt::{Formatter, info, unreachable, warn};
+use defmt::{Formatter, error, info, unreachable, warn};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -185,14 +186,14 @@ fn offload_recordings_and_events(
     let mut success: bool = true;
     let mut interrupted_by_user = false;
     while has_file {
-        if let Ok(offload_flag_set) = i2c.offload_flag_is_set() {
-            if !offload_flag_set {
-                warn!("Offload interrupted by user");
-                // We were interrupted by the rPi,
-                success = false;
-                interrupted_by_user = true;
-                break;
-            }
+        if let Ok(offload_flag_set) = i2c.offload_flag_is_set()
+            && !offload_flag_set
+        {
+            warn!("Offload interrupted by user");
+            // We were interrupted by the rPi,
+            success = false;
+            interrupted_by_user = true;
+            break;
         }
 
         let mut file_start = true;
@@ -400,7 +401,7 @@ fn offload_recordings_and_events(
     }
 }
 
-/// Returns `(Option<DeviceConfig>, true)` when config was updated
+/// Returns `(Option<DeviceConfig>, true, _, _)` when config was updated
 #[allow(clippy::too_many_lines)]
 pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     fs: &mut OnboardFlash,
@@ -409,6 +410,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     dma: &mut DMA,
     existing_config: Option<DeviceConfig>,
     event_count: u16,
+    watchdog: &mut Watchdog,
 ) -> (Option<DeviceConfig>, bool, bool, bool) {
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
@@ -418,13 +420,18 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     let num_files_to_offload = fs.num_files_in_initial_scan;
     let num_blocks_to_offload = fs.last_used_block_index.unwrap_or(0);
     let num_events_to_offload = event_count;
+    let device_config_crc = match &existing_config {
+        Some(existing_config) => existing_config.config().crc,
+        None => 0,
+    };
 
     if let Some(free_spi) = fs.free_spi() {
         pi_spi.enable(free_spi, resets);
-        LittleEndian::write_u32(&mut payload[0..4], u32::from(num_events_to_offload));
-        LittleEndian::write_u32(&mut payload[4..8], FIRMWARE_VERSION);
-        LittleEndian::write_u32(&mut payload[8..12], u32::from(num_files_to_offload));
-        LittleEndian::write_u32(&mut payload[12..16], u32::from(num_blocks_to_offload));
+        LittleEndian::write_u16(&mut payload[0..2], num_events_to_offload);
+        LittleEndian::write_u32(&mut payload[2..6], FIRMWARE_VERSION);
+        LittleEndian::write_u16(&mut payload[6..8], num_files_to_offload);
+        LittleEndian::write_u16(&mut payload[8..10], num_blocks_to_offload);
+        LittleEndian::write_u16(&mut payload[10..12], device_config_crc);
 
         let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
         let crc = crc_check.checksum(&payload);
@@ -437,12 +444,31 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             None,
         ) {
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
-                // Skip 4 bytes of CRC checking
+                // Check the device config against a CRC
+                info!("return {:?}", device_config);
+                let crc = LittleEndian::read_u16(&device_config[4..6]);
+                let crc_2 = LittleEndian::read_u16(&device_config[6..8]);
+                if crc != crc_2 {
+                    error!("Provided CRCs don't match.");
+                    restart(watchdog);
+                }
+                let length = device_config[8];
+                let length_2 = device_config[9];
+                if length != length_2 {
+                    error!("Lengths of device config don't match.");
+                    restart(watchdog);
+                }
+                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                let crc_calc = crc_check.checksum(&device_config[10..10 + usize::from(length)]);
+                if crc_calc != crc {
+                    error!("New DeviceConfig CRC failure.");
+                    restart(watchdog);
+                }
 
                 let mut new_config = DeviceConfig::from_bytes(&device_config[4..]);
                 let mut length_used = 0;
-                if new_config.is_some() {
-                    length_used = new_config.as_mut().unwrap().cursor_position;
+                if let Some(new_config) = &new_config {
+                    length_used = new_config.cursor_position;
                     prioritise_frame_preview = device_config[4 + length_used] == 5;
                     force_offload_now = device_config[4 + length_used + 1] == 1;
                 }
@@ -463,26 +489,23 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                                 crc,
                                 dma,
                                 None,
-                            ) {
-                                if let Some(piece_bytes) = pi_spi.return_payload() {
-                                    let crc_from_remote =
-                                        LittleEndian::read_u16(&piece_bytes[0..2]);
-                                    let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
-                                    let length = piece_bytes[2];
-                                    let crc =
-                                        crc_check.checksum(&piece_bytes[2..=2 + length as usize]);
-                                    if crc == crc_from_remote {
-                                        new_config
-                                            .motion_detection_mask
-                                            .append_piece(&piece_bytes[4..4 + length as usize]);
-                                        break;
-                                    }
-                                    warn!(
-                                        "crc failed for mask piece {}, re-requesting ({:?})",
-                                        piece,
-                                        &piece_bytes[0..10]
-                                    );
+                            ) && let Some(piece_bytes) = pi_spi.return_payload()
+                            {
+                                let crc_from_remote = LittleEndian::read_u16(&piece_bytes[0..2]);
+                                let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+                                let length = piece_bytes[2];
+                                let crc = crc_check.checksum(&piece_bytes[2..=2 + length as usize]);
+                                if crc == crc_from_remote {
+                                    new_config
+                                        .motion_detection_mask
+                                        .append_piece(&piece_bytes[4..4 + length as usize]);
+                                    break;
                                 }
+                                warn!(
+                                    "crc failed for mask piece {}, re-requesting ({:?})",
+                                    piece,
+                                    &piece_bytes[0..10]
+                                );
                             }
                         }
                     }

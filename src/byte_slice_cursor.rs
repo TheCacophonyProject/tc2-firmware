@@ -37,6 +37,11 @@ impl<'a> Cursor<'a> {
         self.pos += 4;
         result
     }
+    pub fn read_u16(&mut self) -> u16 {
+        let result = LittleEndian::read_u16(&self.inner[self.pos..self.pos + 2]);
+        self.pos += 2;
+        result
+    }
     pub fn read_i32(&mut self) -> i32 {
         let result = LittleEndian::read_i32(&self.inner[self.pos..self.pos + 4]);
         self.pos += 4;
