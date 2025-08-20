@@ -477,12 +477,13 @@ pub fn frame_acquisition_loop(
                         attempt = 0;
                         state.prev_frame_needs_transfer = true;
 
-                        if let Some(last_frame_seen) = last_frame_seen {
-                            if got_sync && last_frame_seen != frame_counter - 1 {
-                                warn!("Lost sync");
-                                got_sync = false;
-                                state.prev_frame_needs_transfer = false;
-                            }
+                        if let Some(last_frame_seen) = last_frame_seen
+                            && got_sync
+                            && last_frame_seen != frame_counter - 1
+                        {
+                            warn!("Lost sync");
+                            got_sync = false;
+                            state.prev_frame_needs_transfer = false;
                         }
                         last_frame_seen = Some(frame_counter);
                     } else {

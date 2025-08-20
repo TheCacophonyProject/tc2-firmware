@@ -980,19 +980,18 @@ fn do_periodic_bookkeeping(
             bk.status_recording.next_state();
         } else if user_requested_recording.is_some() {
             // Do nothing, there's a test recording in progress
-        } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time) {
-            if scheduled_alarm.is_audio_alarm() && scheduled_alarm.has_triggered() {
-                let _ = i2c.enter_audio_mode();
-                request_restart(sio);
-            }
+        } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time)
+            && scheduled_alarm.is_audio_alarm()
+            && scheduled_alarm.has_triggered()
+        {
+            let _ = i2c.enter_audio_mode();
+            request_restart(sio);
         }
     } else if every_twenty_seconds_in_high_power_mode {
         // if in high power mode need to check thermal-recorder isn't recording
-        if let Ok(is_recording) = i2c.get_is_recording() {
-            if !is_recording {
-                // info!("Safe to execute FFC in high power mode");
-                bk.safe_to_execute_ffc = true;
-            }
+        if let Ok(false) = i2c.get_is_recording() {
+            // info!("Safe to execute FFC in high power mode");
+            bk.safe_to_execute_ffc = true;
         }
     } else if every_minute {
         // NOTE: Every minute when we're not recording, we try to re-sync our time with the RTC,
@@ -1081,10 +1080,8 @@ fn do_periodic_bookkeeping(
                 warn!("Pi is still awake, so rp2040 must stay awake");
             }
         }
-    } else if every_minute_and_a_half {
-        if let Err(e) = i2c.attiny_keep_alive() {
-            error!("Failed to send keep alive: {}", e);
-        }
+    } else if every_minute_and_a_half && let Err(e) = i2c.attiny_keep_alive() {
+        error!("Failed to send keep alive: {}", e);
     }
 
     every_ten_seconds

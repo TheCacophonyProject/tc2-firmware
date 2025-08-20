@@ -719,18 +719,19 @@ impl OnboardFlash {
         self.num_files_in_initial_scan = num_files;
 
         // if we have written write to the end of the flash need to handle this
-        if self.last_used_block_index.is_none() && self.first_used_block_index.is_some() {
-            if let Some(last_good_block) = last_good_block {
-                self.last_used_block_index = Some(last_good_block);
-                self.file_start_block_index = self.prev_page.file_start_block_index();
+        if self.last_used_block_index.is_none()
+            && self.first_used_block_index.is_some()
+            && let Some(last_good_block) = last_good_block
+        {
+            self.last_used_block_index = Some(last_good_block);
+            self.file_start_block_index = self.prev_page.file_start_block_index();
 
-                self.current_block_index = last_good_block + 1;
-                self.current_page_index = 0;
-                info!(
-                    "Setting next starting block as last good block index {}",
-                    self.current_block_index
-                );
-            }
+            self.current_block_index = last_good_block + 1;
+            self.current_page_index = 0;
+            info!(
+                "Setting next starting block as last good block index {}",
+                self.current_block_index
+            );
         }
 
         // FIXME: Maybe we'll log the number of bad blocks seen every so often
@@ -972,7 +973,7 @@ impl OnboardFlash {
         &mut self,
         events: &mut EventLogger,
         time: &SyncedDateTime,
-    ) -> Option<FilePartReturn> {
+    ) -> Option<FilePartReturn<'_>> {
         if let Ok(()) = self.read_page(self.current_block_index, self.current_page_index) {
             self.read_page_from_cache(self.current_block_index);
             if self.current_page.page_is_used() {
@@ -1539,10 +1540,10 @@ impl OnboardFlash {
             }
             if self.last_used_block_index.is_none() {
                 self.last_used_block_index = Some(block);
-            } else if let Some(last_used_block_index) = self.last_used_block_index {
-                if last_used_block_index < block {
-                    self.last_used_block_index = Some(block);
-                }
+            } else if let Some(last_used_block_index) = self.last_used_block_index
+                && last_used_block_index < block
+            {
+                self.last_used_block_index = Some(block);
             }
             if block_index.is_none() && page_index.is_none() {
                 self.advance_file_cursor(is_last);

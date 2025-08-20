@@ -79,6 +79,7 @@ pub struct DeviceConfigInner {
     pub use_low_power_mode: bool,
     pub audio_mode: AudioMode,
     pub audio_seed: u32,
+    pub crc: u16,
 }
 
 impl DeviceConfigInner {
@@ -108,9 +109,9 @@ impl DeviceConfigInner {
         }
         let start_time;
         let end_time;
-        if window.is_some() {
-            start_time = window.unwrap().0;
-            end_time = window.unwrap().1;
+        if let Some(window) = window {
+            start_time = window.0;
+            end_time = window.1;
         } else if let Ok((s, e)) = self.next_or_current_recording_window(date_time_utc) {
             start_time = s;
             end_time = e;
@@ -327,6 +328,7 @@ impl Default for DeviceConfig {
                 use_low_power_mode: false,
                 audio_mode: AudioMode::Disabled,
                 audio_seed: 0,
+                crc: 0,
             },
             motion_detection_mask: DetectionMask::new(None),
             cursor_position: 0,
@@ -348,6 +350,13 @@ impl DeviceConfig {
 
     pub fn inner_from_bytes(bytes: &[u8]) -> Option<(DeviceConfigInner, usize)> {
         let mut cursor = Cursor::new(bytes);
+
+        let crc = cursor.read_u16();
+        let _crc = cursor.read_u16();
+        // length, length
+        let _ = cursor.read_u8();
+        let _ = cursor.read_u8();
+
         let device_id = cursor.read_u32();
         if device_id == u32::MAX {
             // Device config is uninitialised in flash
@@ -398,6 +407,7 @@ impl DeviceConfig {
                 use_low_power_mode,
                 audio_mode,
                 audio_seed,
+                crc,
             },
             cursor.position(),
         ))
