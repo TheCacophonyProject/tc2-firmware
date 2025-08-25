@@ -282,8 +282,9 @@ pub fn maybe_offload_files_and_events_on_startup(
     let is_outside_thermal_recording_window = !is_inside_thermal_recording_window;
     let is_too_full_to_record_in_current_mode = match recording_mode {
         RecordingMode::Audio(mode) => fs.is_too_full_to_start_new_audio_recordings(&mode),
-        RecordingMode::Thermal(_) => fs.is_too_full_to_start_new_cptv_recordings(),
-        RecordingMode::None => false,
+        RecordingMode::Thermal(_) | RecordingMode::None => {
+            fs.is_too_full_to_start_new_cptv_recordings()
+        }
     };
 
     if is_too_full_to_record_in_current_mode {
@@ -391,8 +392,9 @@ pub fn maybe_offload_files_and_events_on_startup(
                         RecordingMode::Audio(mode) => {
                             fs.is_too_full_to_start_new_audio_recordings(&mode)
                         }
-                        RecordingMode::Thermal(_) => fs.is_too_full_to_start_new_cptv_recordings(),
-                        RecordingMode::None => false,
+                        RecordingMode::Thermal(_) | RecordingMode::None => {
+                            fs.is_too_full_to_start_new_cptv_recordings()
+                        }
                     };
                 } else {
                     // Offload failed, restart and try again.
