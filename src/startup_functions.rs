@@ -629,7 +629,7 @@ pub fn work_out_recording_mode(
             RecordingMode::None
         } else if config.is_audio_device() && tc2_agent_state.test_audio_recording_requested() {
             let recording_request_type = if tc2_agent_state.short_test_audio_recording_requested() {
-                RecordingRequestType::test_recording(60)
+                RecordingRequestType::test_recording(10)
             } else {
                 RecordingRequestType::test_recording(60 * 5)
             };
