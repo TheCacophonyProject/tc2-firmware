@@ -186,9 +186,7 @@ fn offload_recordings_and_events(
     let mut success: bool = true;
     let mut interrupted_by_user = false;
     while has_file {
-        if let Ok(offload_flag_set) = i2c.offload_flag_is_set()
-            && !offload_flag_set
-        {
+        if let Ok(false) = i2c.offload_flag_is_set() {
             warn!("Offload interrupted by user");
             // We were interrupted by the rPi,
             success = false;
@@ -202,6 +200,7 @@ fn offload_recordings_and_events(
         let last_used_block_index = fs.last_used_block_index.unwrap_or(0);
 
         let mut current_file_metadata = None;
+
         // For speed of offloading, we read from the flash cache into one of the page buffers
         // held by the flash_storage.  Then we swap buffers and return the just read page
         // so that it can be immediately transferred via DMA to the raspberry pi.
@@ -358,7 +357,7 @@ fn offload_recordings_and_events(
             if fs.erase_last_file().is_err() {
                 events.log(
                     Event::ErasePartialOrCorruptRecording(DiscardedRecordingInfo {
-                        recording_type: current_file_metadata.unwrap_or(FileType::CptvScheduled),
+                        recording_type: current_file_metadata.unwrap_or(FileType::Unknown),
                         num_frames: 0,
                         seconds_since_last_ffc: 0,
                     }),
@@ -393,6 +392,7 @@ fn offload_recordings_and_events(
         file_count != 0
     } else {
         if !interrupted_by_user {
+            // FIXME: Try to record the type of the failed offload
             events.log(Event::FileOffloadFailed, time, fs);
         }
         fs.scan();
