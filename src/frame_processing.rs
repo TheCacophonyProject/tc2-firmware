@@ -981,10 +981,13 @@ fn do_periodic_bookkeeping(
         } else if user_requested_recording.is_some() {
             // Do nothing, there's a test recording in progress
         } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time)
-            && scheduled_alarm.is_audio_alarm()
             && scheduled_alarm.has_triggered()
         {
-            let _ = i2c.enter_audio_mode();
+            if scheduled_alarm.is_audio_alarm() {
+                let _ = i2c.enter_audio_mode();
+            } else if scheduled_alarm.is_thermal_alarm() {
+                let _ = i2c.enter_thermal_mode();
+            }
             request_restart(sio);
         }
     } else if every_twenty_seconds_in_high_power_mode {
