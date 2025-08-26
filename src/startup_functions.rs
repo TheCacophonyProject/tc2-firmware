@@ -118,7 +118,13 @@ pub fn get_synced_time(
                     }
                 } else {
                     // can't get time so use 0 and add a time when tc2-agent uploads
-                    events.log_event(LoggerEvent::new_with_unknown_time(Event::RtcCommError), fs);
+                    events.log_event_if_not_dupe(
+                        LoggerEvent::new_with_unknown_time(Event::RtcCommError),
+                        fs,
+                    );
+
+                    // IS there a better way we can recover if I2C isn't working?
+
                     error!("{}", e);
                     restart(watchdog);
                 }
