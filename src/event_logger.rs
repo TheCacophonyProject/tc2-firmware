@@ -4,7 +4,7 @@ use crate::onboard_flash::{FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS
 use crate::sub_tasks::FormattedNZTime;
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use core::cmp::PartialEq;
 use core::ops::Range;
 use defmt::{Format, error, info, warn};
@@ -312,6 +312,10 @@ impl LoggerEvent {
         DateTime::from_timestamp_micros(self.timestamp)
     }
 
+    pub fn kind(&self) -> Event {
+        self.kind
+    }
+
     pub fn as_bytes(&self) -> [u8; EVENT_LENGTH] {
         let mut event_data = [0u8; EVENT_LENGTH];
         LittleEndian::write_u16(&mut event_data[0..2], self.kind.into());
@@ -517,6 +521,18 @@ impl EventLogger {
         }
     }
 
+    pub fn latest_event(&self, fs: &mut OnboardFlash) -> Option<LoggerEvent> {
+        if let Some(last_event_index) = self.last_event_index() {
+            if let Some(event_bytes) = Self::get_event_at_index(last_event_index, fs) {
+                LoggerEvent::try_from(&event_bytes).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     pub fn latest_event_of_kind(
         &self,
         event_type: Event,
@@ -546,6 +562,10 @@ impl EventLogger {
         self.log_event(LoggerEvent::new(kind, time), fs);
     }
 
+    pub fn log_if_not_dupe(&mut self, kind: Event, time: &SyncedDateTime, fs: &mut OnboardFlash) {
+        self.log_event_if_not_dupe(LoggerEvent::new(kind, time), fs);
+    }
+
     pub fn log_event(&mut self, event: LoggerEvent, fs: &mut OnboardFlash) {
         if self.count() < MAX_EVENTS_IN_LOGGER {
             if let Some(next_event_index) = &mut self.next_event_index {
@@ -562,6 +582,28 @@ impl EventLogger {
             }
         } else {
             warn!("Event log full");
+        }
+    }
+
+    pub fn log_event_if_not_dupe(&mut self, event: LoggerEvent, fs: &mut OnboardFlash) {
+        let prev_event_is_dupe = self.latest_event(fs).is_some_and(|prev_event| {
+            if prev_event.kind() == event.kind() {
+                if prev_event.timestamp == event.timestamp {
+                    true
+                } else if let Some(prev_time) = prev_event.timestamp()
+                    && let Some(time) = event.timestamp()
+                    && time - prev_time < Duration::seconds(60)
+                {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        });
+        if !prev_event_is_dupe {
+            self.log_event(event, fs);
         }
     }
 }

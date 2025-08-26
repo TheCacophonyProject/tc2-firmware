@@ -59,7 +59,7 @@ impl SyncedDateTime {
                 }
             }
             Err(e) => {
-                events.log(Event::RtcCommError, self, fs);
+                events.log_if_not_dupe(Event::RtcCommError, self, fs);
                 error!("Unable to get DateTime from RTC: {}", e);
             }
         }
