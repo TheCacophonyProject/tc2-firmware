@@ -369,6 +369,32 @@ pub fn maybe_offload_files_and_events_on_startup(
         if recording_mode.record_thermal() && config.use_high_power_mode() {
             offload_wake_reason = WakeReason::ThermalHighPower;
         }
+
+        if !rpi_is_awake {
+            // If we're going to wake the pi to offload, we're going to lose the reason we woke up,
+            // so set the mode flags and new near future alarms to retain it after we are reset.
+            if RecordingMode::None != recording_mode {
+                if let Err(e) = i2c.clear_and_disable_alarm(time) {
+                    error!("Failed to disable alarm: {}", e);
+                }
+                if recording_mode.record_thermal() {
+                    let _ = i2c.enter_thermal_mode();
+                    let _ = i2c.set_wakeup_alarm(
+                        &(time.date_time() + Duration::seconds(90)),
+                        AlarmMode::Thermal,
+                        time,
+                    );
+                } else if recording_mode.record_audio() {
+                    let _ = i2c.enter_audio_mode();
+                    let _ = i2c.set_wakeup_alarm(
+                        &(time.date_time() + Duration::seconds(90)),
+                        AlarmMode::Audio,
+                        time,
+                    );
+                }
+            }
+        }
+
         info!("Should wake pi because {:?}", offload_wake_reason);
         let _wait_to_wake = wake_raspberry_pi(
             i2c,
