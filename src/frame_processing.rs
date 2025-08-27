@@ -369,12 +369,18 @@ pub fn thermal_motion_task(
         let made_startup_status_recording = (fs.file_types_found.has_type(FileType::CptvStartup)
             && fs.last_startup_recording_time.is_some()
             && fs.last_startup_recording_time.unwrap() > current_recording_window.0)
-            || events
+            || (events
                 .latest_event_of_kind(Event::OffloadedRecording(FileType::CptvScheduled), &mut fs)
                 .is_some_and(|e| {
                     e.timestamp()
                         .is_some_and(|time| time > current_recording_window.0)
-                });
+                })
+                || events
+                    .latest_event_of_kind(Event::OffloadedRecording(FileType::CptvStartup), &mut fs)
+                    .is_some_and(|e| {
+                        e.timestamp()
+                            .is_some_and(|time| time > current_recording_window.0)
+                    }));
 
         let made_shutdown_recording = fs.file_types_found.has_type(FileType::CptvShutdown);
         let status_recording_state = if made_startup_status_recording && made_shutdown_recording {
