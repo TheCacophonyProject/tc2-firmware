@@ -11,8 +11,8 @@ use crate::frame_processing::THERMAL_DEV_MODE;
 use crate::onboard_flash::{FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
-    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
-    offload_all_recordings_and_events, offload_latest_recording,
+    FormattedNZTime, get_existing_device_config_or_config_from_pi_on_initial_handshake,
+    maybe_offload_events, offload_all_recordings_and_events, offload_latest_recording,
 };
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
@@ -548,35 +548,30 @@ pub fn schedule_next_recording(
         }
         if config.records_audio_and_thermal()
             && let Ok((start, end)) = config.next_or_current_recording_window(&current_time)
+            && wakeup >= start
         {
-            info!(
-                "Checking next alarm {}:{} for rec window start {}:{}",
-                wakeup.hour(),
-                wakeup.minute(),
-                start.hour(),
-                start.minute(),
-            );
-            if wakeup >= start {
-                if start < current_time {
-                    info!("Audio mode {}", audio_mode);
-                    if audio_mode == AudioMode::AudioAndThermal {
-                        // audio recording inside recording window
-                        info!("Scheduling audio inside thermal window");
-                    } else if audio_mode == AudioMode::AudioOrThermal {
-                        // AudioOrThermal mode. Append audio wakeup to end of recording window
-                        // when scheduling inside the current thermal window.
-                        wakeup = end + (wakeup - current_time);
-                        alarm_mode = AlarmMode::Audio;
-                    }
-                } else {
-                    info!("Setting wake up to be start of next thermal recording window");
-                    if THERMAL_DEV_MODE {
-                        wakeup = current_time + Duration::minutes(3);
-                    } else {
-                        wakeup = start;
-                    }
-                    alarm_mode = AlarmMode::Thermal;
+            if start < current_time {
+                info!("Audio mode {}", audio_mode);
+                if audio_mode == AudioMode::AudioAndThermal {
+                    // audio recording inside recording window
+                    info!("Scheduling audio inside thermal window");
+                } else if audio_mode == AudioMode::AudioOrThermal {
+                    // AudioOrThermal mode. Append audio wakeup to end of recording window
+                    // when scheduling inside the current thermal window.
+                    wakeup = end + (wakeup - current_time);
+                    alarm_mode = AlarmMode::Audio;
                 }
+            } else {
+                info!(
+                    "Setting wake up to be start of next thermal recording window ({})",
+                    FormattedNZTime(start)
+                );
+                if THERMAL_DEV_MODE {
+                    wakeup = current_time + Duration::minutes(3);
+                } else {
+                    wakeup = start;
+                }
+                alarm_mode = AlarmMode::Thermal;
             }
         }
     }

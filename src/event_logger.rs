@@ -340,6 +340,13 @@ impl LoggerEvent {
             Event::Rp2040GotNewConfig(data) => {
                 ext_data.copy_from_slice(&data.as_bytes());
             }
+            Event::UnrecoverableDataCorruption(location) => {
+                LittleEndian::write_u16(&mut ext_data[0..2], location.0);
+                LittleEndian::write_u16(&mut ext_data[2..4], location.1);
+            }
+            Event::OffloadedRecording(file_type) => {
+                ext_data[0] = file_type as u8;
+            }
             _ => {}
         }
         event_data
