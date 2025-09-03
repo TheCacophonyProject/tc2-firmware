@@ -252,7 +252,7 @@ pub fn maybe_offload_files_and_events_on_startup(
             fs.num_files_in_initial_scan, blocks_used, space_used
         );
     }
-    let has_events_to_offload = events.has_events_to_offload();
+    let has_events_to_offload = events.has_events_to_offload(fs);
     if has_events_to_offload {
         info!("There are {} event(s) to offload", events.count());
     }
@@ -273,6 +273,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     let current_window = config.next_or_current_recording_window(&time.date_time());
     if let Err(e) = &current_window {
         error!("Couldn't get current window: {}", e);
+        // FIXME: Log invalid window?  Use default window?
         restart(watchdog);
     }
     let current_window = current_window.unwrap();
@@ -440,9 +441,12 @@ pub fn maybe_offload_files_and_events_on_startup(
                 fs, pi_spi, resets, dma, i2c, events, time, watchdog,
             ) {
                 // Failed to offload, restart and try again
-                error!("File offload failed, restarting");
+                error!("File offload to pi failed, restarting");
                 restart(watchdog);
             }
+            // Offload events again *after* offloading all recordings, so we don't have to wait
+            // for info about recording offload success.
+            maybe_offload_events(pi_spi, resets, dma, events, fs, time, watchdog);
         }
     }
 }

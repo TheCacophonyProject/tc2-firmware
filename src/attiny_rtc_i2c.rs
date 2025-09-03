@@ -210,12 +210,6 @@ impl From<u8> for CameraConnectionState {
 }
 
 #[derive(Format, Copy, Clone, PartialEq)]
-pub struct RecordingTypeDetail {
-    user_requested: bool,
-    pub duration_seconds: u32,
-}
-
-#[derive(Format, Copy, Clone, PartialEq)]
 pub enum RecordingMode {
     Audio(RecordingRequestType),
     Thermal(RecordingRequestType),
@@ -231,6 +225,12 @@ impl RecordingMode {
     pub fn record_thermal(&self) -> bool {
         matches!(self, RecordingMode::Thermal(_))
     }
+}
+
+#[derive(Format, Copy, Clone, PartialEq)]
+pub struct RecordingTypeDetail {
+    user_requested: bool,
+    pub duration_seconds: u32,
 }
 
 #[derive(Format, Copy, Clone, PartialEq)]

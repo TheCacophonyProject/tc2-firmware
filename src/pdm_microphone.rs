@@ -279,7 +279,7 @@ impl PdmMicrophone {
                 if rx_transfer.is_done() && cycle >= WARMUP_CYCLES {
                     //this causes problems
                     warn!("Couldn't keep up with data {}", cycle);
-                    let _ = fs.erase_last_file();
+                    let _ = fs.erase_latest_file();
 
                     break;
                 }

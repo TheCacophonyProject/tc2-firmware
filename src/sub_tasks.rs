@@ -25,7 +25,7 @@ pub fn maybe_offload_events(
     watchdog: &mut Watchdog,
 ) -> bool {
     let mut success = true;
-    if events.has_events_to_offload() {
+    if events.has_events_to_offload(fs) {
         let event_indices = events.event_range();
         let total_events = event_indices.end;
         let mut events_sent = 0;
@@ -340,7 +340,7 @@ fn offload_recordings_and_events(
                     file_count += 1;
                     info!("Offloaded {} file(s)", file_count);
                     watchdog.feed();
-                    let _ = fs.erase_last_file();
+                    let _ = fs.erase_latest_file();
                     file_ended = true;
                     break;
                 }
@@ -354,7 +354,7 @@ fn offload_recordings_and_events(
                 fs.file_start_block_index
             );
             watchdog.feed();
-            if fs.erase_last_file().is_err() {
+            if fs.erase_latest_file().is_err() {
                 events.log(
                     Event::ErasePartialOrCorruptRecording(DiscardedRecordingInfo {
                         recording_type: current_file_metadata.unwrap_or(FileType::Unknown),
@@ -392,7 +392,6 @@ fn offload_recordings_and_events(
         file_count != 0
     } else {
         if !interrupted_by_user {
-            // FIXME: Try to record the type of the failed offload
             events.log(Event::FileOffloadFailed, time, fs);
         }
         fs.scan();
@@ -445,7 +444,6 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
         ) {
             let new_config = if let Some(device_config) = pi_spi.return_payload() {
                 // Check the device config against a CRC
-                info!("return {:?}", device_config);
                 let crc = LittleEndian::read_u16(&device_config[4..6]);
                 let crc_2 = LittleEndian::read_u16(&device_config[6..8]);
                 if crc != crc_2 {

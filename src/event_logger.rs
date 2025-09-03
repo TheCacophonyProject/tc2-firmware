@@ -485,12 +485,16 @@ impl EventLogger {
         }
     }
 
-    pub fn has_events_to_offload(&self) -> bool {
-        self.count() != 0
+    pub fn has_events_to_offload(&self, fs: &mut OnboardFlash) -> bool {
+        self.count() > 0
+            && !(self.count() == 1
+                && self
+                    .latest_event(fs)
+                    .is_some_and(|event| event.kind == Event::OffloadedLogs))
     }
 
     pub fn clear(&mut self, fs: &mut OnboardFlash) {
-        if self.has_events_to_offload() {
+        if self.has_events_to_offload(fs) {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
             let end_block_index = FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX;
             for block_index in start_block_index..end_block_index {

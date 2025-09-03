@@ -587,26 +587,53 @@ impl OnboardFlash {
             return false;
         }
         let mut file_start = self.file_start_block_index;
-        while let Some(fs) = file_start {
+        // Scanning *backwards* through the flash memory
+        'outer: while let Some(fs) = file_start {
             // read 1 as if incomplete 0 won't be writen to
-            let _ = self.read_page(fs, 0);
-            self.read_page_from_cache(fs);
-            self.wait_for_all_ready();
-            if !self.current_page.page_is_used() {
-                // possibly unfinished cptv file try previous
-                let _ = self.read_page(fs, 1);
-                self.read_page_metadata(fs);
+            if self.read_page(fs, 0).is_ok() {
+                self.read_page_from_cache(fs);
                 self.wait_for_all_ready();
-                file_start = self.current_page.previous_file_start_block_index();
-                continue;
-            }
-            let is_cptv =
-                self.current_page.user_data()[0] != 1 || self.current_page.is_cptv_recording();
-            if only_last || is_cptv {
-                return is_cptv;
-            }
+                if !self.current_page.page_is_used() {
+                    // possibly unfinished cptv file try previous
+                    if self.read_page(fs, 1).is_ok() {
+                        self.read_page_metadata(fs);
+                        self.wait_for_all_ready();
+                        file_start = self.current_page.previous_file_start_block_index();
+                        continue;
+                    }
+                    // Failed reading page.
+                    // Try to find prev file start...
+                    let mut file_start_block = fs.saturating_sub(1);
+                    while self.read_page(file_start_block, 0).is_err() {
+                        if file_start_block == 0 {
+                            file_start = None;
+                            continue 'outer;
+                        }
+                        file_start_block = file_start_block.saturating_sub(1);
+                    }
+                    file_start = Some(file_start_block);
+                    continue;
+                }
+                let is_cptv =
+                    self.current_page.user_data()[0] != 1 || self.current_page.is_cptv_recording();
+                if only_last || is_cptv {
+                    return is_cptv;
+                }
 
-            file_start = self.current_page.previous_file_start_block_index();
+                file_start = self.current_page.previous_file_start_block_index();
+            } else {
+                // Failed reading page.
+                // Try to find prev file start...
+                let mut file_start_block = fs.saturating_sub(1);
+                while self.read_page(file_start_block, 0).is_err() {
+                    if file_start_block == 0 {
+                        file_start = None;
+                        continue 'outer;
+                    }
+                    file_start_block = file_start_block.saturating_sub(1);
+                }
+                file_start = Some(file_start_block);
+            }
         }
         false
     }
@@ -625,13 +652,21 @@ impl OnboardFlash {
         let mut last_file_block_index = u16::MAX;
         let mut num_files = 0;
 
+        let mut file_start_block_index: Option<BlockIndex> = None;
+
         for block_index in 0..TOTAL_FLASH_BLOCKS {
             // TODO: Interleave with random cache read
             // in the case of incomplete cptv files page 0 will be empty
-            if self.read_page(block_index, 1).is_ok() {
+            //println!("Read block:page {block_index}:1");
+
+            // Bad block markers are on the first page of each block:
+
+            let mut part_of_bad_block = false;
+            if self.read_page(block_index, 0).is_ok() {
                 self.read_page_metadata(block_index);
                 self.wait_for_all_ready();
                 if self.current_page.is_part_of_bad_block() {
+                    part_of_bad_block = true;
                     if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == u16::MAX) {
                         // Add the bad block to our runtime table.
                         *slot = block_index;
@@ -639,92 +674,102 @@ impl OnboardFlash {
                             self.current_block_index = block_index + 1;
                         }
                     }
-                } else if block_index < NUM_RECORDING_BLOCKS {
-                    good_block = true;
-                    last_good_block = Some(block_index);
-
-                    if self.current_page.page_is_used()
-                        && let Some(file_start_block_index) =
-                            self.current_page.file_start_block_index()
-                        && last_file_block_index != file_start_block_index
-                    {
-                        last_file_block_index = block_index;
-                        num_files += 1;
-
-                        if self.current_page.is_cptv_recording() {
-                            if self.current_page.is_startup_status_recording() {
-                                // For the file time, we need to go back and read the first page.
-                                if self.read_page(block_index, 0).is_ok() {
-                                    self.read_page_metadata(block_index);
-                                    self.wait_for_all_ready();
-
-                                    self.file_types_found.add_type(FileType::CptvStartup);
-                                    if self.current_page.file_written_time().is_some() {
-                                        self.last_startup_recording_time =
-                                            self.current_page.file_written_time();
-                                    }
-                                }
-                                if self.read_page(block_index, 1).is_ok() {
-                                    self.read_page_metadata(block_index);
-                                    self.wait_for_all_ready();
-                                }
-                            } else if self.current_page.is_shutdown_status_recording() {
-                                self.file_types_found.add_type(FileType::CptvShutdown);
-                            } else if self.current_page.is_user_requested_test_recording() {
-                                self.file_types_found.add_type(FileType::CptvUserRequested);
-                            } else {
-                                self.file_types_found.add_type(FileType::CptvScheduled);
-                            }
-                        } else if self.current_page.is_audio_recording() {
-                            if self.current_page.is_startup_status_recording() {
-                                self.file_types_found.add_type(FileType::AudioStartup);
-                            } else if self.current_page.is_shutdown_status_recording() {
-                                self.file_types_found.add_type(FileType::AudioShutdown);
-                            } else if self.current_page.is_user_requested_test_recording() {
-                                self.file_types_found.add_type(FileType::AudioUserRequested);
-                            } else {
-                                self.file_types_found.add_type(FileType::AudioScheduled);
-                            }
-                        }
-                    }
-
-                    if !self.current_page.page_is_used() {
-                        // This will be the starting block of the next file to be written.
-                        if self.last_used_block_index.is_none()
-                            && self.first_used_block_index.is_some()
-                        {
-                            self.last_used_block_index = Some(block_index.saturating_sub(1));
-                            self.file_start_block_index = self.prev_page.file_start_block_index();
-                            self.current_block_index = block_index;
-                            self.current_page_index = 0;
-                            info!("Setting next starting block index {}", block_index);
-                        }
-                    } else if self.first_used_block_index.is_none() {
-                        // This is the starting block of the first file stored.
-                        info!("Storing first used block {}", block_index);
-                        self.first_used_block_index = Some(block_index);
-                    }
                 }
+            }
+
+            if part_of_bad_block {
+                warn!("BAD BLOCK {}", block_index);
             } else {
-                error!("Failed to read page 1 at block {}", block_index);
-                self.read_page_metadata(block_index);
-                self.wait_for_all_ready();
-                info!(
-                    "Bad metadata, used {} {:?}",
-                    self.current_page.page_is_used(),
-                    self.current_page.user_metadata_1()
-                );
+                //println!("Scan {block_index}");
+                if self.read_page(block_index, 1).is_ok() {
+                    self.read_page_metadata(block_index);
+                    self.wait_for_all_ready();
+                    if block_index < NUM_RECORDING_BLOCKS {
+                        good_block = true;
+                        last_good_block = Some(block_index);
+
+                        let page_is_used = self.current_page.page_is_used();
+                        if page_is_used
+                            && let Some(file_start_block_index) =
+                                self.current_page.file_start_block_index()
+                            && last_file_block_index != file_start_block_index
+                        {
+                            last_file_block_index = block_index;
+                            num_files += 1;
+
+                            if self.current_page.is_cptv_recording() {
+                                if self.current_page.is_startup_status_recording() {
+                                    // For the file time, we need to go back and read the first page.
+                                    if self.read_page(block_index, 0).is_ok() {
+                                        self.read_page_metadata(block_index);
+                                        self.wait_for_all_ready();
+
+                                        self.file_types_found.add_type(FileType::CptvStartup);
+                                        if self.current_page.file_written_time().is_some() {
+                                            self.last_startup_recording_time =
+                                                self.current_page.file_written_time();
+                                        }
+                                    }
+                                    if self.read_page(block_index, 1).is_ok() {
+                                        self.read_page_metadata(block_index);
+                                        self.wait_for_all_ready();
+                                    }
+                                } else if self.current_page.is_shutdown_status_recording() {
+                                    self.file_types_found.add_type(FileType::CptvShutdown);
+                                } else if self.current_page.is_user_requested_test_recording() {
+                                    self.file_types_found.add_type(FileType::CptvUserRequested);
+                                } else {
+                                    self.file_types_found.add_type(FileType::CptvScheduled);
+                                }
+                            } else if self.current_page.is_audio_recording() {
+                                if self.current_page.is_startup_status_recording() {
+                                    self.file_types_found.add_type(FileType::AudioStartup);
+                                } else if self.current_page.is_shutdown_status_recording() {
+                                    self.file_types_found.add_type(FileType::AudioShutdown);
+                                } else if self.current_page.is_user_requested_test_recording() {
+                                    self.file_types_found.add_type(FileType::AudioUserRequested);
+                                } else {
+                                    self.file_types_found.add_type(FileType::AudioScheduled);
+                                }
+                            }
+                        }
+                        if page_is_used {
+                            // FIXME: This doesn't happen if we can't read the page
+                            file_start_block_index = Some(block_index);
+                            if self.first_used_block_index.is_none() {
+                                // This is the starting block of the first file stored.
+                                info!("Storing first used block {}", block_index);
+                                self.first_used_block_index = Some(block_index);
+                            }
+                        } else {
+                            // This will be the starting block of the next file to be written.
+                            if self.last_used_block_index.is_none()
+                                && self.first_used_block_index.is_some()
+                            {
+                                self.last_used_block_index = Some(block_index.saturating_sub(1));
+                                self.file_start_block_index = file_start_block_index;
+                                self.current_block_index = block_index;
+                                self.current_page_index = 0;
+                                info!("Setting next starting block index {}", block_index);
+                            }
+                        }
+                    }
+                } else {
+                    // If we hit a block/page that we can't read, we need to keep scanning
+                    // until we hit a block whose first page we can read.
+                    error!("Failed to read page 1 at block {}", block_index);
+                }
             }
         }
         self.num_files_in_initial_scan = num_files;
 
-        // if we have written write to the end of the flash need to handle this
+        // if we have written right to the end of the flash need to handle this
         if self.last_used_block_index.is_none()
             && self.first_used_block_index.is_some()
             && let Some(last_good_block) = last_good_block
         {
             self.last_used_block_index = Some(last_good_block);
-            self.file_start_block_index = self.prev_page.file_start_block_index();
+            self.file_start_block_index = file_start_block_index;
 
             self.current_block_index = last_good_block + 1;
             self.current_page_index = 0;
@@ -910,7 +955,19 @@ impl OnboardFlash {
         }
     }
 
-    pub fn erase_last_file(&mut self) -> Result<(), &str> {
+    pub fn erase_good_blocks(&mut self) {
+        let bad_blocks = self.bad_blocks;
+        for block_index in 0..2048 {
+            if !&bad_blocks.contains(&block_index)
+                && let Err(e) = self.erase_block(block_index)
+            {
+                error!("Failed to erase block {}: {}", block_index, e);
+                break;
+            }
+        }
+    }
+
+    pub fn erase_latest_file(&mut self) -> Result<(), &str> {
         // havent started a file
         // haven't used a block
         // havent written to file yet
@@ -928,7 +985,7 @@ impl OnboardFlash {
         }
         let start_block_index = self.file_start_block_index.unwrap();
         info!(
-            "Erasing last file {}:0 to {}",
+            "Erasing latest file {}:0 to {}",
             start_block_index, self.last_used_block_index
         );
 
@@ -1039,7 +1096,6 @@ impl OnboardFlash {
         while status.operation_in_progress() || status.cache_read_busy() {
             status = self.get_status();
         }
-        status = self.get_status();
         status
     }
 
@@ -1052,66 +1108,75 @@ impl OnboardFlash {
 
     #[allow(clippy::unnecessary_wraps)]
     pub fn read_page(&mut self, block: BlockIndex, page: PageIndex) -> Result<(), &str> {
-        // FIXME: Handle logging of ECC errors and results of read page properly.
+        let mut retries = 0;
         assert!(block < 2048, "Invalid block");
         assert!(page < 64, "Invalid page");
         let address = OnboardFlash::get_address(block, page);
-        self.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
-        let status = self.wait_for_all_ready();
+        while retries < 4 {
+            // FIXME: Handle logging of ECC errors and results of read page properly.
+            self.spi_write(&[PAGE_READ, address[0], address[1], address[2]]);
+            let status = self.wait_for_all_ready();
+            let EccStatus {
+                okay,
+                should_relocate,
+            } = status.ecc_status();
+            if okay {
+                if should_relocate {
+                    // If we get a block that's going bad, we need to mark it as such after reading
+                    // the page.  Because we're reading the page, that means we're offloading files,
+                    // so we'll be erasing this block soon.  Maybe we just never use it again?
+                    // We don't really know how much a few ECC errors that were detected and corrected
+                    // escalates into a fully unusable block.  It might be better just to log an event,
+                    // so we can detect the frequency of this happening.
 
-        let EccStatus {
-            okay,
-            should_relocate,
-        } = status.ecc_status();
-        if okay {
-            if should_relocate {
-                // FIXME: mark and relocate block if needed.
-                // If we get a block that's going bad, we need to mark it as such after reading
-                // the page.  Because we're reading the page, that means we're offloading files,
-                // so we'll be erasing this block soon.  Maybe we just never use it again?
-                // We don't really know how much a few ECC errors that were detected and corrected
-                // escalates into a fully unusable block.  It might be better just to log an event,
-                // so we can detect the frequency of this happening.
-
-                // We don't care about refreshing/relocating the data, since it's only
-                // getting read off the flash once, and then erased.
+                    // We don't care about refreshing/relocating the data, since it's only
+                    // getting read off the flash once, and then erased.
+                }
+                return Ok(());
             }
-            Ok(())
-        } else {
-            warn!(
-                "unrecoverable data corruption error at {}:{} - should relocate? {}",
-                block, page, should_relocate
-            );
-            // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
-            // that the file spans as temporarily corrupt, so this file doesn't get read and
-            // sent to the raspberry pi.  This returns no useful data.
-            Err("unrecoverable data corruption error")
+            // Retry 3-4 times before giving up.
+            retries += 1;
         }
+        warn!("unrecoverable data corruption error at {}:{}", block, page);
+        // Unrecoverable failure.  Maybe just mark this block as bad, and mark all the blocks
+        // that the file spans as temporarily corrupt, so this file doesn't get read and
+        // sent to the raspberry pi.  This returns no useful data.
+        Err("unrecoverable data corruption error")
     }
 
     pub fn begin_offload_reverse(&mut self) -> bool {
         if let Some(last_block_index) = self.last_used_block_index {
             if let Some(file_start) = self.file_start_block_index {
-                // read 1 as if incomplete 0 won't be writen to
-                self.read_page(file_start, 1).unwrap();
-                self.read_page_metadata(file_start);
-                self.wait_for_all_ready();
-                self.current_block_index = file_start;
-                self.current_page_index = 0;
-                self.previous_file_start_block_index =
-                    self.current_page.previous_file_start_block_index();
-                info!(
-                    "Set file start to {}:{} and previous {}",
-                    self.current_block_index, 0, self.previous_file_start_block_index
-                );
-                return true;
+                let mut file_start_block = file_start;
+                // We need to find a good page that can tell us where the previous file started.
+                // Start at page 1, as if cptv is incomplete, page 0 won't be written.
+                while file_start_block <= last_block_index {
+                    for page in 1..64 {
+                        if self.read_page(file_start_block, page).is_ok() {
+                            self.read_page_metadata(file_start_block);
+                            self.wait_for_all_ready();
+                            self.current_block_index = file_start_block;
+                            self.current_page_index = 0;
+                            self.previous_file_start_block_index =
+                                self.current_page.previous_file_start_block_index();
+                            info!(
+                                "Set file start to {:?}:{:?} and previous {:?}",
+                                self.current_block_index, 0, self.previous_file_start_block_index
+                            );
+                            return true;
+                        }
+                        error!("Failed to read block:page {}:{}", file_start_block, page);
+                    }
+                    file_start_block += 1;
+                }
             }
-            // old file system should only happen once
+
+            // old file system, should only happen once
             self.current_block_index = self.find_start(last_block_index);
             self.current_page_index = 0;
             self.file_start_block_index = Some(self.current_block_index);
             info!(
-                "Searched for file start found {}:{}",
+                "Searched for file start found {:?}:{:?}",
                 self.current_block_index, self.last_used_block_index
             );
             return true;
@@ -1137,11 +1202,14 @@ impl OnboardFlash {
     fn last_dirty_page(&mut self, block_index: BlockIndex) -> Option<PageIndex> {
         for page in (0..NUM_PAGES_PER_BLOCK).rev() {
             info!("Looking for dirty page at {}:{}", block_index, page);
-            self.read_page(block_index, page).unwrap();
-            self.read_page_metadata(block_index);
-            self.wait_for_all_ready();
-            if self.current_page.page_is_used() {
-                return Some(page);
+            if self.read_page(block_index, page).is_ok() {
+                self.read_page_metadata(block_index);
+                self.wait_for_all_ready();
+                if self.current_page.page_is_used() {
+                    return Some(page);
+                }
+            } else {
+                error!("Failed to read page at {}:{}", block_index, page);
             }
         }
         None
@@ -1185,6 +1253,8 @@ impl OnboardFlash {
                 unsafe { extend_lifetime(&current_page[src_range]) },
                 self.spi.take().unwrap(),
                 // To ensure the data is placed in the correct place on the page, offset by -4
+
+                // FIXME: Is everything in the metadata actually offset by 4 bytes?
                 unsafe { extend_lifetime_mut(&mut prev_page[dst_range]) },
             )
             .start();
@@ -1490,11 +1560,11 @@ impl OnboardFlash {
                 LittleEndian::write_u16(space, crc);
             }
             if !extended_write {
-                //write file start block
+                // write file start block
                 let space = &mut user_metadata_bytes[12..=13];
-                LittleEndian::write_u16(space, self.file_start_block_index.unwrap());
+                LittleEndian::write_u16(space, self.file_start_block_index.unwrap_or(0));
                 if let Some(previous_start) = self.previous_file_start_block_index {
-                    //write previous file start could just write on first page if it matters
+                    // write previous file start could just write on first page if it matters
                     let space = &mut user_metadata_bytes[14..=15];
                     LittleEndian::write_u16(space, previous_start);
                 }
@@ -1529,10 +1599,9 @@ impl OnboardFlash {
         self.spi_write(&bytes[1..]);
         self.spi_write(&[PROGRAM_EXECUTE, address[0], address[1], address[2]]);
         let status = self.wait_for_ready();
-
-        // TODO: Check ECC status, mark and relocate block if needed.
         if status.program_failed() {
             // FIXME: Should we return an error here?
+            // FIXME: Log this
             error!("Programming failed");
         } else if !extended_write {
             if self.first_used_block_index.is_none() {
