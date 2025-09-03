@@ -734,8 +734,7 @@ impl OnboardFlash {
                             }
                         }
                         if page_is_used {
-                            // FIXME: This doesn't happen if we can't read the page
-                            file_start_block_index = Some(block_index);
+                            file_start_block_index = self.current_page.file_start_block_index();
                             if self.first_used_block_index.is_none() {
                                 // This is the starting block of the first file stored.
                                 info!("Storing first used block {}", block_index);
@@ -750,6 +749,15 @@ impl OnboardFlash {
                                 self.file_start_block_index = file_start_block_index;
                                 self.current_block_index = block_index;
                                 self.current_page_index = 0;
+                                info!(
+                                    "Setting file_start_block_index {}",
+                                    self.file_start_block_index
+                                );
+                                info!(
+                                    "Setting last_used_block_index {}",
+                                    self.last_used_block_index
+                                );
+                                info!("Setting current_block_index {}", self.current_block_index);
                                 info!("Setting next starting block index {}", block_index);
                             }
                         }
