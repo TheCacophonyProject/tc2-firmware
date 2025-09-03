@@ -651,7 +651,7 @@ pub fn thermal_motion_task(
                             cptv_start_block_index,
                             fs.last_used_block_index.unwrap()
                         );
-                        let _ = fs.erase_last_file();
+                        let _ = fs.erase_latest_file();
                         #[allow(clippy::cast_possible_truncation)]
                         events.log(
                             Event::WouldDiscardAsFalsePositive(DiscardedRecordingInfo {
