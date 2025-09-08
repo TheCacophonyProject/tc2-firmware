@@ -354,7 +354,7 @@ fn offload_recordings_and_events(
                 fs.file_start_block_index
             );
             watchdog.feed();
-            if fs.erase_latest_file().is_err() {
+            if fs.erase_latest_file().is_ok() {
                 events.log(
                     Event::ErasePartialOrCorruptRecording(DiscardedRecordingInfo {
                         recording_type: current_file_metadata.unwrap_or(FileType::Unknown),
