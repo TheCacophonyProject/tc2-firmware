@@ -1040,7 +1040,9 @@ fn do_periodic_bookkeeping(
             // FIXME: If there is a user getting frames, they'll be disconnected here.
             //  We could fix that by deferring, if we had a way to check if we still want to prioritise
             //  getting frames?
-            if fs.has_recordings_to_offload() {
+            if fs.has_recordings_to_offload()
+                && !(config.use_high_power_mode() && config.is_audio_device())
+            {
                 warn!("Recording window ended with files to offload, request restart");
                 request_restart(sio);
             }
