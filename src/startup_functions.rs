@@ -240,7 +240,6 @@ pub fn maybe_offload_files_and_events_on_startup(
     possible (also via tc2-agent) if there is a user interacting with side-kick, in which
     case we try to prioritise getting frames sent.
      */
-
     let has_files_to_offload = fs.has_recordings_to_offload();
     if has_files_to_offload {
         let blocks_used = fs.first_used_block_index.unwrap()..fs.last_used_block_index.unwrap();
