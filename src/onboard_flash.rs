@@ -203,7 +203,7 @@ impl Page {
     }
 
     fn is_part_of_bad_block(&self) -> bool {
-        self.bad_block_data().contains(&0)
+        self.bad_block_data().iter().any(|x| x != &0xff)
     }
 
     // User metadata 1 contains 32 bytes total
@@ -648,7 +648,6 @@ impl OnboardFlash {
         self.current_block_index = 0;
         let mut last_good_block = None;
         // Find first good free block:
-        let mut good_block = false;
         let mut last_file_block_index = u16::MAX;
         let mut num_files = 0;
 
@@ -659,33 +658,30 @@ impl OnboardFlash {
             // in the case of incomplete cptv files page 0 will be empty
             //println!("Read block:page {block_index}:1");
 
-            // Bad block markers are on the first page of each block:
-
+            // Factory set bad block markers are on the first page of each block:
             let mut part_of_bad_block = false;
             if self.read_page(block_index, 0).is_ok() {
                 self.read_page_metadata(block_index);
                 self.wait_for_all_ready();
                 if self.current_page.is_part_of_bad_block() {
                     part_of_bad_block = true;
-                    if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == u16::MAX) {
-                        // Add the bad block to our runtime table.
-                        *slot = block_index;
-                        if !good_block && block_index < NUM_RECORDING_BLOCKS - 1 {
-                            self.current_block_index = block_index + 1;
-                        }
-                    }
                 }
+            } else {
+                // If we failed to read the first page of the block, it's probably a bad block.
+                part_of_bad_block = true;
             }
-
             if part_of_bad_block {
-                warn!("BAD BLOCK {}", block_index);
+                if let Some(slot) = bad_blocks.iter_mut().find(|x| **x == u16::MAX) {
+                    // Add the bad block to our runtime table.
+                    warn!("BAD BLOCK added {}", block_index);
+                    *slot = block_index;
+                }
             } else {
                 //println!("Scan {block_index}");
                 if self.read_page(block_index, 1).is_ok() {
                     self.read_page_metadata(block_index);
                     self.wait_for_all_ready();
                     if block_index < NUM_RECORDING_BLOCKS {
-                        good_block = true;
                         last_good_block = Some(block_index);
 
                         let page_is_used = self.current_page.page_is_used();
@@ -770,6 +766,9 @@ impl OnboardFlash {
             }
         }
         self.num_files_in_initial_scan = num_files;
+
+        // FIXME: Make sure we set the next starting block index less than the start of the config block
+        //  and events blocks.
 
         // if we have written right to the end of the flash need to handle this
         if self.last_used_block_index.is_none()
@@ -860,7 +859,7 @@ impl OnboardFlash {
                 }
 
                 loop {
-                    // read 1 as if incomplete 0 won't be writen to
+                    // read 1 as if incomplete 0 won't be written to
                     if self.read_page(block_index, page_index).is_ok() {
                         self.read_page_from_cache(block_index);
                         self.wait_for_all_ready();
@@ -952,6 +951,9 @@ impl OnboardFlash {
     }
 
     pub fn erase_block(&mut self, block_index: BlockIndex) -> Result<(), &str> {
+        if self.bad_blocks.contains(&block_index) {
+            return Err("Can't erase bad block");
+        }
         self.write_enable();
         let address = OnboardFlash::get_address(block_index, 0);
         self.spi_write(&[BLOCK_ERASE, address[0], address[1], address[2]]);
@@ -965,7 +967,7 @@ impl OnboardFlash {
 
     pub fn erase_good_blocks(&mut self) {
         let bad_blocks = self.bad_blocks;
-        for block_index in 0..2048 {
+        for block_index in 0..TOTAL_FLASH_BLOCKS {
             if !&bad_blocks.contains(&block_index)
                 && let Err(e) = self.erase_block(block_index)
             {

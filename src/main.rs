@@ -11,6 +11,7 @@ mod cptv_encoder;
 mod device_config;
 mod event_logger;
 mod ext_spi_transfers;
+mod formatted_time;
 mod frame_processing;
 mod lepton;
 mod lepton_task;
@@ -68,6 +69,9 @@ pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the atti
 // TODO Check against minor version also.
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 10; // 10 mins between FFCs
+
+// TODO: Something with this info
+// "In register 0x0F it will return the number of minutes since it first powered on or there was a button pressed on the camera. This is on dev now."
 
 #[entry]
 #[allow(clippy::too_many_lines)]

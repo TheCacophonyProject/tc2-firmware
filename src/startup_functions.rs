@@ -7,12 +7,13 @@ use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig};
 use crate::event_logger::{Event, EventLogger, LoggerEvent, NewConfigInfo, WakeReason};
 use crate::ext_spi_transfers::ExtSpiTransfers;
+use crate::formatted_time::FormattedNZTime;
 use crate::frame_processing::THERMAL_DEV_MODE;
 use crate::onboard_flash::{FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
-    FormattedNZTime, get_existing_device_config_or_config_from_pi_on_initial_handshake,
-    maybe_offload_events, offload_all_recordings_and_events, offload_latest_recording,
+    get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
+    offload_all_recordings_and_events, offload_latest_recording,
 };
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
@@ -292,6 +293,8 @@ pub fn maybe_offload_files_and_events_on_startup(
             fs.is_too_full_to_start_new_cptv_recordings()
         }
     };
+
+    // FIXME - In high power mode we may never offload events unless the event log is nearly full.
 
     if is_too_full_to_record_in_current_mode {
         warn!("Too full to record in current mode");

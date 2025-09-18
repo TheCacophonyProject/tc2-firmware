@@ -5,15 +5,15 @@ use crate::bsp::pac::{DMA, RESETS};
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{DiscardedRecordingInfo, Event, EventLogger, LoggerEvent};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
+use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use crc::{CRC_16_XMODEM, Crc};
-use defmt::{Formatter, error, info, unreachable, warn};
+use defmt::{error, info, unreachable, warn};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -110,38 +110,6 @@ pub fn offload_all_recordings_and_events(
     offload_recordings_and_events(fs, pi_spi, resets, dma, i2c, events, time, watchdog, false)
 }
 
-pub struct FormattedNZTime(pub DateTime<Utc>);
-impl defmt::Format for FormattedNZTime {
-    fn format(&self, fmt: Formatter) {
-        // Very crude daylight savings calc, will be off by an hour sometimes at the
-        // beginning of April and end of September – but that's okay, it's just for debug display.
-        let month = self.0.month();
-        let day = self.0.day();
-        let nzdt = if (4..=10).contains(&month) {
-            (month == 4 && day < 7) || (month == 10 && day > 23)
-        } else {
-            true
-        };
-        let approx_nz_time = if nzdt {
-            self.0 + Duration::hours(13)
-        } else {
-            self.0 + Duration::hours(12)
-        };
-
-        defmt::write!(
-            fmt,
-            "DateTime: {}-{}-{} {}:{}:{} {}",
-            approx_nz_time.year(),
-            approx_nz_time.month(),
-            approx_nz_time.day(),
-            approx_nz_time.hour(),
-            approx_nz_time.minute(),
-            approx_nz_time.second(),
-            if nzdt { "NZDT" } else { "NZST" },
-        );
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 fn offload_recordings_and_events(
     fs: &mut OnboardFlash,
@@ -183,13 +151,15 @@ fn offload_recordings_and_events(
 
     // do some offloading.
     let mut file_count = 0;
-    let mut success: bool = true;
+    let mut success_transferring_parts_to_rpi: bool = true;
     let mut interrupted_by_user = false;
-    while has_file {
+    'offload_files: while has_file {
         if let Ok(false) = i2c.offload_flag_is_set() {
             warn!("Offload interrupted by user");
+
+            // FIXME: Log this?
             // We were interrupted by the rPi,
-            success = false;
+            success_transferring_parts_to_rpi = false;
             interrupted_by_user = true;
             break;
         }
@@ -313,7 +283,7 @@ fn offload_recordings_and_events(
                     }
                     attempts += 1;
                     if attempts > 200 {
-                        success = false;
+                        success_transferring_parts_to_rpi = false;
                         break 'transfer_part;
                     }
                 }
@@ -321,7 +291,7 @@ fn offload_recordings_and_events(
                 // Give spi peripheral back to flash storage.
                 if let Some(spi) = pi_spi.disable() {
                     fs.take_spi(spi, resets);
-                    if is_last_page_for_file && success {
+                    if is_last_page_for_file && success_transferring_parts_to_rpi {
                         if let Some(file_type) = current_file_metadata {
                             events.log(Event::OffloadedRecording(file_type), time, fs);
                         } else {
@@ -329,8 +299,8 @@ fn offload_recordings_and_events(
                         }
                     }
                 }
-                if !success {
-                    break 'outer;
+                if !success_transferring_parts_to_rpi {
+                    break 'offload_files;
                 }
 
                 part_count += 1;
@@ -342,13 +312,14 @@ fn offload_recordings_and_events(
                     watchdog.feed();
                     let _ = fs.erase_latest_file();
                     file_ended = true;
-                    break;
+                    break; // FIXME: break 'outer?
+                    // FIXME: Do we event need this break?
                 }
                 file_start = false;
             }
         }
 
-        if !file_ended && !interrupted_by_user {
+        if !file_ended && !interrupted_by_user && success_transferring_parts_to_rpi {
             info!(
                 "Incomplete file at block {} erasing",
                 fs.file_start_block_index
@@ -381,18 +352,17 @@ fn offload_recordings_and_events(
     if interrupted_by_user {
         events.log(Event::FileOffloadInterruptedByUser, time, fs);
     }
-    if success {
+    if success_transferring_parts_to_rpi {
         info!(
             "Completed file offload, transferred {} files start {} previous is {}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
-
         // Always rescan to update what kinds of files we have
         fs.scan();
         file_count != 0
     } else {
         if !interrupted_by_user {
-            events.log(Event::FileOffloadFailed, time, fs);
+            events.log_if_not_dupe(Event::FileOffloadFailed, time, fs);
         }
         fs.scan();
         warn!("File transfer to pi failed");

@@ -1,7 +1,7 @@
 use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{Event, EventLogger};
+use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::OnboardFlash;
-use crate::sub_tasks::FormattedNZTime;
 use chrono::{DateTime, Duration, Utc};
 use defmt::{Format, Formatter, error};
 use rp2040_hal::Timer;

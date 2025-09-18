@@ -19,9 +19,9 @@ use chrono::{DateTime, Duration, Utc};
 use core::cell::RefCell;
 
 use crate::bsp;
+use crate::formatted_time::FormattedNZTime;
 use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
-use crate::sub_tasks::FormattedNZTime;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use cortex_m::asm::nop;
@@ -1139,7 +1139,7 @@ fn process_frame_telemetry(
     let mut skipped_frames = 0;
     let mut telemetry_is_valid = true;
     if let Some(prev_telemetry) = &prev_telemetry {
-        let frame_diff = frame_telemetry.frame_num - prev_telemetry.frame_num - 1;
+        let frame_diff = (frame_telemetry.frame_num - prev_telemetry.frame_num).saturating_sub(1);
         // over a 100 is probably corrupt telemetry
         if frame_diff > 0 && frame_diff < 100 {
             skipped_frames = frame_diff;
