@@ -19,15 +19,15 @@ use chrono::{DateTime, Duration, Utc};
 use core::cell::RefCell;
 
 use crate::bsp;
+use crate::formatted_time::FormattedNZTime;
 use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
-use crate::sub_tasks::FormattedNZTime;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use cortex_m::asm::nop;
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
-use defmt::{Format, error, info, warn};
+use defmt::{error, info, warn};
 use embedded_hal::delay::DelayNs;
 use fugit::HertzU32;
 use rp2040_hal::clocks::ClocksManager;
@@ -85,7 +85,7 @@ impl FrameBuffer {
 }
 
 #[repr(u32)]
-#[derive(Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Core0Task {
     Ready = 0xdb,
     ReadyToReceiveLeptonConfig = 0xec,
@@ -102,7 +102,8 @@ pub enum Core0Task {
     UnsafeToFfc = 0xca,
     LeptonReadyToSleep = 0xbf,
 }
-#[derive(Format, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum StatusRecordingState {
     NeedsStartup,
     MakingStartup,
@@ -715,6 +716,10 @@ pub fn thermal_motion_task(
                     if bk.status_recording.in_progress() {
                         bk.status_recording.next_state();
                     }
+
+                    if let Err(e) = i2c.attiny_keep_alive() {
+                        error!("Attiny keep alive failed: {}", e);
+                    }
                 }
                 if is_outside_recording_window && !bk.status_recording.in_progress() {
                     info!("Would end recording, but outside window");
@@ -961,11 +966,11 @@ fn do_periodic_bookkeeping(
     // NOTE: Use approximate prime numbers as the modulus to avoid all of these checks falling
     //  on the same frame.
     let frames_seen = bk.frames_seen;
-    let every_minute = frames_seen > 0 && frames_seen % 541 == 0;
+    let every_minute = frames_seen > 0 && frames_seen.is_multiple_of(541);
     let every_twenty_seconds_in_high_power_mode =
-        config.use_high_power_mode() && frames_seen > 0 && frames_seen % 197 == 0;
-    let every_ten_seconds = frames_seen > 0 && frames_seen % 47 == 0;
-    let every_minute_and_a_half = frames_seen > 0 && frames_seen % 810 == 0;
+        config.use_high_power_mode() && frames_seen > 0 && frames_seen.is_multiple_of(197);
+    let every_ten_seconds = frames_seen > 0 && frames_seen.is_multiple_of(47);
+    let every_minute_and_a_half = frames_seen > 0 && frames_seen.is_multiple_of(809);
     if every_minute
         || every_minute_and_a_half
         || every_twenty_seconds_in_high_power_mode
@@ -1050,17 +1055,15 @@ fn do_periodic_bookkeeping(
                 // Tell rPi it is outside its recording window in high-power
                 // mode, and can go to sleep.
 
-                if !config.is_continuous_recorder() {
-                    if camera_state.is_ok_and(|state| !state.pi_is_powered_off())
-                        && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
-                        && bk.logged_told_rpi_to_sleep.take().is_some()
-                    {
-                        events.log(Event::ToldRpiToSleep, time, fs);
-                    }
-                } else if events.is_nearly_full() {
-                    // Restart to clear events
-                    request_restart(sio);
+                if !config.is_continuous_recorder()
+                    && camera_state.is_ok_and(|state| !state.pi_is_powered_off())
+                    && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
+                    && bk.logged_told_rpi_to_sleep.take().is_some()
+                {
+                    events.log(Event::ToldRpiToSleep, time, fs);
                 }
+                // Restart to clear events
+                request_restart(sio);
             }
             if i2c
                 .get_camera_state()
@@ -1139,7 +1142,7 @@ fn process_frame_telemetry(
     let mut skipped_frames = 0;
     let mut telemetry_is_valid = true;
     if let Some(prev_telemetry) = &prev_telemetry {
-        let frame_diff = frame_telemetry.frame_num - prev_telemetry.frame_num - 1;
+        let frame_diff = (frame_telemetry.frame_num - prev_telemetry.frame_num).saturating_sub(1);
         // over a 100 is probably corrupt telemetry
         if frame_diff > 0 && frame_diff < 100 {
             skipped_frames = frame_diff;

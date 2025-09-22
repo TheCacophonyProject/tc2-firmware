@@ -1,7 +1,7 @@
 use crate::FIRMWARE_VERSION;
 use crate::device_config::{AudioMode, DeviceConfig};
-use crate::onboard_flash::{FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
-use crate::sub_tasks::FormattedNZTime;
+use crate::formatted_time::FormattedNZTime;
+use crate::onboard_flash::{BlockIndex, FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Duration, Utc};
@@ -445,17 +445,16 @@ impl EventLogger {
         fs: &mut OnboardFlash,
     ) -> Option<[u8; EVENT_LENGTH]> {
         // 4 partial writes per page, 64 pages per block.
-        let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
-        let page = ((event_index % 256) / 4) as PageIndex;
+        let (block, page) = Self::address_for_event_index(event_index, fs);
         // Originally events started 64 bytes apart in the first page, but that broke ECC
         let page_offset = (event_index % 4) * 64;
-
         if block >= FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
             None
         } else if fs.read_page(block, page).is_ok() {
             let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
             if event[0] == 0xff { None } else { Some(event) }
         } else {
+            // FIXME: Log potential bad block
             None
         }
     }
@@ -465,11 +464,9 @@ impl EventLogger {
         fs: &mut OnboardFlash,
     ) -> Option<[u8; EVENT_LENGTH]> {
         // 4 partial writes per page, 64 pages per block.
-        let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
-        let page = ((event_index % 256) / 4) as PageIndex;
+        let (block, page) = Self::address_for_event_index(event_index, fs);
         // Events need to start at each of the User Main data 0..=3 blocks, otherwise ECC breaks.
         let page_offset = (event_index % 4) * 512;
-
         if block >= FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
             None
         } else if fs.read_page(block, page).is_ok() {
@@ -481,6 +478,7 @@ impl EventLogger {
                 Some(event)
             }
         } else {
+            // FIXME: Log potential bad block
             None
         }
     }
@@ -498,9 +496,7 @@ impl EventLogger {
             let start_block_index = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX;
             let end_block_index = FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX;
             for block_index in start_block_index..end_block_index {
-                if fs.bad_blocks.contains(&block_index) {
-                    info!("Skipping erase of bad block {}", block_index);
-                } else if fs.erase_block(block_index).is_err() {
+                if fs.erase_block(block_index).is_err() {
                     // FIXME: Return err and handle?
                     error!("Block erase failed for block {}", block_index);
                 }
@@ -577,16 +573,28 @@ impl EventLogger {
         self.log_event_if_not_dupe(LoggerEvent::new(kind, time), fs);
     }
 
+    pub fn address_for_event_index(
+        event_index: EventIndex,
+        fs: &OnboardFlash,
+    ) -> (BlockIndex, PageIndex) {
+        let mut block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
+        while fs.bad_blocks.contains(&block) {
+            block += 1;
+        }
+        let page = ((event_index % 256) / 4) as PageIndex;
+        (block, page)
+    }
+
     pub fn log_event(&mut self, event: LoggerEvent, fs: &mut OnboardFlash) {
-        if self.count() < MAX_EVENTS_IN_LOGGER {
+        let count = self.count();
+        if count < MAX_EVENTS_IN_LOGGER {
             if let Some(next_event_index) = &mut self.next_event_index {
                 // Write to the end of the flash storage.
                 // We can do up to 4 partial page writes per page, so in a block of 64 pages we get 256 entries.
                 // We reserve 4 blocks at the end of the flash memory for events, so 1024 events, which should be plenty.
                 let event_data = event.as_bytes();
                 let event_index = *next_event_index;
-                let block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
-                let page = ((event_index % 256) / 4) as u8;
+                let (block, page) = Self::address_for_event_index(event_index, fs);
                 let page_offset = (event_index % 4) * 512;
                 fs.write_event(&event_data, block, page, page_offset);
                 *next_event_index += 1;

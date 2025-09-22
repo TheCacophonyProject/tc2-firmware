@@ -11,6 +11,7 @@ mod cptv_encoder;
 mod device_config;
 mod event_logger;
 mod ext_spi_transfers;
+mod formatted_time;
 mod frame_processing;
 mod lepton;
 mod lepton_task;
@@ -63,11 +64,14 @@ use rp2040_hal::pio::PIOExt;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 35;
+pub const FIRMWARE_VERSION: u32 = 36;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version.
 // TODO Check against minor version also.
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
 const FFC_INTERVAL_MS: u32 = 60 * 1000 * 10; // 10 mins between FFCs
+
+// TODO: Something with this info
+// "In register 0x0F it will return the number of minutes since it first powered on or there was a button pressed on the camera. This is on dev now."
 
 #[entry]
 #[allow(clippy::too_many_lines)]

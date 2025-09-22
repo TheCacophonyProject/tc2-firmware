@@ -468,7 +468,7 @@ impl<'a> CptvStream<'a> {
         self.cptv_header.min_value = self.cptv_header.min_value.min(min_value);
         self.cptv_header.max_value = self.cptv_header.max_value.max(max_value);
         self.cptv_header.total_frame_count += 1;
-        if self.cptv_header.total_frame_count % 10 == 0 {
+        if self.cptv_header.total_frame_count.is_multiple_of(10) {
             info!(
                 "Write frame #{}, (#{} in telemetry)",
                 self.cptv_header.total_frame_count, frame_telemetry.frame_num

@@ -1,7 +1,7 @@
 use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
 use crate::bsp::pac::I2C1;
 use crate::device_config::get_datetime_utc;
-use crate::sub_tasks::FormattedNZTime;
+use crate::formatted_time::FormattedNZTime;
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};

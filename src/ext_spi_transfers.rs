@@ -1,7 +1,7 @@
 use crate::bsp;
 use crate::bsp::pac;
 use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1, interrupt};
-use crate::onboard_flash::FLASH_USER_PAGE_SIZE;
+use crate::onboard_flash::{BlockIndex, FLASH_USER_PAGE_SIZE};
 use crate::utils::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
@@ -413,7 +413,7 @@ impl ExtSpiTransfers {
         payload: &[u8],
         crc: u16,
         dma_peripheral: &mut DMA,
-        progress_block: Option<u16>,
+        progress_block: Option<BlockIndex>,
     ) -> bool {
         // The transfer header contains the transfer type (2x)
         // the number of bytes to read for the payload (should this be twice?)
