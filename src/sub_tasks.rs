@@ -153,7 +153,7 @@ fn offload_recordings_and_events(
     let mut file_count = 0;
     let mut success_transferring_parts_to_rpi: bool = true;
     let mut interrupted_by_user = false;
-    'offload_files: while has_file {
+    'offload_all_files: while has_file {
         if let Ok(false) = i2c.offload_flag_is_set() {
             warn!("Offload interrupted by user");
 
@@ -178,7 +178,7 @@ fn offload_recordings_and_events(
         // we can't be transferring more to the back buffer from the flash.  So what's the point
         // of having a complex double buffering system?
         if !interrupted_by_user {
-            'outer: while let Some(file_part) = fs.get_file_part(events, time) {
+            'offload_file: while let Some(file_part) = fs.get_file_part(events, time) {
                 let FilePartReturn {
                     part,
                     crc16,
@@ -266,7 +266,7 @@ fn offload_recordings_and_events(
                 }
 
                 let mut attempts = 0;
-                'transfer_part: loop {
+                'transfer_file_part: loop {
                     watchdog.feed();
                     let did_transfer = pi_spi.send_message_over_spi(
                         transfer_type,
@@ -279,12 +279,12 @@ fn offload_recordings_and_events(
                         if attempts > 0 {
                             warn!("File part took multiple attempts: {}", attempts);
                         }
-                        break 'transfer_part;
+                        break 'transfer_file_part;
                     }
                     attempts += 1;
                     if attempts > 200 {
                         success_transferring_parts_to_rpi = false;
-                        break 'transfer_part;
+                        break 'transfer_file_part;
                     }
                 }
 
@@ -299,8 +299,9 @@ fn offload_recordings_and_events(
                         }
                     }
                 }
+
                 if !success_transferring_parts_to_rpi {
-                    break 'offload_files;
+                    break 'offload_all_files;
                 }
 
                 part_count += 1;
@@ -312,8 +313,7 @@ fn offload_recordings_and_events(
                     watchdog.feed();
                     let _ = fs.erase_latest_file();
                     file_ended = true;
-                    break; // FIXME: break 'outer?
-                    // FIXME: Do we event need this break?
+                    break 'offload_file;
                 }
                 file_start = false;
             }

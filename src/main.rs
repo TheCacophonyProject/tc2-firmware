@@ -64,7 +64,7 @@ use rp2040_hal::pio::PIOExt;
 // NOTE: The version number here isn't important.  What's important is that we increment it
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
-pub const FIRMWARE_VERSION: u32 = 35;
+pub const FIRMWARE_VERSION: u32 = 36;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version.
 // TODO Check against minor version also.
 const ROSC_TARGET_CLOCK_FREQ_HZ: u32 = 125_000_000;
@@ -236,7 +236,7 @@ fn main() -> ! {
         dc_result.unwrap();
     if config.use_high_power_mode()
         && (config.time_is_in_configured_recording_window(&time.date_time())
-            || config.is_continuous_recorder())
+        || config.is_continuous_recorder())
     {
         if i2c
             .get_camera_state()
@@ -437,8 +437,8 @@ fn main() -> ! {
             .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
         let should_shutdown = recording_mode == RecordingMode::None
             && i2c
-                .get_camera_state()
-                .is_ok_and(CameraState::pi_is_powered_off)
+            .get_camera_state()
+            .is_ok_and(CameraState::pi_is_powered_off)
             && !inside_thermal_window
             && time.date_time() + Duration::minutes(2) < scheduled_alarm.date_time();
         if should_shutdown {

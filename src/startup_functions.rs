@@ -450,6 +450,9 @@ pub fn maybe_offload_files_and_events_on_startup(
             // for info about recording offload success.
             maybe_offload_events(pi_spi, resets, dma, events, fs, time, watchdog);
         }
+    } else if config.use_high_power_mode() && !config.is_audio_device() && rpi_is_awake {
+        // Make sure we always get events in high power mode with no audio recording.
+        maybe_offload_events(pi_spi, resets, dma, events, fs, time, watchdog);
     }
 }
 
