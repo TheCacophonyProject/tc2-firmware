@@ -236,7 +236,7 @@ fn main() -> ! {
         dc_result.unwrap();
     if config.use_high_power_mode()
         && (config.time_is_in_configured_recording_window(&time.date_time())
-        || config.is_continuous_recorder())
+            || config.is_continuous_recorder())
     {
         if i2c
             .get_camera_state()
@@ -437,8 +437,8 @@ fn main() -> ! {
             .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
         let should_shutdown = recording_mode == RecordingMode::None
             && i2c
-            .get_camera_state()
-            .is_ok_and(CameraState::pi_is_powered_off)
+                .get_camera_state()
+                .is_ok_and(CameraState::pi_is_powered_off)
             && !inside_thermal_window
             && time.date_time() + Duration::minutes(2) < scheduled_alarm.date_time();
         if should_shutdown {
