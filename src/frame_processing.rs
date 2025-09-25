@@ -24,10 +24,14 @@ use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::{extend_lifetime_generic, extend_lifetime_generic_mut};
-use cortex_m::asm::nop;
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
-use defmt::{error, info, warn};
+
+#[cfg(feature = "no-std")]
+use defmt::{assert_eq, error, info, warn};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
+
 use embedded_hal::delay::DelayNs;
 use fugit::HertzU32;
 use rp2040_hal::clocks::ClocksManager;
@@ -85,7 +89,7 @@ impl FrameBuffer {
 }
 
 #[repr(u32)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub enum Core0Task {
     Ready = 0xdb,
     ReadyToReceiveLeptonConfig = 0xec,
@@ -103,7 +107,8 @@ pub enum Core0Task {
     LeptonReadyToSleep = 0xbf,
 }
 #[derive(PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 enum StatusRecordingState {
     NeedsStartup,
     MakingStartup,
@@ -111,6 +116,13 @@ enum StatusRecordingState {
     NeedsShutdown,
     MakingShutdown,
     AllDone,
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for StatusRecordingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl StatusRecordingState {
@@ -214,7 +226,7 @@ pub fn record_thermal(
     time: SyncedDateTime,
     current_recording_window: RecordingWindow,
     recording_mode: RecordingMode,
-) -> ! {
+) {
     let mut peripherals = unsafe { Peripherals::steal() };
     let mut sio = Sio::new(peripherals.SIO);
     let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
@@ -223,7 +235,7 @@ pub fn record_thermal(
     let core_1 = &mut cores[1];
     // NOTE: We're allocating the stack memory for core1 on our core0 stack rather than using
     //  a `static` var so that the memory isn't used when we're in the audio mode code-path.
-    let core1_stack: Stack<470> = Stack::new();
+    let core1_stack: Stack<500> = Stack::new();
     let mut fb0 = FrameBuffer::new();
     let mut fb1 = FrameBuffer::new();
 
@@ -266,7 +278,7 @@ pub fn record_thermal(
         time,
         current_recording_window,
         recording_mode,
-    );
+    )
 }
 type LeptonVersion = ((u8, u8, u8), (u8, u8, u8));
 fn maybe_do_startup_handshake(
@@ -320,7 +332,7 @@ pub fn thermal_motion_task(
     mut time: SyncedDateTime,
     current_recording_window: RecordingWindow,
     recording_mode: RecordingMode,
-) -> ! {
+) {
     info!("=== Core 0 Thermal Motion start ===");
     if THERMAL_DEV_MODE {
         warn!("DEV MODE");
@@ -451,7 +463,7 @@ pub fn thermal_motion_task(
     #[allow(unused_labels)]
     'recording_loop: loop {
         let input = sio.fifo.read_blocking();
-        crate::assert_eq!(
+        assert_eq!(
             input,
             Core0Task::ReceiveFrame.into(),
             "Got unknown fifo input to core1 task loop {}",
@@ -633,7 +645,7 @@ pub fn thermal_motion_task(
                     info!("Making status recording {}", bk.status_recording);
                 } else if test_recording_in_progress.is_some() {
                     info!(
-                        "Making user-requested test recording {}",
+                        "Making user-requested test recording {:?}",
                         test_recording_in_progress
                     );
                 }
@@ -708,7 +720,8 @@ pub fn thermal_motion_task(
                             error!("Failed to clear mode flags {}", e);
                         }
                         timer.delay_ms(100);
-                        request_restart(&mut sio);
+                        shutdown_lepton_thread(&mut sio);
+                        return;
                     } else if let Err(e) = i2c.stopped_recording() {
                         error!("Error clearing recording flag on attiny: {}", e);
                     }
@@ -871,13 +884,14 @@ pub fn thermal_motion_task(
                 events.log(Event::FlashStorageNearlyFull, &time, &mut fs);
             }
             // Request restart to offload.
-            request_restart(&mut sio);
+            shutdown_lepton_thread(&mut sio);
+            return;
         }
 
         let expected_i2c_io_time_us = 2400u32;
         let start = timer.get_counter();
         if is_not_recording_in_low_power_mode
-            && do_periodic_bookkeeping(
+            && let book_keeping = do_periodic_bookkeeping(
                 &mut bk,
                 &mut i2c,
                 &mut fs,
@@ -887,7 +901,11 @@ pub fn thermal_motion_task(
                 config,
                 &test_recording_in_progress,
             )
+            && book_keeping.did_execute
         {
+            if book_keeping.needs_restart {
+                return;
+            }
             #[allow(clippy::cast_possible_truncation)]
             let elapsed = (timer.get_counter() - start).to_micros() as u32;
             let additional_wait = expected_i2c_io_time_us.saturating_sub(elapsed);
@@ -949,6 +967,11 @@ fn take_front_buffer(
     });
 }
 
+struct BookkeepingResponse {
+    did_execute: bool,
+    needs_restart: bool,
+}
+
 #[allow(clippy::ref_option)]
 #[allow(clippy::too_many_lines)]
 fn do_periodic_bookkeeping(
@@ -960,7 +983,7 @@ fn do_periodic_bookkeeping(
     sio: &mut Sio,
     config: &DeviceConfig,
     user_requested_recording: &Option<RecordingTypeDetail>,
-) -> bool {
+) -> BookkeepingResponse {
     // Do periodic checks that require I2C I/O, or are otherwise computationally expensive
     // and can have variable effects on frame time.
     // NOTE: Use approximate prime numbers as the modulus to avoid all of these checks falling
@@ -999,7 +1022,11 @@ fn do_periodic_bookkeeping(
             } else if scheduled_alarm.is_thermal_alarm() {
                 let _ = i2c.enter_thermal_mode();
             }
-            request_restart(sio);
+            shutdown_lepton_thread(sio);
+            return BookkeepingResponse {
+                did_execute: true,
+                needs_restart: true,
+            };
         }
     } else if every_twenty_seconds_in_high_power_mode {
         // if in high power mode need to check thermal-recorder isn't recording
@@ -1049,7 +1076,11 @@ fn do_periodic_bookkeeping(
                 && !(config.use_high_power_mode() && config.is_audio_device())
             {
                 warn!("Recording window ended with files to offload, request restart");
-                request_restart(sio);
+                shutdown_lepton_thread(sio);
+                return BookkeepingResponse {
+                    did_execute: true,
+                    needs_restart: true,
+                };
             }
             if config.use_high_power_mode() {
                 // Tell rPi it is outside its recording window in high-power
@@ -1063,14 +1094,22 @@ fn do_periodic_bookkeeping(
                     events.log(Event::ToldRpiToSleep, time, fs);
                 }
                 // Restart to clear events
-                request_restart(sio);
+                shutdown_lepton_thread(sio);
+                return BookkeepingResponse {
+                    did_execute: true,
+                    needs_restart: true,
+                };
             }
             if i2c
                 .get_camera_state()
                 .is_ok_and(CameraState::pi_is_powered_off)
             {
                 // Restart so that we'll ask for us to be put to sleep after any file offloading.
-                request_restart(sio);
+                shutdown_lepton_thread(sio);
+                return BookkeepingResponse {
+                    did_execute: true,
+                    needs_restart: true,
+                };
             } else {
                 warn!("Pi is still awake, so rp2040 must stay awake");
             }
@@ -1079,7 +1118,11 @@ fn do_periodic_bookkeeping(
                 info!("In high power window and pi is powered off, so restart");
                 time.get_timer().delay_ms(1000);
                 // Restart so that we'll power the rPi back on
-                request_restart(sio);
+                shutdown_lepton_thread(sio);
+                return BookkeepingResponse {
+                    did_execute: true,
+                    needs_restart: true,
+                };
             }
         } else if is_outside_recording_window
             && bk.status_recording == StatusRecordingState::NeedsShutdown
@@ -1089,7 +1132,11 @@ fn do_periodic_bookkeeping(
         } else if is_outside_recording_window {
             if camera_state.is_ok_and(CameraState::pi_is_powered_off) {
                 // Restart so that we'll ask for us to be put to sleep.
-                request_restart(sio);
+                shutdown_lepton_thread(sio);
+                return BookkeepingResponse {
+                    did_execute: true,
+                    needs_restart: true,
+                };
             } else {
                 warn!("Pi is still awake, so rp2040 must stay awake");
             }
@@ -1098,10 +1145,14 @@ fn do_periodic_bookkeeping(
         error!("Failed to send keep alive: {}", e);
     }
 
-    every_ten_seconds
+    let did_execute = every_ten_seconds
         || every_twenty_seconds_in_high_power_mode
         || every_minute
-        || every_minute_and_a_half
+        || every_minute_and_a_half;
+    BookkeepingResponse {
+        did_execute,
+        needs_restart: false,
+    }
 }
 
 #[allow(clippy::ref_option)]
@@ -1116,15 +1167,18 @@ fn advance_time_by_n_frames(frames_elapsed: u32, time: &mut SyncedDateTime) {
     }
 }
 
-fn request_restart(sio: &mut Sio) {
+fn shutdown_lepton_thread(sio: &mut Sio) {
     info!("Tell core1 to get ready to sleep");
     // Power down frame acquisition
     // Tell core1 we're exiting the recording loop, and it should
     // power down the lepton module, then restart us.
     sio.fifo.write(Core0Task::ReadyToSleep.into());
+
     loop {
-        // Wait to be reset
-        nop();
+        let response = sio.fifo.read_blocking();
+        if response == Core0Task::LeptonReadyToSleep.into() {
+            break;
+        }
     }
 }
 

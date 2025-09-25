@@ -11,12 +11,17 @@ use crate::onboard_flash::{
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
-use defmt::{Format, info};
+
+#[cfg(feature = "no-std")]
+use defmt::info;
+#[cfg(feature = "std")]
+use log::info;
 
 const NUM_STATUS_RECORDING_FRAMES: u32 = 18;
 
 #[repr(u8)]
-#[derive(PartialEq, Debug, Copy, Clone, Format)]
+#[derive(PartialEq, Debug, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub enum FieldType {
     // K remaining
     Header = b'H',

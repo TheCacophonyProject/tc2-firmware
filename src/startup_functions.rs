@@ -5,9 +5,9 @@ use crate::attiny_rtc_i2c::{
 use crate::audio_task::AUDIO_DEV_MODE;
 use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig};
+use crate::event_logger::Event::{AudioRecordingFailed, EndedRecording};
 use crate::event_logger::{Event, EventLogger, LoggerEvent, NewConfigInfo, WakeReason};
 use crate::ext_spi_transfers::ExtSpiTransfers;
-use crate::formatted_time::FormattedNZTime;
 use crate::frame_processing::THERMAL_DEV_MODE;
 use crate::onboard_flash::{FileType, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
@@ -19,7 +19,13 @@ use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Timelike, Utc};
 use cortex_m::prelude::*;
+
+#[cfg(feature = "no-std")]
 use defmt::{error, info, warn};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
+
+use crate::formatted_time::FormattedNZTime;
 use picorand::{PicoRandGenerate, RNG, WyRand};
 use rp2040_hal::pac::DMA;
 use rp2040_hal::{Timer, Watchdog};
@@ -167,19 +173,20 @@ pub fn validate_scheduled_alarm(
     events: &mut EventLogger,
     scheduled_alarm: &Option<ScheduledAlarmTime>,
     watchdog: &mut Watchdog,
-) {
+) -> bool {
     if scheduled_alarm.is_none() {
         warn!("Scheduled alarm is None, rescheduling");
         // We should always have a next alarm: schedule new alarm and restart
         match schedule_next_recording(time, i2c, fs, events, config) {
             Ok(next_alarm) => {
-                info!("Setting a pending recording alarm: {:?}", next_alarm);
+                info!("Setting a pending recording alarm: {}", next_alarm);
             }
             Err(e) => {
                 error!("Couldn't schedule alarm: {}", e);
             }
         }
-        restart(watchdog);
+        //restart(watchdog);
+        return true;
     }
 
     let scheduled_alarm = scheduled_alarm.as_ref().unwrap();
@@ -187,11 +194,11 @@ pub fn validate_scheduled_alarm(
         info!("Scheduled alarm triggered, scheduling next alarm");
         match schedule_next_recording(time, i2c, fs, events, config) {
             Ok(next_alarm) => {
-                info!("Setting a pending recording alarm: {:?}", next_alarm);
+                info!("Setting a pending recording alarm: {}", next_alarm);
             }
             Err(e) => {
                 error!("Couldn't schedule alarm: {}", e);
-                restart(watchdog);
+                return true; //restart(watchdog);
             }
         }
     }
@@ -211,6 +218,7 @@ pub fn validate_scheduled_alarm(
             );
         }
     }
+    false
 }
 
 #[allow(clippy::too_many_lines)]
@@ -560,7 +568,7 @@ pub fn schedule_next_recording(
             && wakeup >= start
         {
             if start < current_time {
-                info!("Audio mode {}", audio_mode);
+                info!("Audio mode {:?}", audio_mode);
                 if audio_mode == AudioMode::AudioAndThermal {
                     // audio recording inside recording window
                     info!("Scheduling audio inside thermal window");
@@ -608,6 +616,8 @@ pub fn work_out_recording_mode(
     scheduled_alarm: &ScheduledAlarmTime,
     prioritise_frame_preview: bool,
     i2c: &mut MainI2C,
+    events: &mut EventLogger,
+    fs: &mut OnboardFlash,
     config: &DeviceConfig,
 ) -> RecordingMode {
     let pi_is_awake = i2c
@@ -663,13 +673,28 @@ pub fn work_out_recording_mode(
         if prioritise_frame_preview {
             warn!("Prioritising frame preview mode");
             RecordingMode::None
-        } else if config.is_audio_device() && tc2_agent_state.test_audio_recording_requested() {
-            let recording_request_type = if tc2_agent_state.short_test_audio_recording_requested() {
-                RecordingRequestType::test_recording(10)
+        } else if config.is_audio_device() {
+            if tc2_agent_state.test_audio_recording_requested() {
+                let recording_request_type =
+                    if tc2_agent_state.short_test_audio_recording_requested() {
+                        RecordingRequestType::test_recording(10)
+                    } else {
+                        RecordingRequestType::test_recording(60 * 5)
+                    };
+                RecordingMode::Audio(recording_request_type)
+            } else if events.latest_audio_recording_failed(fs) {
+                let recording_request_type =
+                    if tc2_agent_state.short_test_audio_recording_requested() {
+                        RecordingRequestType::test_recording(10)
+                    } else if tc2_agent_state.long_test_audio_recording_requested() {
+                        RecordingRequestType::test_recording(60 * 5)
+                    } else {
+                        RecordingRequestType::scheduled_recording()
+                    };
+                RecordingMode::Audio(recording_request_type)
             } else {
-                RecordingRequestType::test_recording(60 * 5)
-            };
-            RecordingMode::Audio(recording_request_type)
+                RecordingMode::None
+            }
         } else if records_thermal && tc2_agent_state.test_thermal_recording_requested() {
             let recording_request_type = if tc2_agent_state.short_test_thermal_recording_requested()
             {

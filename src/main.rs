@@ -1,6 +1,9 @@
-#![no_std]
+#![cfg_attr(feature = "no-std", no_std)]
 #![no_main]
 #![warn(clippy::all, clippy::pedantic)]
+
+#[cfg(feature = "std")]
+extern crate std;
 
 mod attiny_rtc_i2c;
 mod audio_task;
@@ -25,17 +28,21 @@ mod startup_functions;
 mod sub_tasks;
 mod sun_times;
 mod synced_date_time;
+mod tests;
 mod utils;
 
-use crate::attiny_rtc_i2c::{CameraState, MainI2C, RecordingMode};
+use crate::attiny_rtc_i2c::{CameraState, MainI2C, RecordingMode, RecordingRequestType};
 use crate::audio_task::record_audio;
+use crate::event_logger::Event::{AudioRecordingFailed, EndedRecording};
 use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{
     ExtSpiTransfers, RPI_PAYLOAD_LENGTH, RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH,
 };
+use crate::formatted_time::FormattedNZTime;
 use crate::frame_processing::{THERMAL_DEV_MODE, record_thermal};
 use crate::lepton::LeptonPins;
 pub use crate::lepton_task::frame_acquisition_loop;
+use crate::onboard_flash::RecordingFileType::Audio;
 use crate::onboard_flash::{FLASH_SPI_TOTAL_PAYLOAD_SIZE, OnboardFlash};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::startup_functions::{
@@ -52,10 +59,15 @@ use bsp::{
 };
 use chrono::{Duration, Timelike, Utc};
 use cortex_m::asm::nop;
+#[cfg(feature = "no-std")]
 use defmt::{assert, assert_eq, error, info, warn};
+#[cfg(feature = "no-std")]
 use defmt_rtt as _;
 use embedded_hal::delay::DelayNs;
 use fugit::{ExtU32, RateExtU32};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
+#[cfg(feature = "no-std")]
 use panic_probe as _;
 use rp2040_hal::I2C;
 use rp2040_hal::dma::DMAExt;
@@ -73,12 +85,10 @@ const FFC_INTERVAL_MS: u32 = 60 * 1000 * 10; // 10 mins between FFCs
 // TODO: Something with this info
 // "In register 0x0F it will return the number of minutes since it first powered on or there was a button pressed on the camera. This is on dev now."
 
-#[entry]
-#[allow(clippy::too_many_lines)]
-fn main() -> ! {
+pub fn entry_point() {
     info!("");
     info!("-----------------------");
-    info!("Startup tc2-firmware {}", FIRMWARE_VERSION);
+    info!("Startup tc2-firmware {} dev", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
     // Spit out the DMA channels, PIOs, and then steal peripherals again
@@ -128,7 +138,8 @@ fn main() -> ! {
         // FIXME: Basically we'll be in a restart loop if the attiny version is not
         //  what we expect.  Is this unrecoverable?
         error!("{}", e);
-        restart(&mut watchdog);
+        //restart(&mut watchdog);
+        return;
     }
     let mut i2c = i2c_result.unwrap();
 
@@ -209,6 +220,7 @@ fn main() -> ! {
     watchdog.start(8_388_607.micros());
 
     let mut events = EventLogger::new(&mut fs);
+
     let time = get_synced_time(&mut i2c, &mut events, &mut fs, &mut watchdog, timer).unwrap();
     info!("Startup time {}", time);
 
@@ -229,8 +241,9 @@ fn main() -> ! {
         &time,
     );
     if let Err(e) = dc_result {
-        error!("{}", e);
-        restart(&mut watchdog);
+        error!("{:?}", e);
+        //restart(&mut watchdog);
+        return;
     }
     let (config, prioritise_frame_preview, config_was_updated, force_offload_now) =
         dc_result.unwrap();
@@ -300,16 +313,18 @@ fn main() -> ! {
             if let Err(e) = i2c.clear_and_disable_alarm(&time) {
                 error!("{}", e);
                 timer.delay_ms(100);
-                restart(&mut watchdog);
+                //restart(&mut watchdog);
+                return;
             }
         }
         if alarm_out_of_bounds {
             timer.delay_ms(100);
-            restart(&mut watchdog);
+            //restart(&mut watchdog);
+            return;
         }
     }
 
-    validate_scheduled_alarm(
+    if validate_scheduled_alarm(
         &config,
         &mut fs,
         &time,
@@ -317,7 +332,9 @@ fn main() -> ! {
         &mut events,
         &scheduled_alarm,
         &mut watchdog,
-    );
+    ) {
+        return;
+    }
 
     // We ALWAYS have a valid scheduled next alarm at this point.
     let scheduled_alarm = scheduled_alarm.unwrap();
@@ -356,8 +373,11 @@ fn main() -> ! {
         &scheduled_alarm,
         prioritise_frame_preview,
         &mut i2c,
+        &mut events,
+        &mut fs,
         &config,
     );
+
     warn!("Recording mode: {:?}", recording_mode);
     maybe_offload_files_and_events_on_startup(
         recording_mode,
@@ -381,7 +401,7 @@ fn main() -> ! {
     {
         warn!("Alarm triggered during offload, restarting");
         // If we triggered an alarm during offload, restart
-        restart(&mut watchdog);
+        return;
     }
 
     let current_recording_window = config.next_or_current_recording_window(&time.date_time());
@@ -448,9 +468,7 @@ fn main() -> ! {
             if let Err(e) = i2c.tell_attiny_to_power_down_rp2040() {
                 error!("Failed to tell attiny to power down: {}", e);
             } else {
-                loop {
-                    nop();
-                }
+                return;
             }
         } else if recording_mode == RecordingMode::None && !inside_thermal_window {
             info!("Entering thermal mode because pi is on");
@@ -491,4 +509,15 @@ fn main() -> ! {
             recording_mode,
         );
     }
+}
+
+#[entry]
+#[allow(clippy::too_many_lines)]
+fn main() -> ! {
+    entry_point();
+
+    let peripherals = unsafe { Peripherals::steal() };
+    let mut watchdog = Watchdog::new(peripherals.WATCHDOG);
+    watchdog.enable_tick_generation(130);
+    restart(&mut watchdog);
 }

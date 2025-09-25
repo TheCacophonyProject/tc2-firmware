@@ -11,10 +11,14 @@ use crate::utils::restart;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
+
+#[cfg(feature = "no-std")]
 use defmt::{error, info, warn};
 use fugit::HertzU32;
 use gpio::FunctionNull;
 use gpio::bank0::{Gpio0, Gpio1};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
 use rp2040_hal::dma::DMAExt;
 use rp2040_hal::gpio;
 use rp2040_hal::gpio::PullDown;
@@ -65,7 +69,7 @@ pub fn record_audio(
     mut time: SyncedDateTime,
     pio1: PIO<PIO1>,
     sm1: UninitStateMachine<(PIO1, SM1)>,
-) -> ! {
+) {
     info!("=== Core 0 Audio Recording start ===");
     if AUDIO_DEV_MODE {
         warn!("DEV MODE");
@@ -128,6 +132,4 @@ pub fn record_audio(
         // We're in the thermal window, so restart won't sleep us.
         let _ = i2c.enter_thermal_mode();
     }
-
-    restart(&mut watchdog)
 }

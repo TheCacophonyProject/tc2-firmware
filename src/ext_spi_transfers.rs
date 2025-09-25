@@ -7,8 +7,12 @@ use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
 use critical_section::Mutex;
-use defmt::{Format, info, warn};
+
+#[cfg(feature = "no-std")]
+use defmt::{info, warn};
 use fugit::MicrosDurationU32;
+#[cfg(feature = "std")]
+use log::{info, warn};
 use rp2040_hal::dma::single_buffer::Transfer;
 use rp2040_hal::dma::{CH0, Channel, single_buffer};
 use rp2040_hal::gpio::Interrupt::LevelLow;
@@ -23,7 +27,9 @@ use rp2040_hal::timer::{Alarm, Alarm0};
 use rp2040_hal::{Spi, Timer};
 
 #[repr(u8)]
-#[derive(Copy, Clone, Format, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ExtTransferMessage {
     CameraConnectInfo = 0x1,
     CameraRawFrameTransfer = 0x2,

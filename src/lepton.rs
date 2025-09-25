@@ -10,11 +10,13 @@ use crate::utils::any_as_u8_slice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
 use cortex_m::prelude::*;
-use defmt::{Format, trace};
-use defmt::{error, info, warn};
+#[cfg(feature = "no-std")]
+use defmt::{error, info, trace, warn};
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
+#[cfg(feature = "std")]
+use log::{error, info, trace, warn};
 use rp2040_hal::Timer;
 use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
 use rp2040_hal::gpio::{
@@ -110,7 +112,8 @@ const LEPTON_OEM_VIDEO_OUTPUT_ENABLE: LeptonCommand = (0x0024, 2);
 // const LEPTON_DATA_14_REGISTER: LeptonRegister = lepton_register_val(0x0024);
 // const LEPTON_DATA_15_REGISTER: LeptonRegister = lepton_register_val(0x0026);
 
-#[derive(PartialEq, Debug, Format)]
+#[derive(PartialEq, Debug)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub enum LeptonError {
     Ok = 0,                      // Camera ok
     Error = -1,                  // Camera general error
@@ -152,6 +155,13 @@ pub enum LeptonError {
 
     OperationCanceled = -126,  // Camera operation canceled
     UndefinedErrorCode = -127, // Undefined error
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for LeptonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl LeptonError {
@@ -253,7 +263,8 @@ enum FFCTempLockoutState {
 }
 
 #[repr(C)]
-#[derive(PartialEq, Format, Debug)]
+#[derive(PartialEq, Debug)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub enum FFCStatus {
     NeverCommanded = 0,
     Imminent = 1,
@@ -441,7 +452,7 @@ impl LeptonModule {
             1,
         );
         if success.is_err() {
-            warn!("{}", success);
+            warn!("{:?}", success);
         }
 
         let success = self.set_attribute_i32(
@@ -454,7 +465,7 @@ impl LeptonModule {
             1,
         );
         if success.is_err() {
-            warn!("{}", success);
+            warn!("{:?}", success);
         }
 
         let success = self.set_attribute_i32(
@@ -467,7 +478,7 @@ impl LeptonModule {
             1,
         );
         if success.is_err() {
-            warn!("{}", success);
+            warn!("{:?}", success);
         }
 
         let success = self.set_attribute_i32(
@@ -480,7 +491,7 @@ impl LeptonModule {
             1,
         );
         if success.is_err() {
-            warn!("{}", success);
+            warn!("{:?}", success);
         }
         success
     }
@@ -1196,7 +1207,9 @@ pub struct SceneStats {
     pub num_pixels: u16,
 }
 
-#[derive(PartialEq, Format)]
+#[derive(PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum TelemetryLocation {
     Header,
     Footer,

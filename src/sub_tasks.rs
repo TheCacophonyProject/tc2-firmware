@@ -13,7 +13,10 @@ use crate::utils::restart;
 use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
+#[cfg(feature = "no-std")]
 use defmt::{error, info, unreachable, warn};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -321,7 +324,7 @@ fn offload_recordings_and_events(
 
         if !file_ended && !interrupted_by_user && success_transferring_parts_to_rpi {
             info!(
-                "Incomplete file at block {} erasing",
+                "Incomplete file at block {:?} erasing",
                 fs.file_start_block_index
             );
             watchdog.feed();
@@ -354,7 +357,7 @@ fn offload_recordings_and_events(
     }
     if success_transferring_parts_to_rpi {
         info!(
-            "Completed file offload, transferred {} files start {} previous is {}",
+            "Completed file offload, transferred {:?} files start {:?} previous is {:?}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
         // Always rescan to update what kinds of files we have

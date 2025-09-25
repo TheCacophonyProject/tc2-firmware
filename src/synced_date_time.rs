@@ -3,7 +3,12 @@ use crate::event_logger::{Event, EventLogger};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::OnboardFlash;
 use chrono::{DateTime, Duration, Utc};
-use defmt::{Format, Formatter, error};
+
+#[cfg(feature = "no-std")]
+use defmt::error;
+#[cfg(feature = "std")]
+use log::error;
+
 use rp2040_hal::Timer;
 use rp2040_hal::timer::Instant;
 
@@ -15,9 +20,17 @@ pub struct SyncedDateTime {
     timer: Timer,
 }
 
-impl Format for SyncedDateTime {
-    fn format(&self, fmt: Formatter) {
+#[cfg(feature = "no-std")]
+impl defmt::Format for SyncedDateTime {
+    fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "{}", FormattedNZTime(self.date_time_utc));
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for SyncedDateTime {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(fmt, "{}", FormattedNZTime(self.date_time_utc))
     }
 }
 

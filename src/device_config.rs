@@ -3,15 +3,23 @@ use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-use defmt::{Format, Formatter};
+
 use embedded_io::Read;
 
 #[derive(PartialEq)]
 pub struct SmallString([u8; 64]);
 
-impl Format for SmallString {
-    fn format(&self, fmt: Formatter) {
+#[cfg(feature = "no-std")]
+impl defmt::Format for SmallString {
+    fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "{}", self.as_str());
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Debug for SmallString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -43,7 +51,9 @@ impl SmallString {
     }
 }
 
-#[derive(Format, PartialEq, Copy, Clone)]
+#[derive(PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 #[repr(u8)]
 pub enum AudioMode {
     Disabled = 0,
@@ -65,7 +75,9 @@ impl TryFrom<u8> for AudioMode {
         }
     }
 }
-#[derive(Format, PartialEq)]
+#[derive(PartialEq)]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct DeviceConfigInner {
     pub device_id: u32,
     device_name: SmallString,
@@ -295,14 +307,23 @@ impl DeviceConfigInner {
     }
 }
 
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct DeviceConfig {
     config_inner: DeviceConfigInner,
     pub motion_detection_mask: DetectionMask,
     pub cursor_position: usize,
 }
 
-impl Format for DeviceConfig {
-    fn format(&self, _fmt: Formatter) {}
+#[cfg(feature = "no-std")]
+impl defmt::Format for DeviceConfig {
+    fn format(&self, _fmt: defmt::Formatter) {}
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for DeviceConfig {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(fmt, "{:?}", self)
+    }
 }
 
 impl PartialEq for DeviceConfig {

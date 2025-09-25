@@ -19,7 +19,11 @@ use crate::utils::{extend_lifetime, extend_lifetime_mut};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::DateTime;
 use crc::{CRC_16_XMODEM, Crc};
-use defmt::{Format, error, info, warn};
+
+#[cfg(feature = "no-std")]
+use defmt::{assert_eq, error, info, warn};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
 
 use crate::attiny_rtc_i2c::RecordingRequestType;
 use crate::event_logger::{Event, EventLogger};
@@ -36,21 +40,21 @@ use rp2040_hal::pac::RESETS;
 use rp2040_hal::spi::Enabled;
 use rp2040_hal::{Spi, Watchdog};
 
-const WRITE_ENABLE: u8 = 0x06;
+pub(crate) const WRITE_ENABLE: u8 = 0x06;
 
-const BLOCK_ERASE: u8 = 0xd8;
+pub(crate) const BLOCK_ERASE: u8 = 0xd8;
 pub const PROGRAM_LOAD: u8 = 0x02;
 pub const PROGRAM_EXECUTE: u8 = 0x10;
-const RESET: u8 = 0xff;
-const GET_FEATURES: u8 = 0x0f;
-const SET_FEATURES: u8 = 0x1f;
+pub(crate) const RESET: u8 = 0xff;
+pub(crate) const GET_FEATURES: u8 = 0x0f;
+pub(crate) const SET_FEATURES: u8 = 0x1f;
 const _DEVICE_ID: u8 = 0x9f;
 pub const PAGE_READ: u8 = 0x13;
 const _PAGE_READ_RANDOM: u8 = 0x30;
 const _PAGE_READ_LAST: u8 = 0x3f;
-const CACHE_READ: u8 = 0x0b;
+pub(crate) const CACHE_READ: u8 = 0x0b;
 
-const FEATURE_STATUS: u8 = 0xc0;
+pub(crate) const FEATURE_STATUS: u8 = 0xc0;
 const _FEATURE_CONFIG: u8 = 0xb0;
 const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const _FEATURE_DIE_SELECT: u8 = 0xd0;
@@ -67,7 +71,7 @@ pub struct OnboardFlashStatus {
     inner: u8,
 }
 
-#[derive(Format)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct EccStatus {
     pub okay: bool,
     should_relocate: bool,
@@ -76,7 +80,8 @@ pub struct EccStatus {
 pub type BlockIndex = u16;
 pub type PageIndex = u8;
 
-#[derive(Copy, Clone, Format)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct RecordingFileTypeDetails {
     pub user_requested: bool,
     pub startup_status: bool,
@@ -323,7 +328,9 @@ type SpiEnabledPeripheral = Spi<
 >;
 
 #[repr(u8)]
-#[derive(Format, PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(PartialEq, Clone, Copy)]
 pub enum FileType {
     Unknown = 0,
     CptvScheduled = 1 << 0,
@@ -746,11 +753,11 @@ impl OnboardFlash {
                                 self.current_block_index = block_index;
                                 self.current_page_index = 0;
                                 info!(
-                                    "Setting file_start_block_index {}",
+                                    "Setting file_start_block_index {:?}",
                                     self.file_start_block_index
                                 );
                                 info!(
-                                    "Setting last_used_block_index {}",
+                                    "Setting last_used_block_index {:?}",
                                     self.last_used_block_index
                                 );
                                 info!("Setting current_block_index {}", self.current_block_index);
@@ -988,14 +995,14 @@ impl OnboardFlash {
             || self.last_used_block_index.unwrap() < self.file_start_block_index.unwrap()
         {
             info!(
-                "Nothing to erase start {} last used block {}",
+                "Nothing to erase start {:?} last used block {:?}",
                 self.file_start_block_index, self.last_used_block_index
             );
             return Err("File hasn't been written to");
         }
         let start_block_index = self.file_start_block_index.unwrap();
         info!(
-            "Erasing latest file {}:0 to {}",
+            "Erasing latest file {:?}:0 to {:?}",
             start_block_index, self.last_used_block_index
         );
 
@@ -1251,7 +1258,7 @@ impl OnboardFlash {
             let offset = offset as usize;
             let src_range = 0..length + FLASH_SPI_HEADER;
             let dst_range = offset..offset + length + FLASH_SPI_HEADER;
-            crate::assert_eq!(src_range.len(), dst_range.len());
+            assert_eq!(src_range.len(), dst_range.len());
 
             // FIXME: Why is this a bidirectional transfer again?
             //  That seems to be the main reason we need these Page abstractions.

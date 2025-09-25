@@ -1,5 +1,9 @@
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
-use defmt::{Format, info};
+#[cfg(feature = "no-std")]
+use defmt::info;
+
+#[cfg(feature = "std")]
+use log::info;
 
 const SEG_DIV: usize = 8;
 const SEG_WIDTH: usize = FRAME_WIDTH / SEG_DIV;
@@ -245,10 +249,18 @@ pub fn track_motion(
     motion_tracking
 }
 
-#[derive(Format, PartialEq)]
+#[derive(PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct DetectionMask {
     pub inner: [u8; 2400],
     length: usize,
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Debug for DetectionMask {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(fmt, "DetectionMask {{}}")
+    }
 }
 
 impl DetectionMask {

@@ -1,5 +1,6 @@
 use crate::FIRMWARE_VERSION;
 use crate::device_config::{AudioMode, DeviceConfig};
+use crate::event_logger::Event::{AudioRecordingFailed, EndedRecording};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{BlockIndex, FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
 use crate::synced_date_time::SyncedDateTime;
@@ -7,10 +8,15 @@ use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Duration, Utc};
 use core::cmp::PartialEq;
 use core::ops::Range;
-use defmt::{Format, error, info, warn};
+#[cfg(feature = "no-std")]
+use defmt::{error, info, warn};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
 
 #[repr(u8)]
-#[derive(Format, Copy, Clone)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum WakeReason {
     Unknown = 0,
     ThermalOffload = 1,
@@ -62,7 +68,9 @@ impl TryFrom<u64> for WakeReason {
     }
 }
 
-#[derive(Format, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone)]
 pub struct DiscardedRecordingInfo {
     pub recording_type: FileType,
     pub num_frames: u16,
@@ -88,7 +96,9 @@ impl DiscardedRecordingInfo {
     }
 }
 
-#[derive(Format, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone)]
 pub struct NewConfigInfo {
     audio_mode: AudioMode,
     continuous_recorder: bool,
@@ -126,7 +136,9 @@ impl NewConfigInfo {
     }
 }
 
-#[derive(Format, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone)]
 pub enum Event {
     Rp2040Sleep,
     OffloadedRecording(FileType),
@@ -164,6 +176,13 @@ pub enum Event {
     RtcVoltageLowError,
     Rp2040GotNewConfig(NewConfigInfo),
     UnrecoverableDataCorruption((u16, u16)),
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl From<Event> for u16 {
@@ -288,9 +307,17 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
 type EventIndex = u16;
 
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct LoggerEvent {
     timestamp: i64,
     kind: Event,
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for LoggerEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl LoggerEvent {
@@ -559,6 +586,26 @@ impl EventLogger {
             }
         }
         latest_event
+    }
+
+    pub fn latest_audio_recording_failed(&mut self, fs: &mut OnboardFlash) -> bool {
+        self.latest_event_of_kind(AudioRecordingFailed, fs)
+            .is_some_and(|audio_failure_event| {
+                let last_recording_success = self.latest_event_of_kind(EndedRecording, fs);
+                match last_recording_success {
+                    None => true,
+                    Some(recording_success_event) => {
+                        if let Some(success_time) = recording_success_event.timestamp()
+                            && let Some(failure_time) = audio_failure_event.timestamp()
+                        {
+                            success_time < failure_time
+                        } else {
+                            // Weird edge case where we won't re-attempt the audio recording.
+                            false
+                        }
+                    }
+                }
+            })
     }
 
     pub fn is_nearly_full(&self) -> bool {

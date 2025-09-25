@@ -4,7 +4,12 @@ use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDet
 use crate::pdm_filter::PDMFilter;
 use crate::synced_date_time::SyncedDateTime;
 use cortex_m::prelude::*;
+
+#[cfg(feature = "no-std")]
 use defmt::{info, warn};
+#[cfg(feature = "std")]
+use log::{info, warn};
+
 use fugit::HertzU32;
 
 use crate::utils::extend_lifetime_generic_mut;

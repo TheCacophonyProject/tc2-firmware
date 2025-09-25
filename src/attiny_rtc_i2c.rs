@@ -7,7 +7,12 @@ use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use core::cmp::PartialEq;
 use crc::{Algorithm, Crc};
-use defmt::{Format, Formatter, error, info, warn};
+
+#[cfg(feature = "no-std")]
+use defmt::{error, info, warn};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
+
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::InputPin;
 use embedded_hal::i2c::{Error, ErrorKind, I2c};
@@ -48,8 +53,15 @@ pub mod tc2_agent_state {
     pub const LONG_TEST_RECORDING: u8 = 1 << 7;
 }
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 pub struct Tc2AgentState(u8);
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for Tc2AgentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Tc2AgentState(0b{:08b})", self.0)
+    }
+}
 
 impl From<u8> for Tc2AgentState {
     fn from(value: u8) -> Self {
@@ -64,7 +76,7 @@ impl From<Tc2AgentState> for u8 {
 }
 
 impl Tc2AgentState {
-    fn flag_is_set(&self, flag: u8) -> bool {
+    pub(crate) fn flag_is_set(&self, flag: u8) -> bool {
         self.0 & flag != 0
     }
 
@@ -130,10 +142,18 @@ impl Tc2AgentState {
 }
 
 #[repr(u8)]
-#[derive(PartialEq, Eq, Format, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub enum AlarmMode {
     Audio = 0,
     Thermal = 1,
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for AlarmMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl TryFrom<u8> for AlarmMode {
@@ -149,7 +169,9 @@ impl TryFrom<u8> for AlarmMode {
 }
 
 #[repr(u8)]
-#[derive(Format, PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum CameraState {
     PoweringOn = 0x00,
     PoweredOn = 0x01,
@@ -209,7 +231,9 @@ impl From<u8> for CameraConnectionState {
     }
 }
 
-#[derive(Format, Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone, PartialEq)]
 pub enum RecordingMode {
     Audio(RecordingRequestType),
     Thermal(RecordingRequestType),
@@ -227,13 +251,17 @@ impl RecordingMode {
     }
 }
 
-#[derive(Format, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct RecordingTypeDetail {
     user_requested: bool,
     pub duration_seconds: u32,
 }
 
-#[derive(Format, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum RecordingRequestType {
     Test(RecordingTypeDetail),
     Scheduled(RecordingTypeDetail),
@@ -295,7 +323,8 @@ fn map_i2c_err(e: ErrorKind) -> &'static str {
 }
 
 #[repr(u8)]
-#[derive(Format)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum CameraConnectionState {
     NoConnection = 0x00,
     ConnectedToWifi = 0x01,
@@ -337,7 +366,7 @@ fn decode_bcd(input: u8) -> u8 {
 }
 
 /// Convert the decimal value to Binary Coded Decimal.
-fn encode_bcd(input: u8) -> u8 {
+pub(crate) fn encode_bcd(input: u8) -> u8 {
     let digits: u8 = input % 10;
     let tens: u8 = input / 10;
     let tens = tens << 4;
@@ -348,6 +377,19 @@ pub struct ScheduledAlarmTime {
     pub time: chrono::DateTime<Utc>,
     pub mode: AlarmMode,
     pub already_triggered: bool,
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for ScheduledAlarmTime {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            fmt,
+            "ScheduledAlarmTime: {}, mode: {:?}, already_triggered: {}",
+            FormattedNZTime(self.date_time()),
+            self.mode,
+            self.already_triggered
+        )
+    }
 }
 
 impl ScheduledAlarmTime {
@@ -365,8 +407,9 @@ impl ScheduledAlarmTime {
     }
 }
 
-impl Format for ScheduledAlarmTime {
-    fn format(&self, fmt: Formatter) {
+#[cfg(feature = "no-std")]
+impl defmt::Format for ScheduledAlarmTime {
+    fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(
             fmt,
             "ScheduledAlarmTime: {}, mode: {}, already_triggered: {}",

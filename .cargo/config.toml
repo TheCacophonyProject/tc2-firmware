@@ -10,12 +10,12 @@
 
 # Current runner omits line numbers, just to be a bit easier to parse
 runner = [
-  "probe-rs",
-  "run",
-  "--chip",
-  "RP2040",
-  "--log-format",
-  "{L} {s}"
+    "probe-rs",
+    "run",
+    "--chip",
+    "RP2040",
+    "--log-format",
+    "{L} {s}"
 ]
 #runner = [
 #  "probe-rs",
@@ -34,26 +34,28 @@ runner = [
 linker = "flip-link"
 
 rustflags = [
-  "-C",
-  "link-arg=--nmagic",
-  "-C",
-  "link-arg=-Tlink.x",
-  "-C",
-  "link-arg=-Tdefmt.x",
-
-  # Code-size optimizations.
-  #   trap unreachable can save a lot of space, but requires nightly compiler.
-  #   uncomment the next line if you wish to enable it
-  # "-Z", "trap-unreachable=no",
-  "-C",
-  "llvm-args=--inline-threshold=5",
-  "-C",
-  "no-vectorize-loops",
+    "-C",
+    "link-arg=--nmagic",
+    "-C",
+    "link-arg=-Tlink.x",
+    "-C",
+    "link-arg=-Tdefmt.x",
+    # Code-size optimizations.
+    #   trap unreachable can save a lot of space, but requires nightly compiler.
+    #   uncomment the next line if you wish to enable it
+    # "-Z", "trap-unreachable=no",
+    "-C",
+    "llvm-args=--inline-threshold=5",
+    "-C",
+    "no-vectorize-loops",
 ]
 
 
 [build]
 target = "thumbv6m-none-eabi"
+
+[alias]
+test-host = "test --target=x86_64-unknown-linux-gnu"
 
 [env]
 DEFMT_LOG = "debug"

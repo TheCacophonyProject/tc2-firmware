@@ -1,7 +1,12 @@
 use crate::attiny_rtc_i2c::{CameraState, MainI2C};
 use crate::event_logger::{EventLogger, LoggerEvent};
 use crate::onboard_flash::OnboardFlash;
+
+#[cfg(feature = "no-std")]
 use defmt::{info, warn};
+#[cfg(feature = "std")]
+use log::{info, warn};
+
 use embedded_hal::delay::DelayNs;
 use rp2040_hal::{Timer, Watchdog};
 

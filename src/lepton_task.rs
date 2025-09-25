@@ -10,10 +10,14 @@ use bsp::hal::rosc::RingOscillator;
 use bsp::hal::sio::SioFifo;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
+use cortex_m::asm::nop;
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
-use defmt::{info, warn};
+#[cfg(feature = "no-std")]
+use defmt::{assert_eq, error, info, warn};
 use fugit::{HertzU32, RateExtU32};
+#[cfg(feature = "std")]
+use log::{error, info, warn};
 use rp2040_hal::{Sio, Timer, Watchdog};
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
@@ -84,7 +88,7 @@ pub fn lepton_core1_task(
     );
 
     let result = fifo.read_blocking();
-    defmt::assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
+    assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
     let main_lepton_firmware = LittleEndian::read_u32(&[gpp_major, gpp_minor, gpp_build, 0]);
     let dsp_lepton_firmware = LittleEndian::read_u32(&[dsp_major, dsp_minor, dsp_build, 0]);
     fifo.write_blocking(Core0Task::SendIntercoreArray.into());
@@ -95,7 +99,7 @@ pub fn lepton_core1_task(
     fifo.write_blocking(dsp_lepton_firmware);
 
     let result = fifo.read_blocking();
-    defmt::assert_eq!(result, Core0Task::Ready.into());
+    assert_eq!(result, Core0Task::Ready.into());
     frame_acquisition_loop(
         rosc,
         &mut lepton,
@@ -226,7 +230,11 @@ pub fn frame_acquisition_loop(
                     info!("Powering down lepton module");
                     lepton.power_down_sequence();
                     warn!("Request reset");
-                    restart(&mut watchdog);
+                    sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
+                    loop {
+                        nop();
+                    }
+                    //restart(&mut watchdog);
                 }
             }
             if selected_frame_buffer == 0 {
@@ -434,7 +442,7 @@ pub fn frame_acquisition_loop(
                             buffer.packet(segment_index, packet_id),
                         );
                     } else {
-                        defmt::error!("Failed to write to frame buffer");
+                        error!("Failed to write to frame buffer");
                     }
                 });
 
@@ -564,8 +572,12 @@ pub fn frame_acquisition_loop(
                         if needs_restart {
                             info!("Powering down lepton module");
                             lepton.power_down_sequence();
+                            sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
                             warn!("Request reset");
-                            restart(&mut watchdog);
+                            // restart(&mut watchdog);
+                            loop {
+                                nop();
+                            }
                         }
                     }
                 }

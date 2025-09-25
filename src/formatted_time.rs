@@ -1,8 +1,4 @@
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
-
-#[cfg(feature = "defmt")]
-use defmt::Formatter;
-
 pub struct FormattedNZTime(pub DateTime<Utc>);
 
 impl FormattedNZTime {
@@ -25,9 +21,9 @@ impl FormattedNZTime {
     }
 }
 
-#[cfg(feature = "defmt")]
+#[cfg(feature = "no-std")]
 impl defmt::Format for FormattedNZTime {
-    fn format(&self, fmt: Formatter) {
+    fn format(&self, fmt: defmt::Formatter) {
         let (approx_nz_time, nzdt) = self.approx_nz_time();
         defmt::write!(
             fmt,
@@ -40,5 +36,23 @@ impl defmt::Format for FormattedNZTime {
             approx_nz_time.second(),
             if nzdt { "NZDT" } else { "NZST" },
         );
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Display for FormattedNZTime {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let (approx_nz_time, nzdt) = self.approx_nz_time();
+        write!(
+            fmt,
+            "DateTime: {}-{}-{} {:02}:{:02}:{} {}",
+            approx_nz_time.year(),
+            approx_nz_time.month(),
+            approx_nz_time.day(),
+            approx_nz_time.hour(),
+            approx_nz_time.minute(),
+            approx_nz_time.second(),
+            if nzdt { "NZDT" } else { "NZST" },
+        )
     }
 }
