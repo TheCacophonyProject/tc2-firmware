@@ -257,8 +257,8 @@ pub struct DetectionMask {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Debug for DetectionMask {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+impl core::fmt::Debug for DetectionMask {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         write!(fmt, "DetectionMask {{}}")
     }
 }

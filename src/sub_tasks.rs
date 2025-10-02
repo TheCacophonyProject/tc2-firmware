@@ -1,22 +1,18 @@
-use crate::FIRMWARE_VERSION;
 use crate::attiny_rtc_i2c::MainI2C;
-use crate::bsp;
-use crate::bsp::pac::{DMA, RESETS};
+use crate::constants::FIRMWARE_VERSION;
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{DiscardedRecordingInfo, Event, EventLogger, LoggerEvent};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
+use crate::re_exports::bsp::hal::Watchdog;
+use crate::re_exports::bsp::pac::{DMA, RESETS};
+use crate::re_exports::log::{error, info, unreachable, warn};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
-use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
-#[cfg(feature = "no-std")]
-use defmt::{error, info, unreachable, warn};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -240,7 +236,7 @@ fn offload_recordings_and_events(
                         } else if metadata == FileType::CptvShutdown {
                             info!("Offloading CPTV shutdown status recording");
                         } else if metadata == FileType::CptvUserRequested {
-                            info!("Offloading CPTV test recording");
+                            info!("Offloading CPTV tests recording");
                         } else {
                             info!("Offloading scheduled CPTV recording");
                         }
@@ -250,7 +246,7 @@ fn offload_recordings_and_events(
                         } else if metadata == FileType::AudioShutdown {
                             info!("Offloading audio shutdown status recording");
                         } else if metadata == FileType::AudioUserRequested {
-                            info!("Offloading test audio recording");
+                            info!("Offloading tests audio recording");
                         } else {
                             info!("Offloading scheduled audio recording");
                         }
@@ -310,7 +306,7 @@ fn offload_recordings_and_events(
                 part_count += 1;
                 if is_last_page_for_file {
                     // NOTE: This could also be the *first* page of the file for
-                    //  test/status recordings.
+                    //  tests/status recordings.
                     file_count += 1;
                     info!("Offloaded {} file(s)", file_count);
                     watchdog.feed();

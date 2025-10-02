@@ -1,12 +1,10 @@
-use std::fmt::{Debug, Formatter};
-
 #[derive(PartialEq, Clone)]
 pub struct DetectionMask {
     inner: [u8; 2400],
 }
 
-impl Debug for DetectionMask {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for DetectionMask {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DetectionMask")
             .field("has_masking", &self.has_masking())
             .finish()

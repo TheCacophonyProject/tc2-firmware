@@ -10,35 +10,28 @@
 
 // We keep a pointer to the next free byte offset updated, though we may only be able to write things
 // in blocks of a certain size.
-
-use crate::Utc;
-use crate::bsp::pac::SPI1;
-use crate::byte_slice_cursor::CursorMut;
-use crate::utils::{extend_lifetime, extend_lifetime_mut};
-
-use byteorder::{ByteOrder, LittleEndian};
-use chrono::DateTime;
-use crc::{CRC_16_XMODEM, Crc};
-
-#[cfg(feature = "no-std")]
-use defmt::{assert_eq, error, info, warn};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
-
 use crate::attiny_rtc_i2c::RecordingRequestType;
+use crate::byte_slice_cursor::CursorMut;
 use crate::event_logger::{Event, EventLogger};
-use crate::synced_date_time::SyncedDateTime;
-use cortex_m::prelude::*;
-use embedded_hal::digital::OutputPin;
-use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::dma::{CH1, CH2, Channel, bidirectional};
-use rp2040_hal::gpio::bank0::{Gpio8, Gpio9, Gpio10, Gpio11};
-use rp2040_hal::gpio::{
+use crate::re_exports::bsp::hal::dma::{CH1, CH2, Channel, bidirectional};
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio8, Gpio9, Gpio10, Gpio11};
+use crate::re_exports::bsp::hal::gpio::{
     FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
 };
-use rp2040_hal::pac::RESETS;
-use rp2040_hal::spi::Enabled;
-use rp2040_hal::{Spi, Watchdog};
+use crate::re_exports::bsp::hal::spi::{Disabled, Enabled};
+use crate::re_exports::bsp::hal::{Spi, Watchdog};
+use crate::re_exports::bsp::pac::RESETS;
+use crate::re_exports::bsp::pac::SPI1;
+use crate::re_exports::log::{assert_eq, error, info, warn};
+use crate::synced_date_time::SyncedDateTime;
+use crate::utils::{extend_lifetime, extend_lifetime_mut};
+use byteorder::{ByteOrder, LittleEndian};
+use chrono::{DateTime, Utc};
+#[cfg(feature = "no-std")]
+use cortex_m::prelude::*;
+use crc::{CRC_16_XMODEM, Crc};
+use embedded_hal::digital::OutputPin;
+use fugit::{HertzU32, RateExtU32};
 
 pub(crate) const WRITE_ENABLE: u8 = 0x06;
 
@@ -316,7 +309,7 @@ pub struct FilePartReturn<'a> {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
-type SpiEnabledPeripheral = Spi<
+pub type SpiEnabledPeripheral = Spi<
     Enabled,
     SPI1,
     (
@@ -803,13 +796,18 @@ impl OnboardFlash {
         let miso = self.miso_disabled.take().unwrap();
         let mosi = self.mosi_disabled.take().unwrap();
         let clk = self.clk_disabled.take().unwrap();
-        let spi = Spi::new(
-            peripheral,
+        let spi = Spi::<
+            Disabled,
+            SPI1,
             (
-                mosi.into_function().into_pull_type(),
-                miso.into_function().into_pull_type(),
-                clk.into_function().into_pull_type(),
+                Pin<Gpio11, FunctionSpi, PullDown>, //, SCK
+                Pin<Gpio8, FunctionSpi, PullDown>,  // MISO
+                Pin<Gpio10, FunctionSpi, PullDown>, // MOSI
             ),
+            8,
+        >::new(
+            peripheral,
+            (mosi.reconfigure(), miso.reconfigure(), clk.reconfigure()),
         )
         .init(
             resets,
@@ -1034,9 +1032,9 @@ impl OnboardFlash {
             let spi_enabled = self.spi.take().unwrap();
             let spi_disabled = spi_enabled.disable();
             let (spi, (mosi, miso, clk)) = spi_disabled.free();
-            self.mosi_disabled = Some(mosi.into_pull_down_disabled().into_pull_type());
-            self.clk_disabled = Some(clk.into_pull_down_disabled().into_pull_type());
-            self.miso_disabled = Some(miso.into_pull_down_disabled().into_pull_type());
+            self.mosi_disabled = Some(mosi.reconfigure());
+            self.clk_disabled = Some(clk.reconfigure());
+            self.miso_disabled = Some(miso.reconfigure());
 
             Some(spi)
         } else {

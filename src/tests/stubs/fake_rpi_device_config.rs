@@ -1,3 +1,4 @@
+extern crate std;
 use core::fmt;
 use std::collections::HashMap;
 // Read camera config file

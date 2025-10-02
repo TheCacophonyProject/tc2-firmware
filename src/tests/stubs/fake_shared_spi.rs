@@ -1,3 +1,4 @@
+extern crate std;
 use crate::ext_spi_transfers::{RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH};
 use crate::onboard_flash::{
     BLOCK_ERASE, BlockIndex, CACHE_READ, FEATURE_STATUS, FLASH_SPI_HEADER, FLASH_SPI_HEADER_SMALL,
@@ -8,7 +9,7 @@ use crate::tests::stubs::fake_rpi_event_logger::{
     DiscardedRecordingInfo, FileType, LoggerEvent, LoggerEventKind, NewConfigInfo, WakeReason,
 };
 use crate::tests::stubs::fake_rpi_recording_state::RecordingMode;
-use crate::tests::test_global_state::{
+use crate::tests::test_state::test_global_state::{
     CURRENT_TIME, DEVICE_CONFIG, ECC_ERROR_ADDRESSES, EVENTS_OFFLOADED, EventOffload,
     FAKE_PI_RECORDING_STATE, FILE_DOWNLOAD, FILE_DOWNLOAD_START, FILE_PART_COUNT, FILES_OFFLOADED,
     FLASH_BACKING_STORAGE, FileOffload, PENDING_FORCED_OFFLOAD_REQUEST,
@@ -20,8 +21,11 @@ use chrono_tz::Tz::Pacific__Auckland;
 use crc::{CRC_16_XMODEM, Crc};
 use log::{debug, error, info, warn};
 use std::ops::Not;
+use std::string::String;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
+use std::vec::Vec;
+use std::{format, println};
 
 pub struct SpiEnabledPeripheral {
     buffer: Vec<u8>,
@@ -103,7 +107,7 @@ impl SpiEnabledPeripheral {
             .lock()
             .unwrap()
             .as_ref()
-            .expect("No test device config set")
+            .expect("No tests device config set")
             .clone();
 
         {

@@ -1,15 +1,24 @@
+extern crate std;
 use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{BlockIndex, PageIndex};
-use crate::tests::stubs::fake_i2c::RtcAlarm;
 use crate::tests::stubs::fake_rpi_device_config::DeviceConfig;
 use crate::tests::stubs::fake_rpi_event_logger::{FileType, LoggerEvent};
 use crate::tests::stubs::fake_rpi_recording_state::RecordingState;
 use crate::tests::stubs::fake_shared_spi::{StorageBlock, StoragePage};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
+use std::vec;
+use std::vec::Vec;
+
+pub struct RtcAlarm {
+    pub minutes: u8,
+    pub(crate) hours: u8,
+    pub(crate) day: u8,
+    pub(crate) weekday_alarm_mode: u8,
+    pub enabled: u8,
+}
 
 pub static CURRENT_TIME: LazyLock<Arc<Mutex<chrono::DateTime<Utc>>>> = LazyLock::new(|| {
     Arc::new(Mutex::new(Utc.from_utc_datetime(&NaiveDateTime::new(
@@ -78,8 +87,8 @@ pub struct EventOffload {
     pub(crate) offloaded_at: DateTime<Utc>,
 }
 
-impl Debug for EventOffload {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for EventOffload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "event offload at {}", FormattedNZTime(self.offloaded_at))
     }
 }

@@ -17,8 +17,8 @@ impl defmt::Format for SmallString {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Debug for SmallString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for SmallString {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.as_str())
     }
 }
@@ -320,8 +320,8 @@ impl defmt::Format for DeviceConfig {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for DeviceConfig {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for DeviceConfig {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(fmt, "{:?}", self)
     }
 }

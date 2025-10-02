@@ -2,15 +2,10 @@ use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{Event, EventLogger};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::OnboardFlash;
+use crate::re_exports::bsp::hal::Timer;
+use crate::re_exports::bsp::hal::timer::Instant;
+use crate::re_exports::log::error;
 use chrono::{DateTime, Duration, Utc};
-
-#[cfg(feature = "no-std")]
-use defmt::error;
-#[cfg(feature = "std")]
-use log::error;
-
-use rp2040_hal::Timer;
-use rp2040_hal::timer::Instant;
 
 // NOTE: Important: If we start using dormant states again, the timer will be incorrect
 #[derive(Copy, Clone)]
@@ -28,8 +23,8 @@ impl defmt::Format for SyncedDateTime {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for SyncedDateTime {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for SyncedDateTime {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(fmt, "{}", FormattedNZTime(self.date_time_utc))
     }
 }

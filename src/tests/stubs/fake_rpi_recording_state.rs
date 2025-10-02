@@ -1,9 +1,8 @@
+extern crate std;
 use crate::attiny_rtc_i2c::Tc2AgentState;
+use crate::re_exports::log::{error, info};
 use crate::tests::stubs::fake_rpi_test_recording_status::TestRecordingStatus;
-use crate::tests::test_global_state::TC2_AGENT_STATE;
-use log::{error, info};
-use std::process;
-#[cfg(not(target_arch = "thumbv6m-non-eabi"))]
+use crate::tests::test_state::test_global_state::TC2_AGENT_STATE;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::thread::sleep;
@@ -14,7 +13,7 @@ use std::time::Duration;
 //     pub const READY: u8 = 0b0000_0010;
 //     /// taking an audio or thermal recording, not safe to reboot rp2040
 //     pub const RECORDING: u8 = 0b0000_0100;
-//     /// Requested test audio recording.  Cleared by rp2040 when test audio recording
+//     /// Requested tests audio recording.  Cleared by rp2040 when tests audio recording
 //     /// is completed
 //     pub const REQUESTED_TEST_AUDIO_RECORDING: u8 = 0b0000_1000;
 //
@@ -37,10 +36,10 @@ use std::time::Duration;
 //
 //     pub const REQUESTED_LONG_AUDIO_RECORDING: u8 = 0b1000_0000;
 //
-//     // TODO: What if we could do test recordings in both modes, and we had to set the MODE bit as well
-//     //  as the test recording bit? Test and Long test would have different hard-coded meanings for each.
+//     // TODO: What if we could do tests recordings in both modes, and we had to set the MODE bit as well
+//     //  as the tests recording bit? Test and Long tests would have different hard-coded meanings for each.
 //
-//     // FIXME: Can you currently take a test audio recording when you have audio disabled?
+//     // FIXME: Can you currently take a tests audio recording when you have audio disabled?
 //     //  Answer - no, and this is by design.
 // }
 
@@ -112,10 +111,10 @@ pub struct RecordingState {
     // which we sync back periodically.
     rp2040_recording_state_inner: Arc<AtomicU8>,
 
-    // This stores the user-requested test audio recording status
+    // This stores the user-requested tests audio recording status
     audio_test_recording_state_inner: Arc<AtomicU8>,
 
-    // This stores the user-requested test low power thermal recording status
+    // This stores the user-requested tests low power thermal recording status
     lp_thermal_test_recording_state_inner: Arc<AtomicU8>,
 
     // This reflects the current mode that the rp2040 has booted in, which is
@@ -572,7 +571,7 @@ impl RecordingState {
     pub fn request_audio_recording_from_rp2040(&mut self) -> bool {
         self.sync_state_from_attiny();
         if self.is_recording() {
-            info!("Requested audio test recording, but rp2040 is already recording");
+            info!("Requested audio tests recording, but rp2040 is already recording");
             false
         } else {
             let state: u8 = self
@@ -612,20 +611,20 @@ impl RecordingState {
     pub fn request_thermal_recording_from_rp2040(&mut self) -> bool {
         self.sync_state_from_attiny();
         if self.is_recording() {
-            info!("Requested thermal test recording, but rp2040 is already recording");
+            info!("Requested thermal tests recording, but rp2040 is already recording");
             false
         } else {
             let state: u8 = self
                 .lp_thermal_test_recording_state_inner
                 .load(Ordering::Relaxed);
             if state == TestRecordingState::ShortTestRecordingRequested as u8 {
-                info!("Request short test thermal recording");
+                info!("Request short tests thermal recording");
                 self.merge_state_to_attiny(
                     Some(tc2_agent_state::THERMAL_MODE | tc2_agent_state::SHORT_TEST_RECORDING),
                     None,
                 );
             } else if state == TestRecordingState::LongTestRecordingRequested as u8 {
-                info!("Request long test thermal recording");
+                info!("Request long tests thermal recording");
                 self.merge_state_to_attiny(
                     Some(tc2_agent_state::THERMAL_MODE | tc2_agent_state::LONG_TEST_RECORDING),
                     None,

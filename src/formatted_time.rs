@@ -40,8 +40,8 @@ impl defmt::Format for FormattedNZTime {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for FormattedNZTime {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for FormattedNZTime {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
         let (approx_nz_time, nzdt) = self.approx_nz_time();
         write!(
             fmt,

@@ -1,6 +1,10 @@
+extern crate std;
+
 use crate::device_config::AudioMode;
 use byteorder::{ByteOrder, LittleEndian};
 use log::info;
+use std::format;
+use std::string::String;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
@@ -19,8 +23,8 @@ pub enum WakeReason {
     RtcTimeCompromised = 11,
     OpportunisticOffload = 12,
 }
-impl std::fmt::Display for WakeReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for WakeReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
 }

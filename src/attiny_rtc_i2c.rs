@@ -1,24 +1,22 @@
-use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
-use crate::bsp::pac::I2C1;
 use crate::device_config::get_datetime_utc;
 use crate::formatted_time::FormattedNZTime;
+use crate::re_exports::bsp::pac::I2C1;
+use crate::re_exports::log::{error, info, warn};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use core::cmp::PartialEq;
 use crc::{Algorithm, Crc};
 
-#[cfg(feature = "no-std")]
-use defmt::{error, info, warn};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
-
+use crate::constants::EXPECTED_ATTINY_FIRMWARE_VERSION;
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
+use crate::re_exports::bsp::hal::gpio::{
+    FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput,
+};
+use crate::re_exports::bsp::hal::{I2C, Timer};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::InputPin;
 use embedded_hal::i2c::{Error, ErrorKind, I2c};
-use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
-use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput};
-use rp2040_hal::{I2C, Timer};
 
 pub type I2CConfig = I2C<
     I2C1,
@@ -57,8 +55,8 @@ pub mod tc2_agent_state {
 pub struct Tc2AgentState(u8);
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for Tc2AgentState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Tc2AgentState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Tc2AgentState(0b{:08b})", self.0)
     }
 }
@@ -76,7 +74,7 @@ impl From<Tc2AgentState> for u8 {
 }
 
 impl Tc2AgentState {
-    pub(crate) fn flag_is_set(&self, flag: u8) -> bool {
+    pub(crate) fn flag_is_set(self, flag: u8) -> bool {
         self.0 & flag != 0
     }
 
@@ -88,55 +86,55 @@ impl Tc2AgentState {
         self.0 &= !flag;
     }
 
-    pub fn is_not_ready(&self) -> bool {
+    pub fn is_not_ready(self) -> bool {
         self.0 == 0
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub fn is_ready(self) -> bool {
         self.flag_is_set(tc2_agent_state::READY)
     }
 
-    pub fn recording_in_progress(&self) -> bool {
+    pub fn recording_in_progress(self) -> bool {
         self.flag_is_set(tc2_agent_state::RECORDING)
     }
 
-    pub fn test_audio_recording_requested(&self) -> bool {
+    pub fn test_audio_recording_requested(self) -> bool {
         self.short_test_audio_recording_requested() || self.long_test_audio_recording_requested()
     }
 
-    pub fn test_thermal_recording_requested(&self) -> bool {
+    pub fn test_thermal_recording_requested(self) -> bool {
         self.short_test_thermal_recording_requested()
             || self.long_test_thermal_recording_requested()
     }
 
-    pub fn short_test_audio_recording_requested(&self) -> bool {
+    pub fn short_test_audio_recording_requested(self) -> bool {
         self.requested_audio_mode() && self.flag_is_set(tc2_agent_state::SHORT_TEST_RECORDING)
     }
 
-    pub fn long_test_audio_recording_requested(&self) -> bool {
+    pub fn long_test_audio_recording_requested(self) -> bool {
         self.requested_audio_mode() && self.flag_is_set(tc2_agent_state::LONG_TEST_RECORDING)
     }
 
-    pub fn short_test_thermal_recording_requested(&self) -> bool {
+    pub fn short_test_thermal_recording_requested(self) -> bool {
         self.requested_thermal_mode() && self.flag_is_set(tc2_agent_state::SHORT_TEST_RECORDING)
     }
 
-    pub fn long_test_thermal_recording_requested(&self) -> bool {
+    pub fn long_test_thermal_recording_requested(self) -> bool {
         self.requested_thermal_mode() && self.flag_is_set(tc2_agent_state::LONG_TEST_RECORDING)
     }
 
-    pub fn test_recording_requested(&self) -> bool {
+    pub fn test_recording_requested(self) -> bool {
         self.test_audio_recording_requested() || self.test_thermal_recording_requested()
     }
 
-    pub fn is_offloading_files(&self) -> bool {
+    pub fn is_offloading_files(self) -> bool {
         self.flag_is_set(tc2_agent_state::OFFLOAD)
     }
 
-    pub fn requested_thermal_mode(&self) -> bool {
+    pub fn requested_thermal_mode(self) -> bool {
         self.flag_is_set(tc2_agent_state::THERMAL_MODE)
     }
-    pub fn requested_audio_mode(&self) -> bool {
+    pub fn requested_audio_mode(self) -> bool {
         self.flag_is_set(tc2_agent_state::AUDIO_MODE)
     }
 }
@@ -150,8 +148,8 @@ pub enum AlarmMode {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for AlarmMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AlarmMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
@@ -333,19 +331,19 @@ pub enum CameraConnectionState {
     HotspotSetup = 0x04,
 }
 
-const ATTINY_ADDRESS: u8 = 0x25;
-const RTC_ADDRESS: u8 = 0x51;
-const ATTINY_REG_VERSION: u8 = 0x01;
-const ATTINY_REG_CAMERA_STATE: u8 = 0x02;
-const ATTINY_REG_CAMERA_CONNECTION: u8 = 0x03;
-const ATTINY_REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
-const ATTINY_REG_KEEP_ALIVE: u8 = 0x0e;
+pub const ATTINY_ADDRESS: u8 = 0x25;
+pub const RTC_ADDRESS: u8 = 0x51;
+pub const ATTINY_REG_VERSION: u8 = 0x01;
+pub const ATTINY_REG_CAMERA_STATE: u8 = 0x02;
+pub const ATTINY_REG_CAMERA_CONNECTION: u8 = 0x03;
+pub const ATTINY_REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
+pub const ATTINY_REG_KEEP_ALIVE: u8 = 0x0e;
 // const REG_PI_WAKEUP: u8 = 0x06;
-const ATTINY_REG_TC2_AGENT_STATE: u8 = 0x07;
+pub const ATTINY_REG_TC2_AGENT_STATE: u8 = 0x07;
 
-const RTC_REG_ALARM_CONTROL: u8 = 0x01;
-const RTC_REG_DATETIME_SECONDS: u8 = 0x02;
-const RTC_REG_ALARM_MINUTES: u8 = 0x09;
+pub const RTC_REG_ALARM_CONTROL: u8 = 0x01;
+pub const RTC_REG_DATETIME_SECONDS: u8 = 0x02;
+pub const RTC_REG_ALARM_MINUTES: u8 = 0x09;
 const DEFAULT_MAX_I2C_ATTEMPTS: u8 = 100;
 
 pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
@@ -380,8 +378,8 @@ pub struct ScheduledAlarmTime {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for ScheduledAlarmTime {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl core::fmt::Display for ScheduledAlarmTime {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(
             fmt,
             "ScheduledAlarmTime: {}, mode: {:?}, already_triggered: {}",
@@ -858,7 +856,7 @@ impl MainI2C {
         let mut lock_pin = self.unlocked_pin.take().unwrap();
         let is_low = lock_pin.is_low().unwrap_or(false);
         if is_low {
-            let pin = lock_pin.into_pull_type::<PullUp>();
+            let pin = lock_pin.reconfigure();
             Some(pin)
         } else {
             self.unlocked_pin = Some(lock_pin);
@@ -867,7 +865,7 @@ impl MainI2C {
     }
 
     fn restore_i2c_attiny_lock_pin(&mut self, pin: I2cLockedPin) {
-        self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+        self.unlocked_pin = Some(pin.reconfigure());
     }
 
     fn with_i2c<SUCCESS>(
@@ -962,7 +960,7 @@ impl MainI2C {
 }
 
 const EEPROM_LENGTH: usize = 1 + 1 + 3 * 4 + 1 + 8 + 4 + 2;
-const EEPROM_I2C_ADDRESS: u8 = 0x50;
+pub const EEPROM_I2C_ADDRESS: u8 = 0x50;
 
 pub struct Eeprom {
     inner: [u8; EEPROM_LENGTH],

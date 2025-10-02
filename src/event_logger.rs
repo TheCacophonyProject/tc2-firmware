@@ -1,17 +1,13 @@
-use crate::FIRMWARE_VERSION;
+use crate::constants::FIRMWARE_VERSION;
 use crate::device_config::{AudioMode, DeviceConfig};
-use crate::event_logger::Event::{AudioRecordingFailed, EndedRecording};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{BlockIndex, FileType, OnboardFlash, PageIndex, TOTAL_FLASH_BLOCKS};
+use crate::re_exports::log::{error, info, warn};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Duration, Utc};
 use core::cmp::PartialEq;
 use core::ops::Range;
-#[cfg(feature = "no-std")]
-use defmt::{error, info, warn};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
@@ -179,8 +175,8 @@ pub enum Event {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for Event {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+impl core::fmt::Display for Event {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         write!(f, "{:?}", self)
     }
 }
@@ -314,8 +310,8 @@ pub struct LoggerEvent {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for LoggerEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for LoggerEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
@@ -589,9 +585,9 @@ impl EventLogger {
     }
 
     pub fn latest_audio_recording_failed(&mut self, fs: &mut OnboardFlash) -> bool {
-        self.latest_event_of_kind(AudioRecordingFailed, fs)
+        self.latest_event_of_kind(Event::AudioRecordingFailed, fs)
             .is_some_and(|audio_failure_event| {
-                let last_recording_success = self.latest_event_of_kind(EndedRecording, fs);
+                let last_recording_success = self.latest_event_of_kind(Event::EndedRecording, fs);
                 match last_recording_success {
                     None => true,
                     Some(recording_success_event) => {

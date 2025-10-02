@@ -1,28 +1,29 @@
-use crate::bsp;
-use crate::bsp::hal::gpio::FunctionSpi;
-use crate::bsp::hal::gpio::bank0::{Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29};
-use crate::bsp::hal::spi::Enabled;
-use crate::bsp::hal::{I2C as I2CInterface, Spi};
-use crate::bsp::pac::{RESETS, SPI0};
-use crate::bsp::{hal::gpio::Pin, pac::I2C0};
+#[allow(dead_code)]
 use crate::lepton_task::LEPTON_SPI_CLOCK_FREQ;
+use crate::re_exports::bsp;
+use crate::re_exports::bsp::hal::Timer;
+use crate::re_exports::bsp::hal::gpio::FunctionSpi;
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
+use crate::re_exports::bsp::hal::gpio::bank0::{
+    Gpio19, Gpio24, Gpio25, Gpio26, Gpio27, Gpio28, Gpio29,
+};
+use crate::re_exports::bsp::hal::gpio::{
+    FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, PullUp, SioInput, SioOutput,
+};
+use crate::re_exports::bsp::hal::i2c::Error;
+use crate::re_exports::bsp::hal::spi::{Disabled, Enabled};
+use crate::re_exports::bsp::hal::{I2C as I2CInterface, Spi};
+use crate::re_exports::bsp::pac::{RESETS, SPI0};
+use crate::re_exports::bsp::{hal::gpio::Pin, pac::I2C0};
+use crate::re_exports::log::{error, info, trace, warn};
 use crate::utils::any_as_u8_slice;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::convert::Infallible;
-use cortex_m::prelude::*;
 #[cfg(feature = "no-std")]
-use defmt::{error, info, trace, warn};
+use cortex_m::prelude::*;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::MODE_3;
 use fugit::{HertzU32, RateExtU32};
-#[cfg(feature = "std")]
-use log::{error, info, trace, warn};
-use rp2040_hal::Timer;
-use rp2040_hal::gpio::bank0::{Gpio18, Gpio20, Gpio21, Gpio22, Gpio23};
-use rp2040_hal::gpio::{
-    FunctionI2C, FunctionSio, Interrupt, PullDown, PullNone, PullUp, SioInput, SioOutput,
-};
-use rp2040_hal::i2c::Error;
 
 #[allow(clippy::unusual_byte_groupings)]
 pub enum LeptonCommandType {
@@ -158,8 +159,8 @@ pub enum LeptonError {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for LeptonError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for LeptonError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
@@ -222,9 +223,9 @@ type SpiCs = Pin<Gpio21, FunctionSpi, PullDown>;
 type SpiTx = Pin<Gpio23, FunctionSpi, PullDown>;
 type SpiRx = Pin<Gpio20, FunctionSpi, PullDown>;
 type SpiClk = Pin<Gpio22, FunctionSpi, PullDown>;
-type Sda = Pin<Gpio24, FunctionI2C, PullUp>;
-type Scl = Pin<Gpio25, FunctionI2C, PullUp>;
-type LeptonCciI2c = I2CInterface<I2C0, (Sda, Scl)>;
+pub type Sda = Pin<Gpio24, FunctionI2C, PullUp>;
+pub type Scl = Pin<Gpio25, FunctionI2C, PullUp>;
+pub type LeptonCciI2c = I2CInterface<I2C0, (Sda, Scl)>;
 type PowerEnable = Pin<Gpio18, FunctionSio<SioOutput>, PullDown>;
 type PowerDown = Pin<Gpio28, FunctionSio<SioOutput>, PullDown>;
 type Reset = Pin<Gpio29, FunctionSio<SioOutput>, PullDown>;
@@ -496,6 +497,7 @@ impl LeptonModule {
         success
     }
 
+    #[allow(dead_code)]
     pub fn enable_video_output(&mut self, enabled: bool) -> Result<bool, LeptonError> {
         self.set_attribute_i32(
             lepton_command(
@@ -508,6 +510,7 @@ impl LeptonModule {
         )
     }
 
+    #[allow(dead_code)]
     pub fn power_down(&mut self) -> Result<bool, LeptonError> {
         self.execute_command(lepton_command(
             LEPTON_SUB_SYSTEM_OEM,
@@ -530,17 +533,21 @@ impl LeptonModule {
         let spi = self.spi.take().unwrap();
         let spi = spi.disable();
         let (spi, (tx, rx, sck)) = spi.free();
-        let mut cs = self.cs.take().unwrap().into_push_pull_output();
-        let mut sck = sck.into_push_pull_output();
+        let mut cs: Pin<Gpio21, FunctionSio<SioOutput>, PullDown> =
+            self.cs.take().unwrap().reconfigure();
+        let mut sck: Pin<Gpio22, FunctionSio<SioOutput>, PullDown> = sck.reconfigure();
         cs.set_high().unwrap();
         sck.set_high().unwrap(); // SCK is high when idle
         self.timer.delay_ms(200);
         cs.set_low().unwrap();
         sck.set_low().unwrap();
-        self.cs = Some(cs.into_function::<FunctionSpi>());
-        let sck = sck.into_function::<FunctionSpi>();
+        self.cs = Some(cs.reconfigure());
+        let sck = sck.reconfigure();
 
-        self.spi = Some(Spi::new(spi, (tx, rx, sck)).init(resets, freq, baudrate, MODE_3));
+        self.spi = Some(
+            Spi::<Disabled, SPI0, (SpiTx, SpiRx, SpiClk), 16>::new(spi, (tx, rx, sck))
+                .init(resets, freq, baudrate, MODE_3),
+        );
 
         if print {
             info!("Finished resetting spi");
@@ -551,6 +558,7 @@ impl LeptonModule {
         self.spi.as_mut().unwrap().transfer(words)
     }
 
+    #[allow(dead_code)]
     pub fn wait_for_ffc_status_ready(&mut self) -> bool {
         loop {
             match self.get_attribute(lepton_command(
@@ -704,6 +712,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn output_raw14(&mut self) -> Result<bool, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_VID,
@@ -719,6 +728,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn status(&mut self) -> Result<u32, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
@@ -731,6 +741,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn enable_focus_metric(&mut self) -> Result<bool, LeptonError> {
         self.set_attribute_i32(
             lepton_command(
@@ -743,6 +754,7 @@ impl LeptonModule {
         )
     }
 
+    #[allow(dead_code)]
     pub fn focus_metric_enabled(&mut self) -> Result<bool, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_VID,
@@ -757,6 +769,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_focus_metric(&mut self) -> Result<u32, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_VID,
@@ -771,6 +784,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn acg_enabled(&mut self) -> Result<bool, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_AGC,
@@ -787,6 +801,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn ping(&mut self) -> Result<bool, LeptonError> {
         self.execute_command(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
@@ -921,6 +936,7 @@ impl LeptonModule {
         }
     }
 
+    #[allow(dead_code)]
     pub fn scene_stats(&mut self) -> Result<SceneStats, LeptonError> {
         match self.get_attribute(lepton_command(
             LEPTON_SUB_SYSTEM_SYS,
@@ -1200,6 +1216,7 @@ pub const fn lepton_command(
     (lepton_register_val(synthesized_command), command.1)
 }
 
+#[allow(dead_code)]
 pub struct SceneStats {
     pub min: u16,
     pub max: u16,
@@ -1241,7 +1258,11 @@ pub fn init_lepton_module(
     timer: Timer,
     pins: LeptonPins,
 ) -> LeptonModule {
-    let spi = Spi::new(spi_peripheral, (pins.tx, pins.rx, pins.clk)).init(
+    let spi = Spi::<Disabled, SPI0, (SpiTx, SpiRx, SpiClk), 16>::new(
+        spi_peripheral,
+        (pins.tx, pins.rx, pins.clk),
+    )
+    .init(
         resets,
         system_clock_freq_hz,
         LEPTON_SPI_CLOCK_FREQ.Hz(),

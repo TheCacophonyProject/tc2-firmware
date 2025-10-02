@@ -10,6 +10,12 @@ path = "src/main.rs"
 test = false
 doctest = false
 bench = false
+required-features = ["no-std"]
+
+[[test]]
+name = "tests"
+path = "src/tests_main.rs"
+required-features = ["std"]
 
 [dependencies]
 
@@ -19,7 +25,7 @@ rp2040-boot2 = { version = "0.3.0", optional = true }
 cortex-m-rt = { version = "0.7.5", optional = true }
 
 # our dependencies
-embedded-hal = { version = "1.0.0", optional = true }
+embedded-hal = { version = "1.0.0" }
 embedded-io = "0.6.1"
 defmt = { version = "1.0.1", optional = true }
 defmt-rtt = { version = "1.0.0", optional = true }
@@ -46,27 +52,11 @@ toml = { version = "0.9.6", optional = true }
 louvre = { version = "0.2.1", optional = true }
 sun-times = { version = "0.2.0", optional = true }
 log = { version = "0.4.28", optional = true }
+codec = { path = "../cptv-tools/cptv-codec-rs", optional = true }
 
 [features]
-
 # This is the set of features we enable by default
 default = ["no-std"]
-
-no-std = [
-    "cortex-m",
-    "embedded-hal",
-    "boot2",
-    "rt",
-    "critical-section-impl",
-    "rom-func-cache",
-    "rom-v2-intrinsics",
-    "panic-probe/print-defmt",
-    "defmt",
-    "dep:defmt",
-    "dep:defmt-rtt",
-    "dep:panic-probe",
-    "dep:rp2040-hal",
-]
 
 # critical section that is safe for multicore use
 critical-section-impl = ["rp2040-hal/critical-section-impl"]
@@ -92,6 +82,21 @@ disable-intrinsics = ["rp2040-hal/disable-intrinsics"]
 # This enables ROM functions for f64 math that were not present in the earliest RP2040s
 rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
 
+no-std = [
+    "cortex-m",
+    "boot2",
+    "rt",
+    "critical-section-impl",
+    "rom-func-cache",
+    "rom-v2-intrinsics",
+    "panic-probe/print-defmt",
+    "defmt",
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "dep:panic-probe",
+    "dep:rp2040-hal",
+]
+
 std = [
     "dep:serde",
     "dep:louvre",
@@ -99,7 +104,9 @@ std = [
     "dep:sun-times",
     "dep:log",
     "dep:chrono-tz",
-    "byteorder/std"
+    "dep:codec",
+    "byteorder/std",
+    "serde/derive"
 ]
 
 # cargo build/run
@@ -136,9 +143,8 @@ debug-assertions = false
 opt-level = 0
 overflow-checks = false
 
-# cargo test
+# cargo tests
 [profile.test]
-default = ["std"]
 codegen-units = 1
 debug = 2
 debug-assertions = true
@@ -146,7 +152,7 @@ incremental = false
 opt-level = 3
 overflow-checks = true
 
-# cargo test --release
+# cargo tests --release
 [profile.bench]
 codegen-units = 1
 debug = 2

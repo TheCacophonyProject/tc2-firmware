@@ -1,31 +1,25 @@
 use crate::attiny_rtc_i2c::{MainI2C, RecordingRequestType};
-use crate::bsp;
-use crate::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{Event, EventLogger};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
+use crate::re_exports::bsp::hal::Watchdog;
+use crate::re_exports::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
 use crate::synced_date_time::SyncedDateTime;
-use crate::utils::restart;
-use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
 
-#[cfg(feature = "no-std")]
-use defmt::{error, info, warn};
+use crate::re_exports::bsp::hal::dma::DMAExt;
+use crate::re_exports::bsp::hal::gpio::{
+    FunctionNull, Pin, PullDown,
+    bank0::{Gpio0, Gpio1},
+};
+use crate::re_exports::bsp::hal::pio::PIO;
+use crate::re_exports::bsp::hal::pio::SM1;
+use crate::re_exports::bsp::hal::pio::UninitStateMachine;
+use crate::re_exports::log::{error, info, warn};
 use fugit::HertzU32;
-use gpio::FunctionNull;
-use gpio::bank0::{Gpio0, Gpio1};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
-use rp2040_hal::dma::DMAExt;
-use rp2040_hal::gpio;
-use rp2040_hal::gpio::PullDown;
-use rp2040_hal::pio::PIO;
-use rp2040_hal::pio::SM1;
-use rp2040_hal::pio::UninitStateMachine;
-
 pub const AUDIO_DEV_MODE: bool = false;
 
 fn send_camera_connect_info(
@@ -59,8 +53,8 @@ pub fn record_audio(
     mut i2c: MainI2C,
     config: &DeviceConfig,
     system_clock_freq: HertzU32,
-    gpio0: gpio::Pin<Gpio0, FunctionNull, PullDown>,
-    gpio1: gpio::Pin<Gpio1, FunctionNull, PullDown>,
+    gpio0: Pin<Gpio0, FunctionNull, PullDown>,
+    gpio1: Pin<Gpio1, FunctionNull, PullDown>,
     mut watchdog: Watchdog,
     recording_request_type: RecordingRequestType,
     mut fs: OnboardFlash,
@@ -94,8 +88,8 @@ pub fn record_audio(
 
     let dma_channels = peripherals.DMA.split(&mut peripherals.RESETS);
     let mut microphone = PdmMicrophone::new(
-        gpio0.into_function().into_pull_type(),
-        gpio1.into_function().into_pull_type(),
+        gpio0.reconfigure(),
+        gpio1.reconfigure(),
         system_clock_freq,
         pio1,
         sm1,
@@ -119,7 +113,7 @@ pub fn record_audio(
         info!("Recording failed, restarting and will try again");
     } else {
         // If the audio recording succeeded, we'll restart and possibly offload if
-        // this was a user-requested test recording.
+        // this was a user-requested tests recording.
         events.log(Event::EndedRecording, &time, &mut fs);
         watchdog.feed();
         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {

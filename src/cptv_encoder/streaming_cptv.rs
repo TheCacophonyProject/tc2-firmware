@@ -1,5 +1,5 @@
-use crate::FIRMWARE_VERSION;
 use crate::byte_slice_cursor::CursorMut;
+use crate::constants::FIRMWARE_VERSION;
 use crate::cptv_encoder::bit_cursor::BitCursor;
 use crate::cptv_encoder::huffman::HuffmanEntry;
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_HEIGHT_U32, FRAME_WIDTH, FRAME_WIDTH_U32};
@@ -8,14 +8,10 @@ use crate::lepton_telemetry::Telemetry;
 use crate::onboard_flash::{
     BlockIndex, FileType, OnboardFlash, RecordingFileType, RecordingFileTypeDetails,
 };
+use crate::re_exports::log::info;
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::fmt::Write;
-
-#[cfg(feature = "no-std")]
-use defmt::info;
-#[cfg(feature = "std")]
-use log::info;
 
 const NUM_STATUS_RECORDING_FRAMES: u32 = 18;
 
@@ -847,8 +843,8 @@ impl Cptv2Header {
                     info!("Creating shutdown status recording");
                     MaybeZeroTerminatedString::new_with_bytes("status: shutdown".as_bytes())
                 } else {
-                    info!("Creating user requested test recording");
-                    MaybeZeroTerminatedString::new_with_bytes("test: true".as_bytes())
+                    info!("Creating user requested tests recording");
+                    MaybeZeroTerminatedString::new_with_bytes("tests: true".as_bytes())
                 };
 
                 Some(status)

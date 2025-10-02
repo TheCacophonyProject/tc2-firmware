@@ -1,11 +1,6 @@
 use crate::lepton::FFCStatus;
+use crate::re_exports::log::warn;
 use byteorder::{ByteOrder, LittleEndian};
-
-#[cfg(feature = "no-std")]
-use defmt::warn;
-
-#[cfg(feature = "std")]
-use log::warn;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "no-std", derive(defmt::Format))]

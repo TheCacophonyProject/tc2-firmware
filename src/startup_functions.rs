@@ -3,13 +3,13 @@ use crate::attiny_rtc_i2c::{
     Tc2AgentState,
 };
 use crate::audio_task::AUDIO_DEV_MODE;
-use crate::bsp::pac::RESETS;
 use crate::device_config::{AudioMode, DeviceConfig};
-use crate::event_logger::Event::{AudioRecordingFailed, EndedRecording};
 use crate::event_logger::{Event, EventLogger, LoggerEvent, NewConfigInfo, WakeReason};
 use crate::ext_spi_transfers::ExtSpiTransfers;
 use crate::frame_processing::THERMAL_DEV_MODE;
 use crate::onboard_flash::{FileType, OnboardFlash};
+use crate::re_exports::bsp::pac::RESETS;
+use crate::re_exports::cortex_m::prelude::*;
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
@@ -18,7 +18,6 @@ use crate::sub_tasks::{
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::restart;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Timelike, Utc};
-use cortex_m::prelude::*;
 
 #[cfg(feature = "no-std")]
 use defmt::{error, info, warn};
@@ -26,9 +25,9 @@ use defmt::{error, info, warn};
 use log::{error, info, warn};
 
 use crate::formatted_time::FormattedNZTime;
+use crate::re_exports::bsp::hal::{Timer, Watchdog};
+use crate::re_exports::bsp::pac::DMA;
 use picorand::{PicoRandGenerate, RNG, WyRand};
-use rp2040_hal::pac::DMA;
-use rp2040_hal::{Timer, Watchdog};
 
 pub fn get_device_config(
     fs: &mut OnboardFlash,
@@ -172,7 +171,6 @@ pub fn validate_scheduled_alarm(
     i2c: &mut MainI2C,
     events: &mut EventLogger,
     scheduled_alarm: &Option<ScheduledAlarmTime>,
-    watchdog: &mut Watchdog,
 ) -> bool {
     if scheduled_alarm.is_none() {
         warn!("Scheduled alarm is None, rescheduling");
@@ -185,7 +183,7 @@ pub fn validate_scheduled_alarm(
                 error!("Couldn't schedule alarm: {}", e);
             }
         }
-        //restart(watchdog);
+        // NOTE: Return and restart
         return true;
     }
 
@@ -198,7 +196,8 @@ pub fn validate_scheduled_alarm(
             }
             Err(e) => {
                 error!("Couldn't schedule alarm: {}", e);
-                return true; //restart(watchdog);
+                // NOTE: Return and restart
+                return true;
             }
         }
     }
@@ -271,9 +270,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     let rpi_is_awake = i2c
         .get_camera_state()
         .is_ok_and(CameraState::pi_is_waking_or_awake)
-        && i2c
-            .get_tc2_agent_state()
-            .is_ok_and(|state| state.is_ready());
+        && i2c.get_tc2_agent_state().is_ok_and(Tc2AgentState::is_ready);
 
     if rpi_is_awake {
         info!("rPi is awake and ready");

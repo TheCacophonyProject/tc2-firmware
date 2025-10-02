@@ -4,41 +4,34 @@
 use crate::attiny_rtc_i2c::{
     CameraState, MainI2C, RecordingMode, RecordingRequestType, RecordingTypeDetail,
 };
-use crate::bsp::pac::{DMA, Peripherals};
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::device_config::{DeviceConfig, RecordingWindow};
 use crate::event_logger::{DiscardedRecordingInfo, Event, EventLogger};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage, RPI_TRANSFER_HEADER_LENGTH};
+use crate::formatted_time::FormattedNZTime;
 use crate::lepton::{FFCStatus, LeptonPins};
+use crate::lepton_task::lepton_core1_task;
+use crate::lepton_telemetry::Telemetry;
 use crate::motion_detector::{MotionTracking, track_motion};
 use crate::onboard_flash::{FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
+use crate::re_exports::bsp;
+use crate::re_exports::bsp::hal::multicore::{Multicore, Stack};
+use crate::re_exports::bsp::hal::rosc::RingOscillator;
+use crate::re_exports::bsp::hal::{Sio, Watchdog};
+use crate::re_exports::bsp::pac::RESETS;
+use crate::re_exports::bsp::pac::{DMA, Peripherals};
+use crate::re_exports::log::{error, info, warn};
+use crate::synced_date_time::SyncedDateTime;
+use crate::utils::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Duration, Utc};
 use core::cell::RefCell;
-
-use crate::bsp;
-use crate::formatted_time::FormattedNZTime;
-use crate::lepton_task::lepton_core1_task;
-use crate::lepton_telemetry::Telemetry;
-use crate::synced_date_time::SyncedDateTime;
-use crate::utils::{extend_lifetime_generic, extend_lifetime_generic_mut};
 use crc::{CRC_16_XMODEM, Crc};
 use critical_section::Mutex;
-
-#[cfg(feature = "no-std")]
-use defmt::{assert_eq, error, info, warn};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
-
 use embedded_hal::delay::DelayNs;
 use fugit::HertzU32;
-use rp2040_hal::clocks::ClocksManager;
-use rp2040_hal::multicore::{Multicore, Stack};
-use rp2040_hal::pac::RESETS;
-use rp2040_hal::rosc::RingOscillator;
-use rp2040_hal::{Clock, Sio, Watchdog};
 
 pub const NUM_LEPTON_SEGMENTS: usize = 4;
 pub const NUM_LINES_PER_LEPTON_SEGMENT: usize = 61;
@@ -119,8 +112,8 @@ enum StatusRecordingState {
 }
 
 #[cfg(feature = "std")]
-impl std::fmt::Display for StatusRecordingState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for StatusRecordingState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
@@ -219,7 +212,7 @@ pub fn record_thermal(
     lepton_pins: LeptonPins,
     watchdog: Watchdog,
     system_clock_freq: HertzU32,
-    clocks: &ClocksManager,
+    peripheral_clock_freq: HertzU32,
     rosc: RingOscillator<bsp::hal::rosc::Enabled>,
     config: &DeviceConfig,
     events: EventLogger,
@@ -247,7 +240,6 @@ pub fn record_thermal(
     })));
     let static_frame_buffer_a = unsafe { extend_lifetime_generic(&frame_buffer_a) };
     let static_frame_buffer_b = unsafe { extend_lifetime_generic(&frame_buffer_b) };
-    let peripheral_clock_freq = clocks.peripheral_clock.freq();
 
     watchdog.feed();
     watchdog.disable();
@@ -255,7 +247,7 @@ pub fn record_thermal(
     let _ = core_1.spawn(core1_stack.take().unwrap(), move || {
         lepton_core1_task(
             lepton_pins,
-            watchdog,
+            &watchdog,
             system_clock_freq,
             peripheral_clock_freq,
             &rosc,
@@ -278,7 +270,7 @@ pub fn record_thermal(
         time,
         current_recording_window,
         recording_mode,
-    )
+    );
 }
 type LeptonVersion = ((u8, u8, u8), (u8, u8, u8));
 fn maybe_do_startup_handshake(
@@ -466,8 +458,7 @@ pub fn thermal_motion_task(
         assert_eq!(
             input,
             Core0Task::ReceiveFrame.into(),
-            "Got unknown fifo input to core1 task loop {}",
-            input
+            "Got unknown fifo input to core1 task loop {input}",
         );
 
         // Get the currently selected buffer to transfer/write to disk.
@@ -601,7 +592,7 @@ pub fn thermal_motion_task(
                 && test_recording.is_some()
                 && !fs.is_nearly_full_for_thermal_recordings()
             {
-                // Take test recording.
+                // Take tests recording.
                 test_recording_in_progress = test_recording.take();
                 should_start_new_recording = true;
             }
@@ -645,7 +636,7 @@ pub fn thermal_motion_task(
                     info!("Making status recording {}", bk.status_recording);
                 } else if test_recording_in_progress.is_some() {
                     info!(
-                        "Making user-requested test recording {:?}",
+                        "Making user-requested tests recording {:?}",
                         test_recording_in_progress
                     );
                 }
@@ -715,7 +706,7 @@ pub fn thermal_motion_task(
                     // Clear out prev frame before starting a new recording stream.
                     prev_frame_2.fill(0);
                     if test_recording_in_progress.take().is_some() {
-                        // Finished requested test recording, restart now.
+                        // Finished requested tests recording, restart now.
                         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {
                             error!("Failed to clear mode flags {}", e);
                         }
@@ -1013,7 +1004,7 @@ fn do_periodic_bookkeeping(
             warn!("Make shutdown status recording");
             bk.status_recording.next_state();
         } else if user_requested_recording.is_some() {
-            // Do nothing, there's a test recording in progress
+            // Do nothing, there's a tests recording in progress
         } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time)
             && scheduled_alarm.has_triggered()
         {
@@ -1110,9 +1101,8 @@ fn do_periodic_bookkeeping(
                     did_execute: true,
                     needs_restart: true,
                 };
-            } else {
-                warn!("Pi is still awake, so rp2040 must stay awake");
             }
+            warn!("Pi is still awake, so rp2040 must stay awake");
         } else if is_inside_recording_window && config.use_high_power_mode() {
             if camera_state.is_ok_and(CameraState::pi_is_powered_off) {
                 info!("In high power window and pi is powered off, so restart");
@@ -1137,9 +1127,8 @@ fn do_periodic_bookkeeping(
                     did_execute: true,
                     needs_restart: true,
                 };
-            } else {
-                warn!("Pi is still awake, so rp2040 must stay awake");
             }
+            warn!("Pi is still awake, so rp2040 must stay awake");
         }
     } else if every_minute_and_a_half && let Err(e) = i2c.attiny_keep_alive() {
         error!("Failed to send keep alive: {}", e);
