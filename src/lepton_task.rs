@@ -9,11 +9,11 @@ use crate::re_exports::bsp::hal::{Sio, Timer, Watchdog};
 use crate::re_exports::bsp::pac::Peripherals;
 use crate::re_exports::bsp::pac::RESETS;
 use crate::re_exports::cortex_m::asm::nop;
+use crate::re_exports::critical_section;
 use crate::re_exports::log::{assert_eq, error, info, warn};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use crc::{CRC_16_XMODEM, Crc};
-use critical_section::Mutex;
 use fugit::{HertzU32, RateExtU32};
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
@@ -148,8 +148,8 @@ pub fn frame_acquisition_loop(
     peripheral_clock_freq: HertzU32,
     system_clock_freq: HertzU32,
     resets: &mut RESETS,
-    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local: &'static critical_section::Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static critical_section::Mutex<RefCell<Option<&mut FrameBuffer>>>,
     watchdog: &Watchdog,
 ) -> ! {
     let mut selected_frame_buffer = 0;

@@ -844,7 +844,7 @@ impl Cptv2Header {
                     MaybeZeroTerminatedString::new_with_bytes("status: shutdown".as_bytes())
                 } else {
                     info!("Creating user requested tests recording");
-                    MaybeZeroTerminatedString::new_with_bytes("tests: true".as_bytes())
+                    MaybeZeroTerminatedString::new_with_bytes("test: true".as_bytes())
                 };
 
                 Some(status)

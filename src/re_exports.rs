@@ -1,11 +1,15 @@
-#[cfg(not(feature = "std"))]
 #[cfg(feature = "no-std")]
-pub(crate) use crate::bsp;
-
+pub use crate::bsp;
 #[cfg(feature = "std")]
 use crate::tests;
+#[cfg(not(feature = "std"))]
+pub use cortex_m;
+#[cfg(not(feature = "std"))]
+pub use critical_section;
 #[cfg(feature = "std")]
-pub use tests::stubs::fake_bsp as bsp;
+pub use tests::stubs::bsp;
+#[cfg(feature = "std")]
+pub use tests::stubs::fake_critical_section as critical_section;
 
 #[allow(unused)]
 pub mod log {
@@ -16,13 +20,10 @@ pub mod log {
     #[cfg(feature = "std")]
     pub use core::unreachable;
     #[cfg(not(feature = "std"))]
-    pub use defmt::{assert, assert_eq, error, info, trace, unreachable, warn};
+    pub use defmt::{assert, assert_eq, debug, error, info, trace, unreachable, warn};
     #[cfg(feature = "std")]
-    pub use log::{error, info, trace, warn};
+    pub use log::{debug, error, info, trace, warn};
 }
-
-#[cfg(not(feature = "std"))]
-pub use cortex_m;
 
 #[cfg(feature = "std")]
 pub mod cortex_m {

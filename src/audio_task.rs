@@ -5,11 +5,6 @@ use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::onboard_flash::OnboardFlash;
 use crate::pdm_microphone::PdmMicrophone;
 use crate::re_exports::bsp::hal::Watchdog;
-use crate::re_exports::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
-use crate::synced_date_time::SyncedDateTime;
-use byteorder::{ByteOrder, LittleEndian};
-use crc::{CRC_16_XMODEM, Crc};
-
 use crate::re_exports::bsp::hal::dma::DMAExt;
 use crate::re_exports::bsp::hal::gpio::{
     FunctionNull, Pin, PullDown,
@@ -18,7 +13,11 @@ use crate::re_exports::bsp::hal::gpio::{
 use crate::re_exports::bsp::hal::pio::PIO;
 use crate::re_exports::bsp::hal::pio::SM1;
 use crate::re_exports::bsp::hal::pio::UninitStateMachine;
+use crate::re_exports::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
 use crate::re_exports::log::{error, info, warn};
+use crate::synced_date_time::SyncedDateTime;
+use byteorder::{ByteOrder, LittleEndian};
+use crc::{CRC_16_XMODEM, Crc};
 use fugit::HertzU32;
 pub const AUDIO_DEV_MODE: bool = false;
 

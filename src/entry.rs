@@ -85,11 +85,10 @@ pub fn real_main() {
         // FIXME: Basically we'll be in a restart loop if the attiny version is not
         //  what we expect.  Is this unrecoverable?
         error!("{}", e);
-        //restart(&mut watchdog);
+        // NOTE: Returns and restarts if ATTINY version is not as expected.
         return;
     }
     let mut i2c = i2c_result.unwrap();
-
     if let Err(e) = i2c.attiny_keep_alive() {
         error!("Failed to send keep alive: {}", e);
     }
@@ -168,7 +167,12 @@ pub fn real_main() {
 
     let mut events = EventLogger::new(&mut fs);
 
-    let time = get_synced_time(&mut i2c, &mut events, &mut fs, &mut watchdog, timer).unwrap();
+    let time = get_synced_time(&mut i2c, &mut events, &mut fs, &mut watchdog, timer);
+    if let Err(e) = time {
+        error!("{}", e);
+        return;
+    }
+    let time = time.unwrap();
     info!("Startup time {}", time);
 
     // let er = fs.erase_good_blocks();
@@ -189,7 +193,9 @@ pub fn real_main() {
     );
     if let Err(e) = dc_result {
         error!("{:?}", e);
-        //restart(&mut watchdog);
+
+        // FIXME: Need to make sure we're writing to fake flash to drive this forwards.
+        // NOTE: returns and restarts if we can't get a config.
         return;
     }
     let (config, prioritise_frame_preview, config_was_updated, force_offload_now) =
@@ -260,18 +266,18 @@ pub fn real_main() {
             if let Err(e) = i2c.clear_and_disable_alarm(&time) {
                 error!("{}", e);
                 timer.delay_ms(100);
-                //restart(&mut watchdog);
+                // NOTE: Returns and restarts if we can't clear the alarm.
                 return;
             }
         }
         if alarm_out_of_bounds {
             timer.delay_ms(100);
-            //restart(&mut watchdog);
+            // NOTE: Returns and restarts if the alarm that was set is out of bounds.
             return;
         }
     }
 
-    if validate_scheduled_alarm(
+    if !validate_scheduled_alarm(
         &config,
         &mut fs,
         &time,
@@ -279,6 +285,7 @@ pub fn real_main() {
         &mut events,
         &scheduled_alarm,
     ) {
+        // NOTE: If the alarm was invalid, a new alarm will be set, and we'll restart.
         return;
     }
 
@@ -325,7 +332,7 @@ pub fn real_main() {
     );
 
     warn!("Recording mode: {:?}", recording_mode);
-    maybe_offload_files_and_events_on_startup(
+    if maybe_offload_files_and_events_on_startup(
         recording_mode,
         prioritise_frame_preview,
         force_offload_now,
@@ -338,7 +345,10 @@ pub fn real_main() {
         &mut i2c,
         &mut pi_spi,
         &mut watchdog,
-    );
+    ) {
+        // Got restart
+        return;
+    }
     if let Err(e) = i2c.attiny_keep_alive() {
         error!("Failed to send keep alive: {}", e);
     }
@@ -346,7 +356,7 @@ pub fn real_main() {
         && scheduled_alarm.has_triggered()
     {
         warn!("Alarm triggered during offload, restarting");
-        // If we triggered an alarm during offload, restart
+        // NOTE: If we triggered an alarm during offload, restart
         return;
     }
 
@@ -401,12 +411,23 @@ pub fn real_main() {
         // If we're not doing an audio recording, check if we need to shutdown now.
         let inside_thermal_window = config
             .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
+
+        let alarm_is_in_the_future = scheduled_alarm.date_time() > time.date_time();
+        let alarm_is_in_the_past = !alarm_is_in_the_future;
+
+        // FIXME: If the alarm is in the past, shouldn't it fail validation, and a new one be created?
+        let alarm_is_not_imminent = alarm_is_in_the_past
+            || time.date_time() + Duration::minutes(2) < scheduled_alarm.date_time();
+        warn!(
+            "Alarm is in the future: {}, is not imminent: {}",
+            alarm_is_in_the_future, alarm_is_not_imminent
+        );
         let should_shutdown = recording_mode == RecordingMode::None
+            && !inside_thermal_window
+            && alarm_is_not_imminent
             && i2c
                 .get_camera_state()
-                .is_ok_and(CameraState::pi_is_powered_off)
-            && !inside_thermal_window
-            && time.date_time() + Duration::minutes(2) < scheduled_alarm.date_time();
+                .is_ok_and(CameraState::pi_is_powered_off);
         if should_shutdown {
             info!("Tell attiny to shut us down");
             events.log(Event::Rp2040Sleep, &time, &mut fs);
@@ -414,10 +435,17 @@ pub fn real_main() {
             if let Err(e) = i2c.tell_attiny_to_power_down_rp2040() {
                 error!("Failed to tell attiny to power down: {}", e);
             } else {
+                // NOTE: Return and restart for testing purposes, but in real
+                // operation we'll get powered down.
+                timer.delay_ms(500);
                 return;
             }
         } else if recording_mode == RecordingMode::None && !inside_thermal_window {
-            info!("Entering thermal mode because pi is on");
+            if alarm_is_not_imminent {
+                info!("Entering thermal mode because pi is on");
+            } else {
+                info!("Entering thermal mode because alarm is imminent");
+            }
         } else if recording_mode == RecordingMode::None && inside_thermal_window {
             info!("Entering thermal mode because inside recording window");
         } else if let RecordingMode::Thermal(_) = recording_mode {

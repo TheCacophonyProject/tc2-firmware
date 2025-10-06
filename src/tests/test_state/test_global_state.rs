@@ -7,6 +7,7 @@ use crate::tests::stubs::fake_rpi_event_logger::{FileType, LoggerEvent};
 use crate::tests::stubs::fake_rpi_recording_state::RecordingState;
 use crate::tests::stubs::fake_shared_spi::{StorageBlock, StoragePage};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use codec::decode::CptvFrame;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 use std::vec;
@@ -20,12 +21,27 @@ pub struct RtcAlarm {
     pub enabled: u8,
 }
 
+impl RtcAlarm {
+    pub fn is_initialised(&self) -> bool {
+        !(self.minutes == 0
+            && self.hours == 0
+            && self.day == 0
+            && self.weekday_alarm_mode == 0
+            && self.enabled == 0)
+    }
+}
+
 pub static CURRENT_TIME: LazyLock<Arc<Mutex<chrono::DateTime<Utc>>>> = LazyLock::new(|| {
     Arc::new(Mutex::new(Utc.from_utc_datetime(&NaiveDateTime::new(
         NaiveDate::from_ymd_opt(2025, 9, 23).unwrap(),
         NaiveTime::from_hms_opt(2, 9, 0).unwrap(),
     ))))
 });
+pub static LAST_FRAME: LazyLock<Arc<Mutex<Option<CptvFrame>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+
+pub static FRAME_NUM: LazyLock<Arc<Mutex<u32>>> = LazyLock::new(|| Arc::new(Mutex::new(0)));
+
 pub static ATTINY_FIRMWARE_VERSION: LazyLock<Arc<Mutex<u8>>> =
     LazyLock::new(|| Arc::new(Mutex::new(1)));
 
@@ -93,10 +109,26 @@ impl core::fmt::Debug for EventOffload {
     }
 }
 
+pub static ROSC_DRIVE_ITERATOR: LazyLock<Arc<Mutex<usize>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(0)));
+
 pub static FILES_OFFLOADED: LazyLock<Arc<Mutex<Vec<FileOffload>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 pub static EVENTS_OFFLOADED: LazyLock<Arc<Mutex<Vec<EventOffload>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
 pub static DEVICE_CONFIG: LazyLock<Arc<Mutex<Option<DeviceConfig>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+
+pub static THERMAL_TRIGGER_OFFSETS_MINS: LazyLock<Arc<Mutex<Option<Vec<u32>>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+
+pub static CPTV_FILES: LazyLock<Arc<Mutex<Option<Vec<String>>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+pub static CURRENT_CPTV_FILE: LazyLock<Arc<Mutex<Option<String>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+pub static CPTV_DECODER: LazyLock<Arc<Mutex<Option<codec::decode::CptvDecoder<std::fs::File>>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
+
+pub static CURRENT_THERMAL_WINDOW: LazyLock<Arc<Mutex<Option<(NaiveDateTime, NaiveDateTime)>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));

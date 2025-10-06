@@ -1,7 +1,7 @@
 use crate::device_config::get_datetime_utc;
 use crate::formatted_time::FormattedNZTime;
 use crate::re_exports::bsp::pac::I2C1;
-use crate::re_exports::log::{error, info, warn};
+use crate::re_exports::log::{debug, error, info, warn};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
@@ -357,7 +357,7 @@ pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
     residue: 0x0000,
 };
 
-fn decode_bcd(input: u8) -> u8 {
+pub fn decode_bcd(input: u8) -> u8 {
     let digits: u8 = input & 0xf;
     let tens: u8 = (input >> 4) & 0x7;
     10 * tens + digits
@@ -758,7 +758,7 @@ impl MainI2C {
                     timer,
                 );
                 if print {
-                    info!("Synced DateTime with RTC {}", synced_time);
+                    debug!("Synced DateTime with RTC {}", synced_time);
                 }
 
                 Ok(synced_time)
@@ -997,7 +997,7 @@ impl Eeprom {
             info!("No EEPROM data");
             false
         } else if self.version() != 0xca {
-            info!(
+            debug!(
                 "Incorrect first byte got {} should be {}",
                 self.version(),
                 0xca

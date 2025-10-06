@@ -1,9 +1,6 @@
-#[cfg(feature = "std")]
-#[cfg(not(target_arch = "thumbv6m"))]
+#![cfg(test)]
+mod helpers;
 pub mod stubs;
-
-#[cfg(feature = "std")]
 pub(crate) mod test_state;
-
-#[cfg(feature = "std")]
+mod testing;
 extern crate std;

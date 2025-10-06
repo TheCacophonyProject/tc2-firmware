@@ -1,9 +1,10 @@
 #![cfg_attr(feature = "no-std", no_std)]
+#![cfg(feature = "no-std")]
 #![no_main]
 #![warn(clippy::all, clippy::pedantic)]
 mod attiny_rtc_i2c;
 mod audio_task;
-mod bsp;
+pub mod bsp;
 mod byte_slice_cursor;
 mod clock_utils;
 mod constants;
@@ -31,10 +32,10 @@ mod tests;
 mod utils;
 
 use crate::entry::real_main;
+use crate::re_exports::bsp::entry;
 use crate::re_exports::bsp::hal::Watchdog;
 use crate::re_exports::bsp::pac::Peripherals;
 use crate::utils::restart;
-use bsp::entry;
 use defmt_rtt as _;
 use panic_probe as _;
 

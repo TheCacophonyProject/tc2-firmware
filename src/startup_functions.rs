@@ -6,27 +6,21 @@ use crate::audio_task::AUDIO_DEV_MODE;
 use crate::device_config::{AudioMode, DeviceConfig};
 use crate::event_logger::{Event, EventLogger, LoggerEvent, NewConfigInfo, WakeReason};
 use crate::ext_spi_transfers::ExtSpiTransfers;
+use crate::formatted_time::FormattedNZTime;
 use crate::frame_processing::THERMAL_DEV_MODE;
 use crate::onboard_flash::{FileType, OnboardFlash};
+use crate::re_exports::bsp::hal::{Timer, Watchdog};
+use crate::re_exports::bsp::pac::DMA;
 use crate::re_exports::bsp::pac::RESETS;
 use crate::re_exports::cortex_m::prelude::*;
+use crate::re_exports::log::{error, info, warn};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::sub_tasks::{
     get_existing_device_config_or_config_from_pi_on_initial_handshake, maybe_offload_events,
     offload_all_recordings_and_events, offload_latest_recording,
 };
 use crate::synced_date_time::SyncedDateTime;
-use crate::utils::restart;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Timelike, Utc};
-
-#[cfg(feature = "no-std")]
-use defmt::{error, info, warn};
-#[cfg(feature = "std")]
-use log::{error, info, warn};
-
-use crate::formatted_time::FormattedNZTime;
-use crate::re_exports::bsp::hal::{Timer, Watchdog};
-use crate::re_exports::bsp::pac::DMA;
 use picorand::{PicoRandGenerate, RNG, WyRand};
 
 pub fn get_device_config(
@@ -49,16 +43,20 @@ pub fn get_device_config(
         // We need to wake up the rpi and get a config
         wake_raspberry_pi(i2c, timer, Some(watchdog), None);
     }
+    let dc_result = get_existing_device_config_or_config_from_pi_on_initial_handshake(
+        fs,
+        pi_spi,
+        resets,
+        dma,
+        device_config,
+        event_count,
+    );
+    if let Err(e) = dc_result {
+        error!("{}", e);
+        return Err(());
+    }
     let (device_config, device_config_was_updated, prioritise_frame_preview, force_offload_now) =
-        get_existing_device_config_or_config_from_pi_on_initial_handshake(
-            fs,
-            pi_spi,
-            resets,
-            dma,
-            device_config,
-            event_count,
-            watchdog,
-        );
+        dc_result.unwrap();
     if let Some(device_config) = device_config {
         if device_config_was_updated {
             events.log(
@@ -130,9 +128,7 @@ pub fn get_synced_time(
                     );
 
                     // IS there a better way we can recover if I2C isn't working?
-
-                    error!("{}", e);
-                    restart(watchdog);
+                    return Err(e);
                 }
             }
             Ok(time) => {
@@ -184,7 +180,7 @@ pub fn validate_scheduled_alarm(
             }
         }
         // NOTE: Return and restart
-        return true;
+        return false;
     }
 
     let scheduled_alarm = scheduled_alarm.as_ref().unwrap();
@@ -197,7 +193,7 @@ pub fn validate_scheduled_alarm(
             Err(e) => {
                 error!("Couldn't schedule alarm: {}", e);
                 // NOTE: Return and restart
-                return true;
+                return false;
             }
         }
     }
@@ -217,7 +213,7 @@ pub fn validate_scheduled_alarm(
             );
         }
     }
-    false
+    true
 }
 
 #[allow(clippy::too_many_lines)]
@@ -234,7 +230,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     i2c: &mut MainI2C,
     pi_spi: &mut ExtSpiTransfers,
     watchdog: &mut Watchdog,
-) {
+) -> bool {
     /*
     There are a number of reasons we may or may not want to offload files and events on startup.
     If the rPi is already awake, we want to offload
@@ -276,10 +272,9 @@ pub fn maybe_offload_files_and_events_on_startup(
         info!("rPi is awake and ready");
     }
     let current_window = config.next_or_current_recording_window(&time.date_time());
-    if let Err(e) = &current_window {
-        error!("Couldn't get current window: {}", e);
+    if current_window.is_err() {
         // FIXME: Log invalid window?  Use default window?
-        restart(watchdog);
+        return true;
     }
     let current_window = current_window.unwrap();
     let is_inside_thermal_recording_window =
@@ -418,7 +413,7 @@ pub fn maybe_offload_files_and_events_on_startup(
             if !offload_latest_recording(fs, pi_spi, resets, dma, i2c, events, time, watchdog) {
                 // Offload failed, restart and try again.
                 error!("File offload failed, restarting");
-                restart(watchdog);
+                return true;
             }
         } else if prioritise_frame_preview {
             // Just offload the bare minimum of files to free up space, and all events if needed.
@@ -439,7 +434,7 @@ pub fn maybe_offload_files_and_events_on_startup(
                 } else {
                     // Offload failed, restart and try again.
                     error!("File offload failed, restarting");
-                    restart(watchdog);
+                    return true;
                 }
             }
         } else {
@@ -449,7 +444,7 @@ pub fn maybe_offload_files_and_events_on_startup(
             ) {
                 // Failed to offload, restart and try again
                 error!("File offload to pi failed, restarting");
-                restart(watchdog);
+                return true;
             }
             // Offload events again *after* offloading all recordings, so we don't have to wait
             // for info about recording offload success.
@@ -459,6 +454,7 @@ pub fn maybe_offload_files_and_events_on_startup(
         // Make sure we always get events in high power mode with no audio recording.
         maybe_offload_events(pi_spi, resets, dma, events, fs, time, watchdog);
     }
+    false
 }
 
 fn duration_since_prev_offload_greater_than_23hrs(

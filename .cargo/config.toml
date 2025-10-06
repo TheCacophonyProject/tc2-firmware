@@ -55,7 +55,7 @@ rustflags = [
 target = "thumbv6m-none-eabi"
 
 [alias]
-test-host = "test --target=x86_64-unknown-linux-gnu"
+test-host = "test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu"
 
 [env]
 DEFMT_LOG = "debug"
