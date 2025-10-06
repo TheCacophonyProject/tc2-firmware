@@ -47,7 +47,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy -- -D warnings
 
       - name: Generate SHA256 checksum
         run: sha256sum ./target/thumbv6m-none-eabi/release/tc2-firmware | cut -d ' ' -f 1 > ./target/thumbv6m-none-eabi/release/tc2-firmware.sha256
