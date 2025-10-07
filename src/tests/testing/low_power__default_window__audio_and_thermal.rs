@@ -6,11 +6,11 @@ use chrono::Duration;
 
 #[test]
 fn low_power_mode_dusk_till_dawn_audio_and_thermal() {
+    env_logger::init();
     // Trigger thermal videos at 10, 150, 270 minutes into a thermal window.
     let thermal_trigger_offsets = Some(vec![5, 150, 270]);
     // Cptv files to loop through for testing.
     let cptv_files = Some(vec![String::from("./test-fixtures/cat-trigger.cptv")]);
-    env_logger::init();
     let start_time = { *CURRENT_TIME.lock().unwrap() };
     let end_time = start_time + Duration::hours(48);
 
