@@ -65,11 +65,32 @@ pub struct SimState {
     pub(crate) current_test_window: (DateTime<Utc>, DateTime<Utc>),
 }
 
-#[derive(Debug)]
 pub struct FileOffload {
     pub size: usize,
     pub file_type: FileType,
+    pub recording_time: DateTime<Utc>,
     pub offloaded_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for FileOffload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "{}",
+            format!(
+                r#"FileOffload {{
+    size: {},
+    file_type: {:?},
+    recording_time: {},
+    offloaded_at: {}
+}}"#,
+                self.size,
+                self.file_type,
+                FormattedNZTime(self.recording_time),
+                FormattedNZTime(self.offloaded_at)
+            )
+        )
+    }
 }
 
 pub struct EventOffload {
@@ -79,7 +100,25 @@ pub struct EventOffload {
 
 impl core::fmt::Debug for EventOffload {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "event offload at {}", FormattedNZTime(self.offloaded_at))
+        write!(
+            f,
+            "{}",
+            format!(
+                r#"EventOffload {{
+    event: LoggerEvent {{
+        event: {:?},
+        time: {}
+    }},
+    offloaded_at: {},
+}}"#,
+                self.event.event,
+                FormattedNZTime(
+                    DateTime::from_timestamp_millis(self.event.timestamp / 1000)
+                        .unwrap_or(chrono::Local::now().with_timezone(&Utc))
+                ),
+                FormattedNZTime(self.offloaded_at)
+            )
+        )
     }
 }
 

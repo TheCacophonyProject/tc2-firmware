@@ -51,6 +51,7 @@ pub fn simulate_camera_with_config(
         if now > end_time {
             break;
         }
+        info!("=== Entering test loop at {} ===", FormattedNZTime(now));
         real_main();
     }
 }

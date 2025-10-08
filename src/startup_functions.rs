@@ -184,7 +184,9 @@ pub fn validate_scheduled_alarm(
     }
 
     let scheduled_alarm = scheduled_alarm.as_ref().unwrap();
-    if scheduled_alarm.has_triggered() {
+    if scheduled_alarm.has_triggered()
+        || scheduled_alarm.date_time() < time.date_time() + Duration::minutes(1)
+    {
         info!("Scheduled alarm triggered, scheduling next alarm");
         match schedule_next_recording(time, i2c, fs, events, config) {
             Ok(next_alarm) => {

@@ -643,8 +643,12 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                                 //save_audio_file_to_disk(file, device_config.clone());
                                 info!("Saving audio file {}", file.len());
                                 let current_time = state.current_time;
+                                let audio_recording_time = LittleEndian::read_u64(&file[2..10]);
+                                let recording_time = DateTime::from_timestamp_millis(audio_recording_time as i64 / 1000)
+                                    .unwrap_or(chrono::Local::now().with_timezone(&Utc));
                                 state.files_offloaded.push(FileOffload {
                                     size: file.len(),
+                                    recording_time,
                                     file_type: FileType::AudioScheduled,
                                     offloaded_at: current_time,
                                 });
@@ -657,7 +661,8 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                                 let mut decoder =
                                     CptvDecoder::from(std::io::Cursor::new(&file)).unwrap();
                                 let header = decoder.get_header().unwrap();
-                                info!("CPTV file header: {:#?}", header);
+                                let recording_time = DateTime::from_timestamp_millis(header.timestamp as i64 / 1000)
+                                    .unwrap_or(chrono::Local::now().with_timezone(&Utc));
                                 let cptv_recording_type = if let Some(status) = header.motion_config {
                                     match status.as_string().as_ref() {
                                         "status: shutdown" => FileType::CptvShutdown,
@@ -673,6 +678,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                                 let current_time = state.current_time;
                                 state.files_offloaded.push(FileOffload {
                                     size: file.len(),
+                                    recording_time,
                                     file_type: cptv_recording_type,
                                     offloaded_at: current_time,
                                 });
@@ -697,19 +703,44 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                         if shebang == 1 {
                             //save_audio_file_to_disk(file, device_config.clone());
                             info!("Saving audio file {}", file.len());
+                            let audio_recording_time = LittleEndian::read_u64(&file[2..10]);
+                            let recording_time =
+                                DateTime::from_timestamp_millis(audio_recording_time as i64 / 1000)
+                                    .unwrap_or(chrono::Local::now().with_timezone(&Utc));
+
                             let current_time = state.current_time;
                             state.files_offloaded.push(FileOffload {
                                 size: file.len(),
+                                recording_time,
                                 file_type: FileType::AudioScheduled,
                                 offloaded_at: current_time,
                             });
                         } else {
                             //save_cptv_file_to_disk(file, device_config.output_dir())
+                            // Decode cptv file:
+                            let mut decoder =
+                                CptvDecoder::from(std::io::Cursor::new(&file)).unwrap();
+                            let header = decoder.get_header().unwrap();
+                            let recording_time =
+                                DateTime::from_timestamp_millis(header.timestamp as i64 / 1000)
+                                    .unwrap_or(chrono::Local::now().with_timezone(&Utc));
+                            let cptv_recording_type = if let Some(status) = header.motion_config {
+                                match status.as_string().as_ref() {
+                                    "status: shutdown" => FileType::CptvShutdown,
+                                    "status: startup" => FileType::CptvStartup,
+                                    "test: true" => FileType::CptvUserRequested,
+                                    _ => FileType::CptvScheduled,
+                                }
+                            } else {
+                                FileType::CptvScheduled
+                            };
+
                             info!("Saving cptv file {}", file.len());
                             let current_time = state.current_time;
                             state.files_offloaded.push(FileOffload {
                                 size: file.len(),
-                                file_type: FileType::CptvScheduled,
+                                recording_time,
+                                file_type: cptv_recording_type,
                                 offloaded_at: current_time,
                             });
                         }

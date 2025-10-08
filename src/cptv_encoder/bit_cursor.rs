@@ -86,6 +86,7 @@ impl BitCursor {
     }
 
     pub fn end_aligned(&mut self) -> (bool, ([u8; 4], u8)) {
+        #[allow(clippy::cast_possible_truncation)]
         let num_free_bytes = USER_BUFFER_LENGTH.saturating_sub(self.cursor) as u32;
         // Write as many of these extra bytes as possible into the buffer.
         // We may end up with some remaining bytes we need to flush into the next page.
@@ -125,6 +126,7 @@ impl BitCursor {
                     ..available_extra_bytes as usize + num_remaining_bytes],
             );
         }
+        #[allow(clippy::cast_possible_truncation)]
         (self.is_full(), (remaining_bytes, num_remaining_bytes as u8))
     }
 }

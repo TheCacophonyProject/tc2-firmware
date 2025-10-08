@@ -522,6 +522,7 @@ impl<'a> CptvStream<'a> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn write_gzip_trailer(
         &mut self,
         fs: &mut OnboardFlash,

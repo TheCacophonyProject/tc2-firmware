@@ -4,6 +4,7 @@ use crate::attiny_rtc_i2c::{
     CameraState, EEPROM_I2C_ADDRESS, RTC_ADDRESS, RTC_REG_ALARM_CONTROL, RTC_REG_ALARM_MINUTES,
     RTC_REG_DATETIME_SECONDS, decode_bcd, tc2_agent_state,
 };
+use crate::formatted_time::FormattedNZTime;
 use crate::re_exports::bsp::pac::{I2C0, I2C1, RESETS};
 use crate::re_exports::log::{debug, error, info, warn};
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
@@ -157,7 +158,12 @@ impl<A, B> I2C<I2C1, (A, B)> {
                                         .unwrap();
                                         let utc_datetime =
                                             NaiveDateTime::new(naive_date, naive_time).and_utc();
-                                        // info!("Advancing to alarm time: {:?}", utc_datetime);
+                                        warn!(
+                                            "Shutting down at {}, with wakeup alarm set in {}mins ({})",
+                                            FormattedNZTime(s.current_time),
+                                            (utc_datetime - s.current_time).num_minutes(),
+                                            FormattedNZTime(utc_datetime),
+                                        );
                                         s.current_time = utc_datetime;
                                         // Make sure the alarm is set to "has been triggered".
                                         s.rtc_alarm_state.enabled |= 0b0000_1000;

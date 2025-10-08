@@ -168,8 +168,9 @@ pub fn advance_one_frame() {
                                 minutes_into_thermal_window
                             );
                             info!(
-                                "Current time: {:?}, window start time {:?}",
-                                current_time, start_time
+                                "Current time: {}, window start time {}",
+                                FormattedNZTime(current_time),
+                                FormattedNZTime(start_time)
                             );
                             triggers.retain(|x| *x != minutes_into_thermal_window as u32);
                             s.cptv_decoder = None;

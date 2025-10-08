@@ -288,8 +288,8 @@ impl TryFrom<u16> for LoggerEventKind {
 
 #[derive(Debug)]
 pub struct LoggerEvent {
-    timestamp: i64,
-    event: LoggerEventKind,
+    pub timestamp: i64,
+    pub event: LoggerEventKind,
 }
 
 impl LoggerEvent {
