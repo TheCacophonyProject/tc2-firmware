@@ -94,4 +94,13 @@ to 00:00, or 12:00 to 12:00.
 | Low power  | Relative: Dusk-Dawn      | AudioAndThermal      | `./testing/low_power__default_window__audio_and_thermal.rs`  | 
 | Low power  | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/low_power__fixed_window__audio_and_thermal.rs`    | 
 | Low power  | Absolute: 24/7           | AudioAndThermal      | `./testing/low_power__always_on__audio_and_thermal.rs`       | 
-| Low power  | N/A                      | AudioOnly            | `./testing/low_power__audio_only.rs`                         | 
+| Low power  | N/A                      | AudioOnly            | `./testing/low_power__audio_only.rs`                         |
+
+## Running tests
+
+Run the entire test suite with:
+`cargo test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu --package tc2-firmware`
+Run a single test with a command like:
+`cargo test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu --package tc2-firmware --test tc2-firmware-tests tests::testing::low_power__default_window__audio_and_thermal::low_power_mode_dusk_til_dawn_audio_and_thermal -- --exact`
+
+You may wish to set the the `RUST_LOG` environment variable to `debug` or `info` to see more verbose output.

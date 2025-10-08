@@ -10,12 +10,7 @@ use crate::tests::stubs::fake_rpi_event_logger::{
     DiscardedRecordingInfo, FileType, LoggerEvent, LoggerEventKind, NewConfigInfo, WakeReason,
 };
 use crate::tests::stubs::fake_rpi_recording_state::RecordingMode;
-use crate::tests::test_state::test_global_state::{
-    CURRENT_TIME, DEVICE_CONFIG, ECC_ERROR_ADDRESSES, EVENTS_OFFLOADED, EventOffload,
-    FAKE_PI_RECORDING_STATE, FILE_DOWNLOAD, FILE_DOWNLOAD_START, FILE_PART_COUNT, FILES_OFFLOADED,
-    FLASH_BACKING_STORAGE, FileOffload, PENDING_FORCED_OFFLOAD_REQUEST,
-    PREFER_NOT_TO_OFFLOAD_FILES_NOW,
-};
+use crate::tests::test_state::test_global_state::{EventOffload, FileOffload, TEST_SIM_STATE};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz::Pacific__Auckland;
@@ -108,10 +103,12 @@ impl SpiEnabledPeripheral {
                     Self::get_block_and_page_from_address([address_0, address_1, address_2]);
 
                 // NOTE: was 2112 instead of buffer.len()
-                let mut storage = FLASH_BACKING_STORAGE.lock().unwrap();
-                storage[block_index as usize].inner[page_index as usize].inner
-                    [self.last_page_offset..self.last_page_offset + self.buffer.len()]
-                    .copy_from_slice(&self.buffer);
+                TEST_SIM_STATE.with(|s| {
+                    s.borrow_mut().flash_backing_storage[block_index as usize].inner
+                        [page_index as usize]
+                        .inner[self.last_page_offset..self.last_page_offset + self.buffer.len()]
+                        .copy_from_slice(&self.buffer);
+                });
             }
             PAGE_READ => {
                 let address_0 = bytes[1];
@@ -121,16 +118,17 @@ impl SpiEnabledPeripheral {
                     Self::get_block_and_page_from_address([address_0, address_1, address_2]);
                 self.last_read_address = (block_index, page_index);
                 self.buffer.drain(..);
-                let mut storage = FLASH_BACKING_STORAGE.lock().unwrap();
-                self.buffer.extend_from_slice(
-                    &storage[block_index as usize].inner[page_index as usize].inner,
-                );
-
-                let ecc_error_addresses = ECC_ERROR_ADDRESSES.lock().unwrap();
-                if ecc_error_addresses.contains(&self.last_read_address) {
-                    //println!("Corrupting buffer");
-                    self.buffer[1] = 0x42;
-                }
+                TEST_SIM_STATE.with(|s| {
+                    let s = s.borrow();
+                    self.buffer.extend_from_slice(
+                        &s.flash_backing_storage[block_index as usize].inner[page_index as usize]
+                            .inner,
+                    );
+                    if s.ecc_error_addresses.contains(&self.last_read_address) {
+                        //println!("Corrupting buffer");
+                        self.buffer[1] = 0x42;
+                    }
+                });
             }
             RESET => {
                 self.buffer.drain(..);
@@ -147,13 +145,14 @@ impl SpiEnabledPeripheral {
                 let address_2 = bytes[3];
                 let (block_index, _page_index) =
                     Self::get_block_and_page_from_address([address_0, address_1, address_2]);
-                let mut ecc_error_addresses = ECC_ERROR_ADDRESSES.lock().unwrap();
-                ecc_error_addresses.retain(|(b, p)| *b != block_index);
-                self.last_read_address = (0, 0);
-                let mut storage = FLASH_BACKING_STORAGE.lock().unwrap();
-                for page in &mut storage[block_index as usize].inner {
-                    page.inner.fill(0xff);
-                }
+                TEST_SIM_STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    s.ecc_error_addresses.retain(|(b, p)| *b != block_index);
+                    self.last_read_address = (0, 0);
+                    for page in &mut s.flash_backing_storage[block_index as usize].inner {
+                        page.inner.fill(0xff);
+                    }
+                });
             }
             _ => panic!("Unhandled command 0x{:02x?}", bytes[0]),
         }
@@ -184,13 +183,17 @@ impl SpiEnabledPeripheral {
                     let feature_type = dst[1];
                     match feature_type {
                         FEATURE_STATUS => {
-                            let ecc_error_addresses = ECC_ERROR_ADDRESSES.lock().unwrap();
-                            if ecc_error_addresses.contains(&self.last_read_address) {
-                                println!("ECC Error @ {:?}", self.last_read_address);
-                                dst[2] = 0b0010_0010;
-                            } else {
-                                dst[2] = 0b0000_0010;
-                            }
+                            TEST_SIM_STATE.with(|s| {
+                                if s.borrow()
+                                    .ecc_error_addresses
+                                    .contains(&self.last_read_address)
+                                {
+                                    println!("ECC Error @ {:?}", self.last_read_address);
+                                    dst[2] = 0b0010_0010;
+                                } else {
+                                    dst[2] = 0b0000_0010;
+                                }
+                            });
                         }
                         _ => error!("Unhandled feature_type {:?}", feature_type),
                     }
@@ -223,12 +226,13 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
     let crc_from_remote_inv = LittleEndian::read_u16(&header_slice[14..16]);
     let crc_from_remote_inv_dup = LittleEndian::read_u16(&header_slice[16..=17]);
     let transfer_type_check = transfer_type == transfer_type_dup;
-    let device_config = DEVICE_CONFIG
-        .lock()
-        .unwrap()
-        .as_ref()
-        .expect("No tests device config set")
-        .clone();
+    let device_config = TEST_SIM_STATE.with(|s| {
+        s.borrow()
+            .device_config
+            .as_ref()
+            .expect("No tests device config set")
+            .clone()
+    });
 
     {
         let mut return_payload_buf = NEXT_RPI_RESPONSE.lock().unwrap();
@@ -288,13 +292,15 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         if transfer_type == CAMERA_STARTUP_HANDSHAKE {
             debug!("rPi Got camera startup handshake {chunk:?}");
             // Write all the info we need about the device:
-            let force_offload_files_now = PENDING_FORCED_OFFLOAD_REQUEST.lock().unwrap();
-            let prefer_not_to_offload_files_now = PREFER_NOT_TO_OFFLOAD_FILES_NOW.lock().unwrap();
+            let force_offload_files_now =
+                TEST_SIM_STATE.with(|s| s.borrow().pending_forced_offload_request);
+            let prefer_not_to_offload_files_now =
+                TEST_SIM_STATE.with(|s| s.borrow().prefer_not_to_offload_files_now);
 
             let config_length = device_config.write_to_slice(
                 &mut return_payload_buf[14..],
-                *prefer_not_to_offload_files_now,
-                *force_offload_files_now,
+                prefer_not_to_offload_files_now,
+                force_offload_files_now,
             );
             config_crc =
                 crc_check.checksum(&return_payload_buf[14..14 + usize::from(config_length)]);
@@ -320,11 +326,17 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         // spi.write(&return_payload_buf).unwrap();
 
         if crc == crc_from_remote {
-            let mut recording_state = FAKE_PI_RECORDING_STATE.lock().unwrap();
+            // let mut recording_state = FAKE_PI_RECORDING_STATE.lock().unwrap();
             if is_file_transfer_progress_message {
-                recording_state.update_offload_progress(transfer_block);
-            } else if !is_file_transfer_message && recording_state.is_offloading() {
-                recording_state.end_offload();
+                TEST_SIM_STATE.with(|s| {
+                    s.borrow_mut()
+                        .fake_pi_recording_state
+                        .update_offload_progress(transfer_block)
+                });
+            } else if !is_file_transfer_message
+                && TEST_SIM_STATE.with(|s| s.borrow().fake_pi_recording_state.is_offloading())
+            {
+                TEST_SIM_STATE.with(|s| s.borrow_mut().fake_pi_recording_state.end_offload())
             }
 
             match transfer_type {
@@ -336,11 +348,13 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                     let num_events_to_offload = LittleEndian::read_u16(&chunk[0..2]);
                     config_crc_from_rp2040 = LittleEndian::read_u16(&chunk[10..12]);
 
-                    recording_state.set_offload_totals(
-                        num_files_to_offload,
-                        num_blocks_to_offload,
-                        num_events_to_offload,
-                    );
+                    TEST_SIM_STATE.with(|s| {
+                        s.borrow_mut().fake_pi_recording_state.set_offload_totals(
+                            num_files_to_offload,
+                            num_blocks_to_offload,
+                            num_events_to_offload,
+                        );
+                    });
 
                     if firmware_version != EXPECTED_RP2040_FIRMWARE_VERSION {
                         panic!(
@@ -366,7 +380,8 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                         info!("rpi got events to offload {num_events_to_offload}");
                     }
                     // Terminate any existing file download.
-                    let in_progress_file_transfer = FILE_DOWNLOAD.lock().unwrap().take();
+                    let in_progress_file_transfer =
+                        TEST_SIM_STATE.with(|s| s.borrow_mut().file_download.take());
                     if let Some(file) = in_progress_file_transfer {
                         warn!(
                             "Aborting in progress file transfer with {} bytes",
@@ -386,7 +401,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                     } else {
                         RecordingMode::Thermal
                     };
-                    recording_state.set_mode(recording_mode);
+                    TEST_SIM_STATE.with(|s| {
+                        s.borrow_mut()
+                            .fake_pi_recording_state
+                            .set_mode(recording_mode)
+                    });
                     if recording_mode == RecordingMode::Thermal {
                         radiometry_enabled = LittleEndian::read_u32(&chunk[0..4]) == 2;
                         lepton_serial_number = format!("{}", LittleEndian::read_u32(&chunk[8..12]));
@@ -411,7 +430,8 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                         panic!("Exit");
                     }
                     // Terminate any existing file download.
-                    let in_progress_file_transfer = FILE_DOWNLOAD.lock().unwrap().take();
+                    let in_progress_file_transfer =
+                        TEST_SIM_STATE.with(|state| state.borrow_mut().file_download.take());
                     if let Some(file) = in_progress_file_transfer {
                         warn!(
                             "Aborting in progress file transfer with {} bytes",
@@ -425,7 +445,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                     let payload_bytes = &chunk[10..18];
                     let event_payload = LittleEndian::read_u64(payload_bytes);
                     if let Ok(mut event_kind) = LoggerEventKind::try_from(event_kind) {
-                        recording_state.completed_event_offload();
+                        TEST_SIM_STATE.with(|s| {
+                            s.borrow_mut()
+                                .fake_pi_recording_state
+                                .completed_event_offload()
+                        });
                         if let Some(mut time) = DateTime::from_timestamp_micros(event_timestamp) {
                             if let LoggerEventKind::SetAudioAlarm(alarm_time) = &mut event_kind {
                                 if DateTime::from_timestamp_micros(event_payload as i64).is_some() {
@@ -521,10 +545,14 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                             );
                             let event = LoggerEvent::new(event_kind, event_timestamp);
                             event.log(payload_json);
-                            EVENTS_OFFLOADED.lock().unwrap().push(EventOffload {
-                                event,
-                                offloaded_at: CURRENT_TIME.lock().unwrap().clone(),
-                            })
+                            TEST_SIM_STATE.with(|state| {
+                                let mut state = state.borrow_mut();
+                                let current_time = state.current_time;
+                                state.events_offloaded.push(EventOffload {
+                                    event,
+                                    offloaded_at: current_time,
+                                })
+                            });
                         } else {
                             warn!("Event had invalid timestamp {event_timestamp}");
                         }
@@ -533,141 +561,159 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                     }
                 }
                 CAMERA_BEGIN_FILE_TRANSFER => {
-                    if FILE_DOWNLOAD.lock().unwrap().is_some() {
-                        warn!("Trying to begin file without ending current");
-                        *FILE_PART_COUNT.lock().unwrap() = 0;
-                    }
-                    info!("Begin file transfer");
-                    // Open new file transfer
-                    *FILE_PART_COUNT.lock().unwrap() += 1;
-                    // If we have to grow this Vec once it gets big it can be slow and
-                    // interrupt the transfer, so pre-allocate to a high-water mark.
-                    let mut file = Vec::with_capacity(50_000_000);
-                    file.extend_from_slice(chunk);
-                    *FILE_DOWNLOAD.lock().unwrap() = Some(file);
+                    TEST_SIM_STATE.with(|state| {
+                        let mut state = state.borrow_mut();
+                        if state.file_download.is_some() {
+                            warn!("Trying to begin file without ending current");
+                            state.file_part_count = 0;
+                        }
+                        info!("Begin file transfer");
+                        // Open new file transfer
+                        state.file_part_count += 1;
+                        // If we have to grow this Vec once it gets big it can be slow and
+                        // interrupt the transfer, so pre-allocate to a high-water mark.
+                        let mut file = Vec::with_capacity(50_000_000);
+                        file.extend_from_slice(chunk);
+                        state.file_download = Some(file);
+                    });
                 }
                 CAMERA_RESUME_FILE_TRANSFER => {
-                    if let Some(file) = &mut **FILE_DOWNLOAD.lock().as_mut().unwrap() {
-                        // Continue current file transfer
-                        //println!("Continue file transfer");
-                        {
-                            let part_count = *FILE_PART_COUNT.lock().unwrap();
-                            if part_count % 100 == 0 {
-                                let start = *FILE_DOWNLOAD_START.lock().unwrap();
-                                let megabytes_per_second = (file.len() + chunk.len()) as f32
-                                    / Instant::now().duration_since(start).as_secs_f32()
-                                    / (1024.0 * 1024.0);
-                                debug!(
+                    TEST_SIM_STATE.with(|state| {
+                       let mut state = state.borrow_mut();
+                        let mut part_count = state.file_part_count;
+                        let start = state.file_download_start;
+                        if let Some(file) = &mut state.file_download {
+                            // Continue current file transfer
+                            //println!("Continue file transfer");
+                            {
+
+                                if part_count % 100 == 0 {
+                                    let megabytes_per_second = (file.len() + chunk.len()) as f32
+                                        / Instant::now().duration_since(start).as_secs_f32()
+                                        / (1024.0 * 1024.0);
+                                    debug!(
                                     "Transferring part #{part_count} {:?} for {} bytes, {megabytes_per_second}MB/s",
                                     Instant::now().duration_since(start),
                                     file.len() + chunk.len(),
                                 );
+                                }
                             }
-                        }
-                        *FILE_PART_COUNT.lock().unwrap() += 1;
-                        file.extend_from_slice(chunk);
-                    } else {
-                        // FIXME: This might actually break forced offload.
-                        warn!("Trying to continue file with no open file");
-                        if !got_startup_info && recording_state.safe_to_restart_rp2040() {
-                            let date = chrono::Local::now();
-                            error!(
+                            part_count += 1;
+                            file.extend_from_slice(chunk);
+                        } else {
+                            // FIXME: This might actually break forced offload.
+                            warn!("Trying to continue file with no open file");
+                            if !got_startup_info && state.fake_pi_recording_state.safe_to_restart_rp2040() {
+                                let date = chrono::Local::now();
+                                error!(
                                 "1) Requesting reset of rp2040 to \
                                                 force handshake, {}",
                                 date.format("%Y-%m-%d--%H:%M:%S")
                             );
-                            panic!("Pi restart rp2040");
+                                panic!("Pi restart rp2040");
+                            }
                         }
-                    }
+                        state.file_part_count = part_count;
+                    });
                 }
                 CAMERA_END_FILE_TRANSFER => {
                     // End current file transfer
-                    if FILE_DOWNLOAD.lock().unwrap().is_none() {
-                        warn!("Trying to end file with no open file");
-                    }
-                    if let Some(mut file) = FILE_DOWNLOAD.lock().unwrap().take() {
-                        // Continue current file transfer
-                        let start = *FILE_DOWNLOAD_START.lock().unwrap();
-                        let megabytes_per_second = (file.len() + chunk.len()) as f32
-                            / Instant::now().duration_since(start).as_secs_f32()
-                            / (1024.0 * 1024.0);
-                        info!(
+                    let mut state = TEST_SIM_STATE.with(|state| {
+                        let mut state = state.borrow_mut();
+                        if state.file_download.is_none() {
+                            warn!("Trying to end file with no open file");
+                        }
+                        if let Some(mut file) = state.file_download.take() {
+                            // Continue current file transfer
+                            let start = state.file_download_start;
+                            let megabytes_per_second = (file.len() + chunk.len()) as f32
+                                / Instant::now().duration_since(start).as_secs_f32()
+                                / (1024.0 * 1024.0);
+                            info!(
                             "End file transfer, took {:?} for {} bytes, {megabytes_per_second}MB/s",
                             Instant::now().duration_since(start),
                             file.len() + chunk.len(),
                         );
-                        *FILE_PART_COUNT.lock().unwrap() = 0;
+                            state.file_part_count = 0;
+                            //needs_to_offload_test_recording = false;
+                            file.extend_from_slice(chunk);
+                            state.fake_pi_recording_state.completed_file_offload();
+                            let shebang = LittleEndian::read_u16(&file[0..2]);
+                            if shebang == 1 {
+                                //save_audio_file_to_disk(file, device_config.clone());
+                                info!("Saving audio file {}", file.len());
+                                let current_time = state.current_time;
+                                state.files_offloaded.push(FileOffload {
+                                    size: file.len(),
+                                    file_type: FileType::AudioScheduled,
+                                    offloaded_at: current_time,
+                                });
+                            } else {
+                                //save_cptv_file_to_disk(file, device_config.output_dir())
+
+                                let file_num = state.files_offloaded.len();
+
+                                // Decode cptv file:
+                                let mut decoder =
+                                    CptvDecoder::from(std::io::Cursor::new(&file)).unwrap();
+                                let header = decoder.get_header().unwrap();
+                                info!("CPTV file header: {:#?}", header);
+                                let cptv_recording_type = if let Some(status) = header.motion_config {
+                                    match status.as_string().as_ref() {
+                                        "status: shutdown" => FileType::CptvShutdown,
+                                        "status: startup" => FileType::CptvStartup,
+                                        "test: true" => FileType::CptvUserRequested,
+                                        _ => FileType::CptvScheduled,
+                                    }
+                                } else {
+                                    FileType::CptvScheduled
+                                };
+                                // fs::write(format!("CPTV_{}.cptv", file_num), &file).unwrap();
+                                info!("Saving cptv file {}", file.len());
+                                let current_time = state.current_time;
+                                state.files_offloaded.push(FileOffload {
+                                    size: file.len(),
+                                    file_type: cptv_recording_type,
+                                    offloaded_at: current_time,
+                                });
+                            }
+                        } else {
+                            warn!("Trying to end file with no open file");
+                        }
+                    });
+                }
+                CAMERA_BEGIN_AND_END_FILE_TRANSFER => {
+                    TEST_SIM_STATE.with(|state| {
+                        let mut state = state.borrow_mut();
+                        if state.file_download.is_some() {
+                            info!("Trying to begin (and end) file without ending current");
+                        }
+                        // Open and end new file transfer
+                        state.file_part_count = 0;
                         //needs_to_offload_test_recording = false;
+                        let mut file = Vec::new();
                         file.extend_from_slice(chunk);
-                        recording_state.completed_file_offload();
                         let shebang = LittleEndian::read_u16(&file[0..2]);
                         if shebang == 1 {
                             //save_audio_file_to_disk(file, device_config.clone());
                             info!("Saving audio file {}", file.len());
-                            FILES_OFFLOADED.lock().unwrap().push(FileOffload {
+                            let current_time = state.current_time;
+                            state.files_offloaded.push(FileOffload {
                                 size: file.len(),
                                 file_type: FileType::AudioScheduled,
-                                offloaded_at: CURRENT_TIME.lock().unwrap().clone(),
+                                offloaded_at: current_time,
                             });
                         } else {
                             //save_cptv_file_to_disk(file, device_config.output_dir())
-                            let mut files_offloaded = FILES_OFFLOADED.lock().unwrap();
-                            let file_num = files_offloaded.len();
-
-                            // Decode cptv file:
-                            let mut decoder =
-                                CptvDecoder::from(std::io::Cursor::new(&file)).unwrap();
-                            let header = decoder.get_header().unwrap();
-                            info!("CPTV file header: {:#?}", header);
-                            let cptv_recording_type = if let Some(status) = header.motion_config {
-                                match status.as_string().as_ref() {
-                                    "status: shutdown" => FileType::CptvShutdown,
-                                    "status: startup" => FileType::CptvStartup,
-                                    "test: true" => FileType::CptvUserRequested,
-                                    _ => FileType::CptvScheduled,
-                                }
-                            } else {
-                                FileType::CptvScheduled
-                            };
-                            // fs::write(format!("CPTV_{}.cptv", file_num), &file).unwrap();
                             info!("Saving cptv file {}", file.len());
-                            files_offloaded.push(FileOffload {
+                            let current_time = state.current_time;
+                            state.files_offloaded.push(FileOffload {
                                 size: file.len(),
-                                file_type: cptv_recording_type,
-                                offloaded_at: CURRENT_TIME.lock().unwrap().clone(),
+                                file_type: FileType::CptvScheduled,
+                                offloaded_at: current_time,
                             });
                         }
-                    } else {
-                        warn!("Trying to end file with no open file");
-                    }
-                }
-                CAMERA_BEGIN_AND_END_FILE_TRANSFER => {
-                    if FILE_DOWNLOAD.lock().unwrap().is_some() {
-                        info!("Trying to begin (and end) file without ending current");
-                    }
-                    // Open and end new file transfer
-                    *FILE_PART_COUNT.lock().unwrap() = 0;
-                    //needs_to_offload_test_recording = false;
-                    let mut file = Vec::new();
-                    file.extend_from_slice(chunk);
-                    let shebang = LittleEndian::read_u16(&file[0..2]);
-                    if shebang == 1 {
-                        //save_audio_file_to_disk(file, device_config.clone());
-                        info!("Saving audio file {}", file.len());
-                        FILES_OFFLOADED.lock().unwrap().push(FileOffload {
-                            size: file.len(),
-                            file_type: FileType::AudioScheduled,
-                            offloaded_at: CURRENT_TIME.lock().unwrap().clone(),
-                        });
-                    } else {
-                        //save_cptv_file_to_disk(file, device_config.output_dir())
-                        info!("Saving cptv file {}", file.len());
-                        FILES_OFFLOADED.lock().unwrap().push(FileOffload {
-                            size: file.len(),
-                            file_type: FileType::CptvScheduled,
-                            offloaded_at: CURRENT_TIME.lock().unwrap().clone(),
-                        });
-                    }
+                    });
                 }
                 CAMERA_GET_MOTION_DETECTION_MASK => {
                     // Already handled

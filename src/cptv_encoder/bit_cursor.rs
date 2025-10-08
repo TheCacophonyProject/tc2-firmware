@@ -65,6 +65,7 @@ impl BitCursor {
     #[inline(always)]
     pub fn flush_residual_bits(&mut self) {
         if self.used_bits > 17 {
+            // FIXME: We might be leaving some bits in the accumulator that we need to flush.
             let _ = self.do_flush();
         }
     }
@@ -87,6 +88,13 @@ impl BitCursor {
 
     pub fn end_aligned(&mut self) -> bool {
         if self.used_bits != 0 {
+            // FIXME: Fix this critical bug so that we can flush the last few bits without
+            //  overflowing the buffer..
+
+            let num_free_bytes = USER_BUFFER_LENGTH - self.cursor;
+            // Write as many of these extra bytes as possible into the buffer.
+            // We may end up with some remaining bytes we need to flush into the next page.
+
             let extra_bytes = if self.used_bits <= 8 {
                 1
             } else if self.used_bits <= 16 {
@@ -96,19 +104,43 @@ impl BitCursor {
             } else {
                 4
             };
+            let extra_bytes = num_free_bytes.saturating_sub(extra_bytes) as u32;
+            if extra_bytes == 0 {
+                assert!(self.is_full());
+                return self.is_full();
+            }
 
+            // TODO: Take as many of used_bits as we can fit into the remaining bytes
+
+            let used_bits = self.used_bits;
             let num_bits = (extra_bytes * 8) - self.used_bits;
             if num_bits != 0 {
                 self.write_bits(0, num_bits);
             }
+
+            // We're making sure we always shift over the accumulator to be aligned to whole bytes.
+
             let mut parts = [0u8; 4];
             LittleEndian::write_u32(&mut parts, self.accumulator);
             self.accumulator = 0;
             self.used_bits = 0;
             for i in 0..extra_bytes {
-                self.buffer[PAGE_COMMAND_ADDRESS..PAGE_COMMAND_ADDRESS + USER_BUFFER_LENGTH]
-                    [self.cursor] = parts[i as usize];
-                self.cursor += 1;
+                let mut p = self.buffer
+                    [PAGE_COMMAND_ADDRESS..PAGE_COMMAND_ADDRESS + USER_BUFFER_LENGTH]
+                    .get_mut(self.cursor);
+                match p {
+                    Some(val) => {
+                        *val = parts[i as usize];
+                        self.cursor += 1;
+                    }
+                    None => {
+                        let foo = 1;
+                        panic!(
+                            "Should never happen {}, {}, num_bits {num_bits}, {used_bits}",
+                            i, self.cursor,
+                        );
+                    }
+                }
             }
         }
         self.is_full()

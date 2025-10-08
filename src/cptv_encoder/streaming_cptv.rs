@@ -596,6 +596,8 @@ impl<'a> CptvStream<'a> {
         }
         // Flush out any remaining bits in the accumulator, align them to the nearest full byte,
         // and write out to storage.
+
+        // FIXME:
         let _ = self.cursor.end_aligned();
         let (to_flush, num_bytes) = self.cursor.flush();
         if at_header_location {

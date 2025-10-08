@@ -1,7 +1,8 @@
 use crate::re_exports::bsp::hal::dma::{CH0, CH1, CH2, CH3, CH4, Channel, Channels, DMAExt};
 use crate::re_exports::bsp::hal::pio::PIOExt;
-use crate::tests::test_state::test_global_state::ROSC_DRIVE_ITERATOR;
+use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 
+#[allow(non_camel_case_types)]
 pub struct DMA;
 
 impl DMA {
@@ -15,7 +16,7 @@ impl DMA {
         RW_STUB
     }
 
-    pub fn ch(&self, ch_num: usize) -> DMA {
+    pub fn ch(&self, _ch_num: usize) -> DMA {
         DMA
     }
 
@@ -29,7 +30,7 @@ impl DMA {
 }
 
 impl DMAExt for DMA {
-    fn split(self, resets: &mut RESETS) -> Channels {
+    fn split(self, _resets: &mut RESETS) -> Channels {
         Channels {
             ch0: Channel(CH0),
             ch1: Channel(CH1),
@@ -40,19 +41,21 @@ impl DMAExt for DMA {
     }
 }
 
+#[allow(non_camel_case_types)]
 pub enum Interrupt {
     IO_IRQ_BANK0,
     TIMER_IRQ_0,
 }
-
+#[allow(non_camel_case_types)]
 pub struct NVIC;
 
 impl NVIC {
-    pub fn unmask(int: Interrupt) {}
-    pub fn mask(int: Interrupt) {}
+    pub fn unmask(_int: Interrupt) {}
+    pub fn mask(_int: Interrupt) {}
 }
 
 #[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
 pub struct PIO0;
 
 #[derive(Copy, Clone)]
@@ -61,14 +64,19 @@ pub struct PIO1;
 impl PIOExt for PIO0 {}
 impl PIOExt for PIO1 {}
 
+#[allow(non_camel_case_types)]
 pub struct RESETS;
+#[allow(non_camel_case_types)]
 pub struct SPI0;
+#[allow(non_camel_case_types)]
 pub struct SPI1;
-
+#[allow(non_camel_case_types)]
 pub struct CLOCKS;
-
+#[allow(non_camel_case_types)]
 pub struct RW_STUB;
+#[allow(non_camel_case_types)]
 pub struct KHZ_STUB;
+#[allow(non_camel_case_types)]
 pub struct BITS_STUB;
 impl KHZ_STUB {
     pub fn write<F>(&self, f: F)
@@ -164,17 +172,19 @@ impl RW_STUB {
     }
 
     pub fn variant(&self) -> Option<rosc::ctrl::FREQ_RANGE_A> {
-        let mut rosc_iterator = ROSC_DRIVE_ITERATOR.lock().unwrap();
-        if *rosc_iterator == 0 {
-            *rosc_iterator += 1;
-            // FIXME: Might need to fake some logic here to drive things forwards.
-            None
-        } else {
-            Some(rosc::ctrl::FREQ_RANGE_A::HIGH)
-        }
+        TEST_SIM_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.rosc_drive_iterator == 0 {
+                s.rosc_drive_iterator += 1;
+                // FIXME: Might need to fake some logic here to drive things forwards.
+                None
+            } else {
+                Some(rosc::ctrl::FREQ_RANGE_A::HIGH)
+            }
+        })
     }
 
-    pub fn bits(&mut self, b: u32) {}
+    pub fn bits(&mut self, _b: u32) {}
 }
 
 impl CLOCKS {
@@ -184,7 +194,7 @@ impl CLOCKS {
     {
         f(&mut CLOCKS)
     }
-    pub fn bits(&mut self, b: u32) -> u32 {
+    pub fn bits(&mut self, _b: u32) -> u32 {
         1
     }
 
@@ -242,14 +252,23 @@ impl CLOCKS {
     }
 }
 
+#[allow(non_camel_case_types)]
 pub struct XOSC;
+#[allow(non_camel_case_types)]
 pub struct ROSC;
+#[allow(non_camel_case_types)]
 pub struct WATCHDOG;
+#[allow(non_camel_case_types)]
 pub struct TIMER;
+#[allow(non_camel_case_types)]
 pub struct IO_BANK0;
+#[allow(non_camel_case_types)]
 pub struct PADS_BANK0;
+#[allow(non_camel_case_types)]
 pub struct I2C0;
+#[allow(non_camel_case_types)]
 pub struct I2C1;
+#[allow(non_camel_case_types)]
 pub struct SIO;
 
 impl ROSC {
@@ -329,6 +348,7 @@ pub mod rosc {
     pub mod ctrl {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         #[repr(u16)]
+        #[allow(non_camel_case_types)]
         pub enum FREQ_RANGE_A {
             #[doc = "4004: `111110100100`"]
             LOW = 4004,

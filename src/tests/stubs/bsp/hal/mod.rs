@@ -5,31 +5,31 @@ pub mod spi;
 
 use crate::re_exports::bsp::hal::clocks::ClocksManager;
 use crate::re_exports::bsp::pac::{RESETS, TIMER};
-use byteorder::ByteOrder;
-use chrono::{Datelike, Timelike};
 use fugit::{HertzU32, TimerInstantU64};
 
 pub type Instant = TimerInstantU64<1_000_000>;
 
 pub mod timer {
     pub use crate::re_exports::bsp::hal::Instant;
-    use crate::tests::test_state::test_global_state::{CAMERA_STATE, TC2_AGENT_STATE};
+    use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
     use fugit::MicrosDurationU32;
 
     pub trait Alarm {
-        fn schedule(&self, when: MicrosDurationU32) -> Result<(), ()> {
+        fn schedule(&self, _when: MicrosDurationU32) -> Result<(), ()> {
             Ok(())
         }
 
         fn enable_interrupt(&self) {}
         fn finished(&self) -> bool {
-            let camera_state = CAMERA_STATE.lock().unwrap();
-            if camera_state.pi_is_powered_on() {
-                // Pi is ready to receive
-                !TC2_AGENT_STATE.lock().unwrap().is_ready()
-            } else {
-                true
-            }
+            TEST_SIM_STATE.with(|s| {
+                let s = s.borrow();
+                if s.camera_state.pi_is_powered_on() {
+                    // Pi is ready to receive
+                    !s.tc2_agent_state.is_ready()
+                } else {
+                    true
+                }
+            })
         }
         fn clear_interrupt(&self) {}
         fn cancel(&self) {}
@@ -46,7 +46,7 @@ pub struct Timer {
 }
 
 impl Timer {
-    pub fn new(timer: TIMER, resets: &RESETS, clocks: &ClocksManager) -> Timer {
+    pub fn new(_timer: TIMER, _resets: &RESETS, _clocks: &ClocksManager) -> Timer {
         Timer { counter: 0 }
     }
 
@@ -55,10 +55,10 @@ impl Timer {
         TimerInstantU64::from_ticks(self.counter)
     }
 
-    pub fn delay_us(&mut self, micros: u32) {
+    pub fn delay_us(&mut self, _micros: u32) {
         //info!("Delaying for {}µs", micros);
     }
-    pub fn delay_ms(&self, ms: u64) {
+    pub fn delay_ms(&self, _ms: u64) {
         //info!("Delaying for {}ms", ms);
     }
 
@@ -67,7 +67,7 @@ impl Timer {
     }
 }
 pub trait Clock {
-    fn configure_clock<S>(&self, src: &S, freq: HertzU32) -> Result<(), ()> {
+    fn configure_clock<S>(&self, _src: &S, _freq: HertzU32) -> Result<(), ()> {
         Ok(())
     }
 
@@ -97,7 +97,7 @@ pub mod clocks {
     }
 
     impl ClocksManager {
-        pub fn new(clocks: CLOCKS) -> ClocksManager {
+        pub fn new(_clocks: CLOCKS) -> ClocksManager {
             ClocksManager {
                 system_clock: SystemClock,
                 peripheral_clock: PeripheralClock,
@@ -143,8 +143,8 @@ pub mod multicore {
     impl Core {
         pub fn spawn<const N: usize, F: FnOnce() + Send + 'static>(
             &mut self,
-            stack: Stack<N>,
-            f: F,
+            _stack: Stack<N>,
+            _f: F,
         ) {
         }
     }
@@ -154,7 +154,7 @@ pub mod multicore {
     }
 
     impl Multicore {
-        pub fn new(psm: &mut PSM, ppb: &mut PPB, fifo: &mut SioFifo) -> Multicore {
+        pub fn new(_psm: &mut PSM, _ppb: &mut PPB, _fifo: &mut SioFifo) -> Multicore {
             Multicore {
                 cores: [Core, Core],
             }
@@ -188,7 +188,7 @@ pub mod rosc {
         pub fn new(r: T) -> RingOscillator<T> {
             RingOscillator(r)
         }
-        pub fn initialize_with_freq(self, freq: HertzU32) -> RingOscillator<Enabled> {
+        pub fn initialize_with_freq(self, _freq: HertzU32) -> RingOscillator<Enabled> {
             RingOscillator::<Enabled>(Enabled)
         }
         pub fn get_freq(&self) -> HertzU32 {
@@ -212,8 +212,8 @@ pub mod xosc {
     use crate::re_exports::bsp::hal::CrystalOcillator;
 
     pub fn setup_xosc_blocking(
-        x: crate::re_exports::bsp::pac::XOSC,
-        hz: fugit::HertzU32,
+        _x: crate::re_exports::bsp::pac::XOSC,
+        _hz: fugit::HertzU32,
     ) -> Result<CrystalOcillator, ()> {
         Ok(CrystalOcillator)
     }
@@ -294,7 +294,6 @@ pub mod gpio {
     use crate::re_exports::bsp::hal::sio::GPIO_BANK0;
     use crate::re_exports::bsp::pac::{IO_BANK0, PADS_BANK0, RESETS};
     extern crate std;
-    use std::cmp::PartialEq;
 
     enum PullType {
         PullUp,
@@ -325,7 +324,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::I2C
         }
-        fn from(f: FunctionType) -> FunctionI2C {
+        fn from(_f: FunctionType) -> FunctionI2C {
             FunctionI2C
         }
     }
@@ -333,7 +332,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::Pio
         }
-        fn from(f: FunctionType) -> FunctionPio0 {
+        fn from(_f: FunctionType) -> FunctionPio0 {
             FunctionPio0
         }
     }
@@ -342,7 +341,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::Pio
         }
-        fn from(f: FunctionType) -> FunctionPio1 {
+        fn from(_f: FunctionType) -> FunctionPio1 {
             FunctionPio1
         }
     }
@@ -350,7 +349,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::Null
         }
-        fn from(f: FunctionType) -> FunctionNull {
+        fn from(_f: FunctionType) -> FunctionNull {
             FunctionNull
         }
     }
@@ -358,7 +357,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::SioInput
         }
-        fn from(f: FunctionType) -> FunctionSio<SioInput> {
+        fn from(_f: FunctionType) -> FunctionSio<SioInput> {
             FunctionSio::new(SioInput)
         }
     }
@@ -366,7 +365,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::SioOutput
         }
-        fn from(f: FunctionType) -> FunctionSio<SioOutput> {
+        fn from(_f: FunctionType) -> FunctionSio<SioOutput> {
             FunctionSio::new(SioOutput)
         }
     }
@@ -374,7 +373,7 @@ pub mod gpio {
         fn func_type(&self) -> FunctionType {
             FunctionType::Spi
         }
-        fn from(f: FunctionType) -> FunctionSpi {
+        fn from(_f: FunctionType) -> FunctionSpi {
             FunctionSpi
         }
     }
@@ -382,7 +381,7 @@ pub mod gpio {
         fn pull_type(&self) -> PullType {
             PullType::PullDown
         }
-        fn from(p: PullType) -> PullDown {
+        fn from(_p: PullType) -> PullDown {
             PullDown
         }
     }
@@ -390,7 +389,7 @@ pub mod gpio {
         fn pull_type(&self) -> PullType {
             PullType::PullUp
         }
-        fn from(p: PullType) -> PullUp {
+        fn from(_p: PullType) -> PullUp {
             PullUp
         }
     }
@@ -399,7 +398,7 @@ pub mod gpio {
         fn pull_type(&self) -> PullType {
             PullType::PullNone
         }
-        fn from(p: PullType) -> PullNone {
+        fn from(_p: PullType) -> PullNone {
             PullNone
         }
     }
@@ -430,24 +429,24 @@ pub mod gpio {
         pub fn id(&self) -> PinId {
             PinId { num: 1 }
         }
-        pub fn is_high(&mut self) -> Result<bool, ()> {
+        pub fn is_high(&self) -> Result<bool, ()> {
             Ok(true)
         }
 
-        pub fn is_low(&mut self) -> Result<bool, ()> {
+        pub fn is_low(&self) -> Result<bool, ()> {
             Ok(true)
         }
 
-        pub fn reconfigure<F2: PinFunction, P2: PinPullType>(mut self) -> Pin<G, F2, P2> {
+        pub fn reconfigure<F2: PinFunction, P2: PinPullType>(self) -> Pin<G, F2, P2> {
             let p = self.2.pull_type();
             let f = self.1.func_type();
             Pin::new(self.0, F2::from(f), P2::from(p))
         }
 
-        pub fn set_interrupt_enabled(&self, level: Interrupt, enabled: bool) {}
+        pub fn set_interrupt_enabled(&self, _level: Interrupt, _enabled: bool) {}
 
-        pub fn set_dormant_wake_enabled(&self, level: Interrupt, enabled: bool) {}
-        pub fn clear_interrupt(&mut self, level: Interrupt) {}
+        pub fn set_dormant_wake_enabled(&self, _level: Interrupt, _enabled: bool) {}
+        pub fn clear_interrupt(&mut self, _level: Interrupt) {}
 
         pub fn new(pin_num: G, func: F, pull_type: P) -> Pin<G, F, P> {
             Self(pin_num, func, pull_type)
@@ -494,10 +493,10 @@ pub mod gpio {
     }
     impl Pins {
         pub fn new(
-            io_bank0: IO_BANK0,
-            pads_bank0: PADS_BANK0,
-            gpio_bank0: GPIO_BANK0,
-            resets: &mut RESETS,
+            _io_bank0: IO_BANK0,
+            _pads_bank0: PADS_BANK0,
+            _gpio_bank0: GPIO_BANK0,
+            _resets: &mut RESETS,
         ) -> Pins {
             Pins {
                 gpio0: Pin::new(Gpio0, FunctionNull, PullNone),
@@ -671,7 +670,7 @@ pub mod dma {
                 Self { ch, tx, rx }
             }
 
-            pub fn bswap(&mut self, enabled: bool) {}
+            pub fn bswap(&mut self, _enabled: bool) {}
 
             pub fn start(self) -> Transfer<CH1, RX, TX> {
                 Transfer {
@@ -743,17 +742,17 @@ pub mod watchdog {
     pub struct Watchdog;
 
     impl Watchdog {
-        pub fn new(watchdog: WATCHDOG) -> Self {
+        pub fn new(_watchdog: WATCHDOG) -> Self {
             Watchdog
         }
         pub fn feed(&self) {}
         pub fn disable(&self) {}
 
-        pub fn start(&self, timeout_ms: Duration<u32, 1, 1000>) {
+        pub fn start(&self, _timeout_ms: Duration<u32, 1, 1000>) {
             //info!("set {timeout_ms} timeout");
         }
-        pub fn pause_on_debug(&mut self, pause: bool) {}
-        pub fn enable_tick_generation(&mut self, freq: u8) {}
+        pub fn pause_on_debug(&mut self, _pause: bool) {}
+        pub fn enable_tick_generation(&mut self, _freq: u8) {}
     }
 }
 
@@ -767,6 +766,7 @@ pub mod pio {
     pub struct SM0;
     pub struct SM1;
     pub struct PIOBuilder;
+    #[allow(non_camel_case_types)]
     pub struct PIO_STUB;
     pub enum PinDir {
         Input,
@@ -774,44 +774,44 @@ pub mod pio {
     }
 
     impl<P> StateMachine<P, Stopped> {
-        pub fn set_pindirs(&self, dirs: impl IntoIterator<Item = (u8, PinDir)>) {}
+        pub fn set_pindirs(&self, _dirs: impl IntoIterator<Item = (u8, PinDir)>) {}
         pub fn start(self) -> StateMachine<P, Running> {
             StateMachine(self.0, Running)
         }
     }
 
     impl PIO_STUB {
-        pub fn in_pin_base(&self, pin_id: u8) -> PIO_STUB {
+        pub fn in_pin_base(&self, _pin_id: u8) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn clock_divisor_fixed_point(&self, c: u16, f: u8) -> PIO_STUB {
+        pub fn clock_divisor_fixed_point(&self, _c: u16, _f: u8) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn side_set_pin_base(&self, pin_id: u8) -> PIO_STUB {
+        pub fn side_set_pin_base(&self, _pin_id: u8) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn out_pins(self, pin_id: u8, x: i32) -> PIO_STUB {
+        pub fn out_pins(self, _pin_id: u8, _x: i32) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn jmp_pin(self, pin_id: u8) -> PIO_STUB {
+        pub fn jmp_pin(self, _pin_id: u8) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn out_shift_direction(self, direction: ShiftDirection) -> PIO_STUB {
+        pub fn out_shift_direction(self, _direction: ShiftDirection) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn in_shift_direction(self, direction: ShiftDirection) -> PIO_STUB {
+        pub fn in_shift_direction(self, _direction: ShiftDirection) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn push_threshold(self, amount: i32) -> PIO_STUB {
+        pub fn push_threshold(self, _amount: i32) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn pull_threshold(self, amount: i32) -> PIO_STUB {
+        pub fn pull_threshold(self, _amount: i32) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn autopush(self, enabled: bool) -> PIO_STUB {
+        pub fn autopush(self, _enabled: bool) -> PIO_STUB {
             PIO_STUB
         }
-        pub fn autopull(self, enabled: bool) -> PIO_STUB {
+        pub fn autopull(self, _enabled: bool) -> PIO_STUB {
             PIO_STUB
         }
         pub fn build<P, SM>(
@@ -827,7 +827,7 @@ pub mod pio {
     }
 
     impl PIOBuilder {
-        pub(crate) fn from_installed_program<P: PIOExt>(p0: InstalledProgram<P>) -> PIO_STUB {
+        pub(crate) fn from_installed_program<P: PIOExt>(_p0: InstalledProgram<P>) -> PIO_STUB {
             PIO_STUB
         }
     }
@@ -844,8 +844,8 @@ pub mod pio {
     impl<A> StateMachine<A, Running> {
         pub fn uninit(
             self,
-            rx: Rx<A>,
-            tx: Tx<A>,
+            _rx: Rx<A>,
+            _tx: Tx<A>,
         ) -> (UninitStateMachine<A>, InstalledProgram<PIO0>) {
             (
                 UninitStateMachine(self.0),
@@ -855,7 +855,7 @@ pub mod pio {
 
         pub fn stop(&self) {}
 
-        pub fn clock_divisor_fixed_point(&self, c: u16, f: u8) {}
+        pub fn clock_divisor_fixed_point(&self, _c: u16, _f: u8) {}
     }
 
     pub struct Tx<T>(core::marker::PhantomData<T>);
@@ -865,17 +865,17 @@ pub mod pio {
     impl<P: PIOExt> InstalledProgram<P> {}
 
     impl<P: PIOExt> PIO<P> {
-        pub(crate) fn install<T>(&mut self, program: T) -> Result<InstalledProgram<P>, ()> {
+        pub(crate) fn install<T>(&mut self, _program: T) -> Result<InstalledProgram<P>, ()> {
             Ok(InstalledProgram(core::marker::PhantomData))
         }
 
-        pub fn uninstall(&mut self, program: InstalledProgram<PIO0>) {}
+        pub fn uninstall(&mut self, _program: InstalledProgram<PIO0>) {}
     }
 
     pub trait PIOExt: Sized + Copy {
         fn split(
             self,
-            resets: &mut crate::re_exports::bsp::pac::RESETS,
+            _resets: &mut crate::re_exports::bsp::pac::RESETS,
         ) -> (
             PIO<Self>,
             UninitStateMachine<(Self, SM0)>,

@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 mod high_power__always_on__audio_and_thermal;
 mod high_power__always_on__audio_disabled;
 mod high_power__audio_only;

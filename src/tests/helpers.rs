@@ -1,12 +1,11 @@
+use crate::device_config::{AudioMode, DeviceConfig as FirmwareDeviceConfig};
 use crate::entry::real_main;
 use crate::formatted_time::FormattedNZTime;
-use crate::re_exports::log::error;
-use crate::tests::stubs::fake_rpi_device_config::{AudioMode, DeviceConfig};
-use crate::tests::test_state::test_global_state::{
-    CPTV_FILES, CURRENT_THERMAL_WINDOW, CURRENT_TIME, DEVICE_CONFIG, ROSC_DRIVE_ITERATOR,
-    THERMAL_TRIGGER_OFFSETS_MINS,
-};
-use chrono::{DateTime, Utc};
+use crate::re_exports::log::{error, info};
+use crate::tests::stubs::fake_rpi_device_config::DeviceConfig;
+use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono_tz::Tz::Pacific__Auckland;
 
 pub fn simulate_camera_with_config(
     config: DeviceConfig,
@@ -15,13 +14,27 @@ pub fn simulate_camera_with_config(
     thermal_trigger_recordings_x_mins_into_thermal_window: Option<Vec<u32>>,
     cptv_files_to_playback: Option<Vec<String>>,
 ) {
-    *CURRENT_TIME.lock().unwrap() = from;
+    TEST_SIM_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.current_time = from;
+        state.thermal_trigger_offsets_mins = thermal_trigger_recordings_x_mins_into_thermal_window;
+        state.cptv_files = cptv_files_to_playback;
+        state.device_config = Some(config.clone());
+        let firmware_config = rpi_device_config_to_firmware_device_config(&config);
 
-    *THERMAL_TRIGGER_OFFSETS_MINS.lock().unwrap() =
-        thermal_trigger_recordings_x_mins_into_thermal_window;
-    *CPTV_FILES.lock().unwrap() = cptv_files_to_playback;
-
-    *DEVICE_CONFIG.lock().unwrap() = Some(config.clone());
+        if firmware_config.audio_mode() == AudioMode::AudioOnly {
+            // FIXME: Is it true that we don't really have a current thermal window in audio only mode?
+            state.current_thermal_window = None;
+        } else {
+            state.current_thermal_window = Some(
+                firmware_config
+                    .next_or_current_recording_window(&from)
+                    .unwrap(),
+            );
+        }
+        state.current_test_window = (from, until);
+        state.firmware_device_config = Some(firmware_config);
+    });
     error!(
         "Simulating camera from {} until {}",
         FormattedNZTime(from),
@@ -29,15 +42,19 @@ pub fn simulate_camera_with_config(
     );
     let end_time = until;
     loop {
-        let now = { *CURRENT_TIME.lock().unwrap() };
+        let mut now = Utc::now();
+        TEST_SIM_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            now = state.current_time;
+            // Reset ROSC_ITERATOR:
+            state.rosc_drive_iterator = 0;
+            //state.current_thermal_window
+            // *CURRENT_THERMAL_WINDOW.lock().unwrap() =
+            //     Some(config.next_recording_window(&now.naive_utc()));
+        });
         if now > end_time {
             break;
         }
-
-        // Reset ROSC_ITERATOR:
-        *ROSC_DRIVE_ITERATOR.lock().unwrap() = 0;
-        *CURRENT_THERMAL_WINDOW.lock().unwrap() =
-            Some(config.next_recording_window(&now.naive_utc()));
         real_main();
     }
 }
@@ -157,4 +174,38 @@ random-seed = 0
         let config: DeviceConfig = toml::from_str(&config_toml).unwrap();
         config
     }
+}
+
+pub fn rpi_device_config_to_firmware_device_config(
+    device_config: &DeviceConfig,
+) -> FirmwareDeviceConfig {
+    let mut device_config_slice = [0u8; 1024];
+    device_config.write_to_slice(&mut device_config_slice[6..], false, false);
+    FirmwareDeviceConfig::from_bytes(&device_config_slice).unwrap()
+}
+
+pub fn test_start_day() -> DateTime<Utc> {
+    Utc.from_utc_datetime(&NaiveDateTime::new(
+        NaiveDate::from_ymd_opt(2025, 9, 23).unwrap(),
+        NaiveTime::from_hms_opt(2, 0, 0).unwrap(),
+    ))
+}
+
+pub fn test_start_and_end_time(config: &DeviceConfig) -> (DateTime<Utc>, DateTime<Utc>) {
+    let date = test_start_day();
+    let firmware_config = rpi_device_config_to_firmware_device_config(&config);
+
+    // FIXME: Do fixed and 24/7 windows shift with daylight savings time?
+    //  We're using naive UTC after all...
+
+    // TODO: If the duration of the window is less than 24 hours, we should extend the window to be
+    //  24 hrs with the thermal window centered in the middle of the 24hr window.
+
+    let next_or_current_window = firmware_config
+        .next_or_current_recording_window(&date)
+        .unwrap();
+    (
+        next_or_current_window.0 - Duration::minutes(10),
+        next_or_current_window.1 + Duration::minutes(10),
+    )
 }

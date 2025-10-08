@@ -2,7 +2,7 @@ extern crate std;
 use crate::attiny_rtc_i2c::Tc2AgentState;
 use crate::re_exports::log::{error, info};
 use crate::tests::stubs::fake_rpi_test_recording_status::TestRecordingStatus;
-use crate::tests::test_state::test_global_state::TC2_AGENT_STATE;
+use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::thread::sleep;
@@ -326,8 +326,7 @@ impl RecordingState {
     }
 
     pub fn sync_state_from_attiny(&mut self) -> u8 {
-        let state = TC2_AGENT_STATE.lock().unwrap();
-        let state = u8::from(*state);
+        let state = u8::from(TEST_SIM_STATE.with(|s| s.borrow().tc2_agent_state));
         self.set_state(state);
         state
     }
@@ -555,7 +554,7 @@ impl RecordingState {
             state &= !state_bits_to_unset;
         }
         self.set_state(state);
-        *TC2_AGENT_STATE.lock().unwrap() = Tc2AgentState::from(state);
+        TEST_SIM_STATE.with(|s| s.borrow_mut().tc2_agent_state = Tc2AgentState::from(state));
         self.sync_state_from_attiny();
     }
 

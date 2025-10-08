@@ -6,14 +6,12 @@ use crate::attiny_rtc_i2c::{
 };
 use crate::re_exports::bsp::pac::{I2C0, I2C1, RESETS};
 use crate::re_exports::log::{debug, error, info, warn};
-use crate::tests::test_state::test_global_state::{
-    ATTINY_FIRMWARE_VERSION, ATTINY_KEEP_ALIVE, ATTINY_POWER_CTRL_STATE, CAMERA_STATE,
-    CURRENT_TIME, FRAME_NUM, LAST_FRAME, RTC_ALARM_STATE, TC2_AGENT_STATE,
-};
+use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use crc::Crc;
 use fugit::{HertzU32, Rate};
+use std::time::Instant;
 
 #[non_exhaustive]
 #[derive(Debug)]
@@ -53,18 +51,23 @@ impl<A, B> I2C<I2C0, (A, B)> {
         p0: I2C0,
         p1: A,
         p2: B,
-        p3: Rate<u32, 1, 1>,
-        p4: &mut RESETS,
-        p5: HertzU32,
+        _p3: Rate<u32, 1, 1>,
+        _p4: &mut RESETS,
+        _p5: HertzU32,
     ) -> I2C<I2C0, (A, B)> {
         I2C((p0, (p1, p2)))
     }
 
-    pub fn write(&mut self, address: u8, payload: &[u8]) -> Result<(), Error> {
+    pub fn write(&mut self, _address: u8, _payload: &[u8]) -> Result<(), Error> {
         Ok(())
     }
 
-    pub fn write_read(&mut self, address: u8, payload: &[u8], dst: &mut [u8]) -> Result<(), Error> {
+    pub fn write_read(
+        &mut self,
+        _address: u8,
+        _payload: &[u8],
+        _dst: &mut [u8],
+    ) -> Result<(), Error> {
         Ok(())
     }
 
@@ -78,9 +81,9 @@ impl<A, B> I2C<I2C1, (A, B)> {
         p0: I2C1,
         p1: A,
         p2: B,
-        p3: Rate<u32, 1, 1>,
-        p4: &mut RESETS,
-        p5: HertzU32,
+        _p3: Rate<u32, 1, 1>,
+        _p4: &mut RESETS,
+        _p5: HertzU32,
     ) -> I2C<I2C1, (A, B)> {
         I2C((p0, (p1, p2)))
     }
@@ -93,8 +96,11 @@ impl<A, B> I2C<I2C1, (A, B)> {
             ATTINY_ADDRESS => match payload[0] {
                 ATTINY_REG_KEEP_ALIVE => match payload[1] {
                     0x01 => {
-                        // FIXME: Make this be time from our synced clock.
-                        *ATTINY_KEEP_ALIVE.lock().unwrap() = std::time::Instant::now();
+                        TEST_SIM_STATE.with(|s| {
+                            let mut s = s.borrow_mut();
+                            let current_time = s.current_time;
+                            s.attiny_keep_alive = current_time;
+                        });
                     }
                     _ => panic!("Unsupported attiny keep alive 0x{:02x?}", payload[1]),
                 },
@@ -106,81 +112,84 @@ impl<A, B> I2C<I2C1, (A, B)> {
                 }
                 ATTINY_REG_RP2040_PI_POWER_CTRL => {
                     // Set power control
-                    *ATTINY_POWER_CTRL_STATE.lock().unwrap() = payload[1];
-                    match payload[1] {
-                        0x00 => {
-                            // Tell rPi it can shutdown.
-                            let mut camera_state = CAMERA_STATE.lock().unwrap();
-                            if *camera_state == CameraState::PoweredOn {
-                                *camera_state = CameraState::PoweringOff;
-                            }
-                        }
-                        0x01 => {
-                            // Tell rPi to wake up.
-                            let mut camera_state = CAMERA_STATE.lock().unwrap();
-                            if *camera_state == CameraState::PoweredOff {
-                                *camera_state = CameraState::PoweringOn;
-                            }
-                        }
-                        0x02 => {
-                            // Tell attiny to shut US down.  Can we simulate this?
-                            // Maybe it's the same as a restart, with the time advanced?
-                            //*CAMERA_STATE.lock().unwrap() = CameraState::PoweringOf;
-
-                            {
-                                // Advance to the next alarm time when we sleep.
-                                let now = { *CURRENT_TIME.lock().unwrap() };
-                                let mut alarm = RTC_ALARM_STATE.lock().unwrap();
-                                if alarm.is_initialised() {
-                                    let minutes = decode_bcd(alarm.minutes & 0b0111_1111);
-                                    let hours = decode_bcd(alarm.hours & 0b0011_1111);
-                                    let day = decode_bcd(alarm.day & 0b0011_1111);
-
-                                    let naive_date = NaiveDate::from_ymd_opt(
-                                        now.year(),
-                                        now.month(),
-                                        u32::from(day),
-                                    )
-                                    .unwrap();
-                                    let naive_time = NaiveTime::from_hms_opt(
-                                        u32::from(hours),
-                                        u32::from(minutes),
-                                        0,
-                                    )
-                                    .unwrap();
-                                    let utc_datetime =
-                                        NaiveDateTime::new(naive_date, naive_time).and_utc();
-                                    // info!("Advancing to alarm time: {:?}", utc_datetime);
-                                    *CURRENT_TIME.lock().unwrap() = utc_datetime;
-                                    // Make sure the alarm is set to "has been triggered".
-                                    alarm.enabled |= 0b0000_1000;
-                                } else {
-                                    error!("Alarm not initialised");
+                    TEST_SIM_STATE.with(|s| {
+                        let mut s = s.borrow_mut();
+                        s.attiny_power_ctrl_state = payload[1];
+                        match payload[1] {
+                            0x00 => {
+                                // Tell rPi it can shutdown.
+                                if s.camera_state == CameraState::PoweredOn {
+                                    s.camera_state = CameraState::PoweringOff;
                                 }
                             }
+                            0x01 => {
+                                // Tell rPi to wake up.
+                                if s.camera_state == CameraState::PoweredOff {
+                                    s.camera_state = CameraState::PoweringOn;
+                                }
+                            }
+                            0x02 => {
+                                // Tell attiny to shut US down.  Can we simulate this?
+                                // Maybe it's the same as a restart, with the time advanced?
+                                //*CAMERA_STATE.lock().unwrap() = CameraState::PoweringOf;
+
+                                {
+                                    // Advance to the next alarm time when we sleep.
+                                    let now = s.current_time;
+                                    if s.rtc_alarm_state.is_initialised() {
+                                        let minutes =
+                                            decode_bcd(s.rtc_alarm_state.minutes & 0b0111_1111);
+                                        let hours =
+                                            decode_bcd(s.rtc_alarm_state.hours & 0b0011_1111);
+                                        let day = decode_bcd(s.rtc_alarm_state.day & 0b0011_1111);
+
+                                        let naive_date = NaiveDate::from_ymd_opt(
+                                            now.year(),
+                                            now.month(),
+                                            u32::from(day),
+                                        )
+                                        .unwrap();
+                                        let naive_time = NaiveTime::from_hms_opt(
+                                            u32::from(hours),
+                                            u32::from(minutes),
+                                            0,
+                                        )
+                                        .unwrap();
+                                        let utc_datetime =
+                                            NaiveDateTime::new(naive_date, naive_time).and_utc();
+                                        // info!("Advancing to alarm time: {:?}", utc_datetime);
+                                        s.current_time = utc_datetime;
+                                        // Make sure the alarm is set to "has been triggered".
+                                        s.rtc_alarm_state.enabled |= 0b0000_1000;
+                                    } else {
+                                        error!("Alarm not initialised");
+                                    }
+                                }
+                            }
+                            _ => panic!(
+                                "Unsupported attiny power control state 0x{:02x?}",
+                                payload[1]
+                            ),
                         }
-                        _ => panic!(
-                            "Unsupported attiny power control state 0x{:02x?}",
-                            payload[1]
-                        ),
-                    }
+                    });
                 }
                 ATTINY_REG_TC2_AGENT_STATE => {
-                    *TC2_AGENT_STATE.lock().unwrap() = payload[1].into();
+                    TEST_SIM_STATE.with(|s| s.borrow_mut().tc2_agent_state = payload[1].into());
                 }
                 _ => panic!("Unsupported attiny command 0x{:02x?}", payload[0]),
             },
             RTC_ADDRESS => match payload[0] {
                 RTC_REG_ALARM_MINUTES => {
-                    let mut alarm = RTC_ALARM_STATE.lock().unwrap();
-                    alarm.minutes = payload[1];
-                    alarm.hours = payload[2];
-                    alarm.day = payload[3];
-                    alarm.weekday_alarm_mode = payload[4];
+                    TEST_SIM_STATE.with(|s| {
+                        let mut s = s.borrow_mut();
+                        s.rtc_alarm_state.minutes = payload[1];
+                        s.rtc_alarm_state.hours = payload[2];
+                        s.rtc_alarm_state.day = payload[3];
+                        s.rtc_alarm_state.weekday_alarm_mode = payload[4];
+                    });
                 }
                 RTC_REG_ALARM_CONTROL => {
-                    let mut alarm = RTC_ALARM_STATE.lock().unwrap();
-                    alarm.enabled = payload[1];
+                    TEST_SIM_STATE.with(|s| s.borrow_mut().rtc_alarm_state.enabled = payload[1]);
                 }
                 _ => panic!("Unsupported RTC command"),
             },
@@ -204,7 +213,7 @@ impl<A, B> I2C<I2C1, (A, B)> {
                 }
             },
             RTC_ADDRESS => {
-                let current_time = CURRENT_TIME.lock().unwrap();
+                let current_time = TEST_SIM_STATE.with(|s| s.borrow().current_time);
                 match request[0] {
                     RTC_REG_DATETIME_SECONDS => {
                         // FIXME: If we want to compromise time integrity:
@@ -242,15 +251,16 @@ impl<A, B> I2C<I2C1, (A, B)> {
                         payload[6] = year;
                     }
                     RTC_REG_ALARM_CONTROL => {
-                        let alarm = RTC_ALARM_STATE.lock().unwrap();
-                        payload[0] = alarm.enabled;
+                        payload[0] = TEST_SIM_STATE.with(|s| s.borrow().rtc_alarm_state.enabled);
                     }
                     RTC_REG_ALARM_MINUTES => {
-                        let alarm = RTC_ALARM_STATE.lock().unwrap();
-                        payload[0] = alarm.minutes;
-                        payload[1] = alarm.hours;
-                        payload[2] = alarm.day;
-                        payload[3] = alarm.weekday_alarm_mode;
+                        TEST_SIM_STATE.with(|s| {
+                            let s = s.borrow();
+                            payload[0] = s.rtc_alarm_state.minutes;
+                            payload[1] = s.rtc_alarm_state.hours;
+                            payload[2] = s.rtc_alarm_state.day;
+                            payload[3] = s.rtc_alarm_state.weekday_alarm_mode;
+                        });
                     }
                     _ => {
                         panic!("Unsupported RTC write: {:02x?}", request);
@@ -264,62 +274,62 @@ impl<A, B> I2C<I2C1, (A, B)> {
                     BigEndian::write_u16(&mut payload[1..=2], crc);
                 }
                 ATTINY_REG_VERSION => {
-                    let attiny_firmware_version = ATTINY_FIRMWARE_VERSION.lock().unwrap();
-                    payload[0] = *attiny_firmware_version; // Set ATTINY FIRMWARE_VERSION to 1
+                    payload[0] =
+                        TEST_SIM_STATE.with(|s| s.borrow().expected_attiny_firmware_version); // Set ATTINY FIRMWARE_VERSION to 1
                     let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[payload[0]]);
                     BigEndian::write_u16(&mut payload[1..=2], crc);
                 }
                 ATTINY_REG_CAMERA_STATE => {
                     // Write the camera state:
                     {
-                        let camera_state = CAMERA_STATE.lock().unwrap();
-                        payload[0] = *camera_state as u8;
+                        payload[0] = TEST_SIM_STATE.with(|s| s.borrow().camera_state) as u8;
                         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[payload[0]]);
                         BigEndian::write_u16(&mut payload[1..=2], crc);
                     }
                     // Maybe advance the simulation?
                     {
-                        let mut camera_state = CAMERA_STATE.lock().unwrap();
-                        debug!("Got camera state {:?}", camera_state);
-                        if *camera_state == CameraState::PoweringOn {
-                            *camera_state = CameraState::PoweredOn;
-                        }
-                        if *camera_state == CameraState::PoweringOff {
-                            *camera_state = CameraState::PoweredOff;
-                            TC2_AGENT_STATE
-                                .lock()
-                                .unwrap()
-                                .unset_flag(tc2_agent_state::READY);
-                            *LAST_FRAME.lock().unwrap() = None;
-                            *FRAME_NUM.lock().unwrap() = 0;
-                        }
+                        TEST_SIM_STATE.with(|s| {
+                            let mut s = s.borrow_mut();
+                            debug!("Got camera state {:?}", s.camera_state);
+                            if s.camera_state == CameraState::PoweringOn {
+                                s.camera_state = CameraState::PoweredOn;
+                            }
+                            if s.camera_state == CameraState::PoweringOff {
+                                s.camera_state = CameraState::PoweredOff;
+                                s.tc2_agent_state.unset_flag(tc2_agent_state::READY);
+                                s.last_frame = None;
+                                s.frame_num = 0;
+                            }
+                        });
                     }
                     {
-                        let camera_state = CAMERA_STATE.lock().unwrap();
-                        debug!("Got updated camera state {:?}", camera_state);
+                        debug!(
+                            "Got updated camera state {:?}",
+                            TEST_SIM_STATE.with(|s| s.borrow().camera_state)
+                        );
                     }
                 }
                 ATTINY_REG_RP2040_PI_POWER_CTRL => {
-                    let power_state = ATTINY_POWER_CTRL_STATE.lock().unwrap();
-                    payload[0] = *power_state;
+                    payload[0] = TEST_SIM_STATE.with(|s| s.borrow().attiny_power_ctrl_state);
                     let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[payload[0]]);
                     BigEndian::write_u16(&mut payload[1..=2], crc);
                 }
                 ATTINY_REG_TC2_AGENT_STATE => {
                     // Once we're powered on, we care about the tc2-agent state.
                     {
-                        let agent_state = TC2_AGENT_STATE.lock().unwrap();
-                        payload[0] = u8::from(*agent_state);
+                        payload[0] = u8::from(TEST_SIM_STATE.with(|s| s.borrow().tc2_agent_state));
                         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[payload[0]]);
                         BigEndian::write_u16(&mut payload[1..=2], crc);
                     }
                     {
                         //Advance state
-                        let mut agent_state = TC2_AGENT_STATE.lock().unwrap();
-                        debug!("Got tc2-agent state {}", agent_state);
-                        if !agent_state.flag_is_set(tc2_agent_state::READY) {
-                            agent_state.set_flag(tc2_agent_state::READY);
-                        }
+                        TEST_SIM_STATE.with(|s| {
+                            let mut s = s.borrow_mut();
+                            debug!("Got tc2-agent state {}", s.tc2_agent_state);
+                            if !s.tc2_agent_state.flag_is_set(tc2_agent_state::READY) {
+                                s.tc2_agent_state.set_flag(tc2_agent_state::READY);
+                            }
+                        });
                     }
                 }
                 ATTINY_REG_CAMERA_CONNECTION => {}
@@ -329,7 +339,7 @@ impl<A, B> I2C<I2C1, (A, B)> {
         }
         Ok(())
     }
-    pub fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), I2cError> {
+    pub fn read(&mut self, _address: u8, _buffer: &mut [u8]) -> Result<(), I2cError> {
         Ok(())
     }
 
