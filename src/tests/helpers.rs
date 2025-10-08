@@ -42,15 +42,11 @@ pub fn simulate_camera_with_config(
     );
     let end_time = until;
     loop {
-        let mut now = Utc::now();
-        TEST_SIM_STATE.with(|state| {
+        let now = TEST_SIM_STATE.with(|state| {
             let mut state = state.borrow_mut();
-            now = state.current_time;
             // Reset ROSC_ITERATOR:
             state.rosc_drive_iterator = 0;
-            //state.current_thermal_window
-            // *CURRENT_THERMAL_WINDOW.lock().unwrap() =
-            //     Some(config.next_recording_window(&now.naive_utc()));
+            state.current_time
         });
         if now > end_time {
             break;

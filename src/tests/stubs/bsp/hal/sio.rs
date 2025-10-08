@@ -151,12 +151,12 @@ pub fn advance_one_frame() {
                     let has_trigger = triggers.contains(&(minutes_into_thermal_window as u32));
                     if has_trigger {
                         if let Ok(frame) = s.cptv_decoder.as_mut().unwrap().next_frame() {
-                            info!(
-                                "Trigger frame {}, minutes_info_window {}, now {}",
-                                frame.time_on,
-                                minutes_into_thermal_window,
-                                FormattedNZTime(current_time)
-                            );
+                            // info!(
+                            //     "Trigger frame {}, minutes_info_window {}, now {}",
+                            //     frame.time_on,
+                            //     minutes_into_thermal_window,
+                            //     FormattedNZTime(current_time)
+                            // );
                             s.last_frame = Some(frame.clone());
                         } else {
                             // Clip ended, load up a new decoder with the next file,

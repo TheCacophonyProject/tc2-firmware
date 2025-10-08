@@ -1480,6 +1480,9 @@ impl OnboardFlash {
         recording_file_type: RecordingFileType,
         time: Option<&SyncedDateTime>,
     ) -> Result<(), &str> {
+        if user_bytes_length == 0 {
+            return Ok(());
+        }
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
 

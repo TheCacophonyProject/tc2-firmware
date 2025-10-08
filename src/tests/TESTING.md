@@ -103,4 +103,7 @@ Run the entire test suite with:
 Run a single test with a command like:
 `cargo test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu --package tc2-firmware --test tc2-firmware-tests tests::testing::low_power__default_window__audio_and_thermal::low_power_mode_dusk_til_dawn_audio_and_thermal -- --exact`
 
+Note that if you're on a different platform, you may need to specify a different target architecture e.g.
+`--target=aarch64-apple-darwin`
+
 You may wish to set the the `RUST_LOG` environment variable to `debug` or `info` to see more verbose output.

@@ -361,7 +361,7 @@ impl<'a> CptvStream<'a> {
                 num_bytes,
                 RecordingFileType::Cptv(self.recording_type),
             );
-            self.cursor.flush_residual_bits();
+            self.cursor.flush_residual_bits(false);
         }
     }
 
@@ -394,7 +394,7 @@ impl<'a> CptvStream<'a> {
                     page_index,
                     RecordingFileType::Cptv(self.recording_type),
                 );
-                self.cursor.flush_residual_bits();
+                self.cursor.flush_residual_bits(false);
             }
         }
         self.cursor.write_bits(
@@ -409,7 +409,7 @@ impl<'a> CptvStream<'a> {
                 page_index,
                 RecordingFileType::Cptv(self.recording_type),
             );
-            self.cursor.flush_residual_bits();
+            self.cursor.flush_residual_bits(false);
         }
     }
 
@@ -546,11 +546,11 @@ impl<'a> CptvStream<'a> {
                 page_index,
                 RecordingFileType::Cptv(self.recording_type),
             );
-            self.cursor.flush_residual_bits();
+            self.cursor.flush_residual_bits(false);
         }
 
         // Align to the nearest full byte after finishing the stream.
-        let needs_flush = self.cursor.end_aligned();
+        let (needs_flush, (remaining_bytes, remaining_bytes_len)) = self.cursor.end_aligned();
         if needs_flush {
             let (to_flush, num_bytes) = self.cursor.flush();
             _ = fs.append_recording_bytes_at_location(
@@ -560,10 +560,13 @@ impl<'a> CptvStream<'a> {
                 page_index,
                 RecordingFileType::Cptv(self.recording_type),
             );
-            self.cursor.flush_residual_bits();
+            for byte in &remaining_bytes[..remaining_bytes_len as usize] {
+                self.cursor.write_byte(*byte);
+            }
+            self.cursor.flush_residual_bits(false);
         }
 
-        // Write the CRC value for the uncompressed input date of the gzip stream.
+        // Write the CRC value for the uncompressed input data of the gzip stream.
         let mut buf = [0u8; 4];
         LittleEndian::write_u32(&mut buf, self.crc_val);
         for b in buf {
@@ -576,7 +579,7 @@ impl<'a> CptvStream<'a> {
                     page_index,
                     RecordingFileType::Cptv(self.recording_type),
                 );
-                self.cursor.flush_residual_bits();
+                self.cursor.flush_residual_bits(false);
             }
         }
         // Write the total uncompressed length of input data
@@ -591,33 +594,79 @@ impl<'a> CptvStream<'a> {
                     page_index,
                     RecordingFileType::Cptv(self.recording_type),
                 );
-                self.cursor.flush_residual_bits();
+                self.cursor.flush_residual_bits(false);
             }
         }
         // Flush out any remaining bits in the accumulator, align them to the nearest full byte,
         // and write out to storage.
-
-        // FIXME:
-        let _ = self.cursor.end_aligned();
-        let (to_flush, num_bytes) = self.cursor.flush();
+        let (_needs_flush, (remaining_bytes, remaining_bytes_len)) = self.cursor.end_aligned();
         if at_header_location {
-            let _ = fs.append_recording_bytes_at_location_with_time(
-                to_flush,
-                num_bytes,
-                block_index,
-                page_index,
-                RecordingFileType::Cptv(self.recording_type),
-                time,
-            );
+            if remaining_bytes_len == 0 {
+                let (to_flush, num_bytes) = self.cursor.flush();
+                let _ = fs.append_recording_bytes_at_location_with_time(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    RecordingFileType::Cptv(self.recording_type),
+                    time,
+                );
+            } else {
+                let (to_flush, num_bytes) = self.cursor.flush();
+                let _ = fs.append_recording_bytes_at_location(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    RecordingFileType::Cptv(self.recording_type),
+                );
+                for byte in &remaining_bytes[..remaining_bytes_len as usize] {
+                    self.cursor.write_byte(*byte);
+                }
+                self.cursor.flush_residual_bits(true);
+                let (to_flush, num_bytes) = self.cursor.flush();
+                let _ = fs.append_recording_bytes_at_location_with_time(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    RecordingFileType::Cptv(self.recording_type),
+                    time,
+                );
+            }
         } else {
             // Write the last part of the file
-            let _ = fs.append_last_recording_bytes_at_location(
-                to_flush,
-                num_bytes,
-                block_index,
-                page_index,
-                RecordingFileType::Cptv(self.recording_type),
-            );
+            if remaining_bytes_len == 0 {
+                let (to_flush, num_bytes) = self.cursor.flush();
+                let _ = fs.append_last_recording_bytes_at_location(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    RecordingFileType::Cptv(self.recording_type),
+                );
+            } else {
+                let (to_flush, num_bytes) = self.cursor.flush();
+                let _ = fs.append_recording_bytes_at_location(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    RecordingFileType::Cptv(self.recording_type),
+                );
+                for byte in &remaining_bytes[..remaining_bytes_len as usize] {
+                    self.cursor.write_byte(*byte);
+                }
+                self.cursor.flush_residual_bits(true);
+                let (to_flush, num_bytes) = self.cursor.flush();
+                let _ = fs.append_last_recording_bytes_at_location(
+                    to_flush,
+                    num_bytes,
+                    block_index,
+                    page_index,
+                    RecordingFileType::Cptv(self.recording_type),
+                );
+            }
         }
     }
 
