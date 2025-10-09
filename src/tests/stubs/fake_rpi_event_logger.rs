@@ -1,7 +1,9 @@
 extern crate std;
 
 use crate::device_config::AudioMode;
+use crate::formatted_time::FormattedNZTime;
 use byteorder::{ByteOrder, LittleEndian};
+use chrono::{DateTime, Utc};
 use log::info;
 use std::format;
 use std::string::String;
@@ -286,10 +288,28 @@ impl TryFrom<u16> for LoggerEventKind {
     }
 }
 
-#[derive(Debug)]
 pub struct LoggerEvent {
     pub timestamp: i64,
     pub event: LoggerEventKind,
+}
+
+impl LoggerEvent {
+    pub fn inner_time(&self) -> String {
+        match self.event {
+            LoggerEventKind::Rp2040MissedAudioAlarm(ts)
+            | LoggerEventKind::SetAudioAlarm(ts)
+            | LoggerEventKind::SetThermalAlarm(ts) => {
+                format!(
+                    "({})",
+                    FormattedNZTime(
+                        DateTime::from_timestamp_millis(ts / 1000)
+                            .unwrap_or(chrono::Local::now().with_timezone(&Utc))
+                    ),
+                )
+            }
+            _ => String::from(""),
+        }
+    }
 }
 
 impl LoggerEvent {

@@ -72,7 +72,7 @@ pub struct FileOffload {
     pub offloaded_at: DateTime<Utc>,
 }
 
-impl std::fmt::Debug for FileOffload {
+impl core::fmt::Debug for FileOffload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(
             f,
@@ -106,12 +106,13 @@ impl core::fmt::Debug for EventOffload {
             format!(
                 r#"EventOffload {{
     event: LoggerEvent {{
-        event: {:?},
+        event: {:?} {},
         time: {}
     }},
     offloaded_at: {},
 }}"#,
                 self.event.event,
+                self.event.inner_time(),
                 FormattedNZTime(
                     DateTime::from_timestamp_millis(self.event.timestamp / 1000)
                         .unwrap_or(chrono::Local::now().with_timezone(&Utc))
