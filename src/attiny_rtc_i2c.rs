@@ -9,10 +9,10 @@ use core::cmp::PartialEq;
 use crc::{Algorithm, Crc};
 use defmt::{Format, Formatter, error, info, warn};
 use embedded_hal::delay::DelayNs;
-use embedded_hal::digital::InputPin;
+use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::i2c::{Error, ErrorKind, I2c};
 use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
-use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullDown, PullUp, SioInput};
+use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullNone, PullUp, SioInput, SioOutput};
 use rp2040_hal::{I2C, Timer};
 
 pub type I2CConfig = I2C<
@@ -23,8 +23,8 @@ pub type I2CConfig = I2C<
     ),
 >;
 
-type I2cUnlockedPin = Pin<Gpio3, FunctionSio<SioInput>, PullDown>;
-type I2cLockedPin = Pin<Gpio3, FunctionSio<SioInput>, PullUp>;
+type I2cUnlockedPin = Pin<Gpio3, FunctionSio<SioInput>, PullUp>;
+type I2cLockedPin = Pin<Gpio3, FunctionSio<SioOutput>, PullNone>;
 
 // Attiny + RTC comms
 // NOTE: Early on in development we got strange errors when the raspberry pi was accessing the
@@ -811,11 +811,14 @@ impl MainI2C {
         }
     }
 
-    fn take_i2c_attiny_lock(&mut self) -> Option<I2cLockedPin> {
+    /// Take the lock only if the line is currently HIGH (unlocked).
+    fn take_i2c_lock(&mut self) -> Option<I2cLockedPin> {
         let mut lock_pin = self.unlocked_pin.take().unwrap();
-        let is_low = lock_pin.is_low().unwrap_or(false);
-        if is_low {
-            let pin = lock_pin.into_pull_type::<PullUp>();
+        if lock_pin.is_high().unwrap_or(false) {
+            let mut pin: I2cLockedPin = lock_pin
+                .into_push_pull_output()
+                .into_pull_type::<PullNone>();
+            let _ = pin.set_low();
             Some(pin)
         } else {
             self.unlocked_pin = Some(lock_pin);
@@ -823,8 +826,10 @@ impl MainI2C {
         }
     }
 
-    fn restore_i2c_attiny_lock_pin(&mut self, pin: I2cLockedPin) {
-        self.unlocked_pin = Some(pin.into_pull_type::<PullDown>());
+    /// Restore the pin to "unlocked" (input set to pull-up).
+    fn restore_i2c_lock_pin(&mut self, pin: I2cLockedPin) {
+        let pin: I2cUnlockedPin = pin.into_pull_up_input();
+        self.unlocked_pin = Some(pin);
     }
 
     fn with_i2c<SUCCESS>(
@@ -836,9 +841,9 @@ impl MainI2C {
         let max_attempts = max_attempts.unwrap_or(DEFAULT_MAX_I2C_ATTEMPTS);
         loop {
             assert!(self.unlocked_pin.is_some(), "Should have unlocked pin");
-            let result = if let Some(pin) = self.take_i2c_attiny_lock() {
+            let result = if let Some(pin) = self.take_i2c_lock() {
                 let result = func(&mut self.i2c);
-                self.restore_i2c_attiny_lock_pin(pin);
+                self.restore_i2c_lock_pin(pin);
                 result
             } else {
                 Err("Failed to get i2c lock")
