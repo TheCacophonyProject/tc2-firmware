@@ -235,7 +235,7 @@ fn offload_recordings_and_events(
                         } else if metadata == FileType::CptvShutdown {
                             info!("Offloading CPTV shutdown status recording");
                         } else if metadata == FileType::CptvUserRequested {
-                            info!("Offloading CPTV tests recording");
+                            info!("Offloading CPTV test recording");
                         } else {
                             info!("Offloading scheduled CPTV recording");
                         }
@@ -245,7 +245,7 @@ fn offload_recordings_and_events(
                         } else if metadata == FileType::AudioShutdown {
                             info!("Offloading audio shutdown status recording");
                         } else if metadata == FileType::AudioUserRequested {
-                            info!("Offloading tests audio recording");
+                            info!("Offloading test audio recording");
                         } else {
                             info!("Offloading scheduled audio recording");
                         }
@@ -305,7 +305,7 @@ fn offload_recordings_and_events(
                 part_count += 1;
                 if is_last_page_for_file {
                     // NOTE: This could also be the *first* page of the file for
-                    //  tests/status recordings.
+                    //  test/status recordings.
                     file_count += 1;
                     info!("Offloaded {} file(s)", file_count);
                     watchdog.feed();

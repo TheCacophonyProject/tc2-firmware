@@ -597,7 +597,7 @@ pub fn thermal_motion_task(
                 && test_recording.is_some()
                 && !fs.is_nearly_full_for_thermal_recordings()
             {
-                // Take tests recording.
+                // Take test recording.
                 test_recording_in_progress = test_recording.take();
                 should_start_new_recording = true;
             }
@@ -645,7 +645,7 @@ pub fn thermal_motion_task(
                     );
                 } else if test_recording_in_progress.is_some() {
                     info!(
-                        "Making user-requested tests recording {:?}",
+                        "Making user-requested test recording {:?}",
                         test_recording_in_progress
                     );
                 }
@@ -715,7 +715,7 @@ pub fn thermal_motion_task(
                     // Clear out prev frame before starting a new recording stream.
                     prev_frame_2.fill(0);
                     if test_recording_in_progress.take().is_some() {
-                        // Finished requested tests recording, restart now.
+                        // Finished requested test recording, restart now.
                         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {
                             error!("Failed to clear mode flags {}", e);
                         }
@@ -1015,7 +1015,7 @@ fn do_periodic_bookkeeping(
             warn!("Make shutdown status recording");
             bk.status_recording.next_state();
         } else if user_requested_recording.is_some() {
-            // Do nothing, there's a tests recording in progress
+            // Do nothing, there's a test recording in progress
         } else if let Some(scheduled_alarm) = i2c.get_scheduled_alarm(time)
             && scheduled_alarm.has_triggered()
         {

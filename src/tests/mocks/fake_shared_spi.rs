@@ -343,7 +343,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         s.borrow()
             .device_config
             .as_ref()
-            .expect("No tests device config set")
+            .expect("No test device config set")
             .clone()
     });
 

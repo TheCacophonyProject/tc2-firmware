@@ -76,10 +76,10 @@ pub struct RecordingState {
     // which we sync back periodically.
     rp2040_recording_state_inner: Arc<AtomicU8>,
 
-    // This stores the user-requested tests audio recording status
+    // This stores the user-requested test audio recording status
     audio_test_recording_state_inner: Arc<AtomicU8>,
 
-    // This stores the user-requested tests low power thermal recording status
+    // This stores the user-requested test low power thermal recording status
     lp_thermal_test_recording_state_inner: Arc<AtomicU8>,
 
     // This reflects the current mode that the rp2040 has booted in, which is
@@ -535,7 +535,7 @@ impl RecordingState {
     pub fn request_audio_recording_from_rp2040(&mut self) -> bool {
         self.sync_state_from_attiny();
         if self.is_recording() {
-            info!("Requested audio tests recording, but rp2040 is already recording");
+            info!("Requested audio test recording, but rp2040 is already recording");
             false
         } else {
             let state: u8 = self
@@ -575,20 +575,20 @@ impl RecordingState {
     pub fn request_thermal_recording_from_rp2040(&mut self) -> bool {
         self.sync_state_from_attiny();
         if self.is_recording() {
-            info!("Requested thermal tests recording, but rp2040 is already recording");
+            info!("Requested thermal test recording, but rp2040 is already recording");
             false
         } else {
             let state: u8 = self
                 .lp_thermal_test_recording_state_inner
                 .load(Ordering::Relaxed);
             if state == TestRecordingState::ShortTestRecordingRequested as u8 {
-                info!("Request short tests thermal recording");
+                info!("Request short test thermal recording");
                 self.merge_state_to_attiny(
                     Some(tc2_agent_state::THERMAL_MODE | tc2_agent_state::SHORT_TEST_RECORDING),
                     None,
                 );
             } else if state == TestRecordingState::LongTestRecordingRequested as u8 {
-                info!("Request long tests thermal recording");
+                info!("Request long test thermal recording");
                 self.merge_state_to_attiny(
                     Some(tc2_agent_state::THERMAL_MODE | tc2_agent_state::LONG_TEST_RECORDING),
                     None,

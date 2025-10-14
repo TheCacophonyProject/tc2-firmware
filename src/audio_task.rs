@@ -112,7 +112,7 @@ pub fn record_audio(
         info!("Recording failed, restarting and will try again");
     } else {
         // If the audio recording succeeded, we'll restart and possibly offload if
-        // this was a user-requested tests recording.
+        // this was a user-requested test recording.
         events.log(Event::EndedRecording, &time, &mut fs);
         watchdog.feed();
         if let Err(e) = i2c.tc2_agent_clear_mode_flags() {

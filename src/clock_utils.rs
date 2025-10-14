@@ -137,7 +137,7 @@ fn rosc_frequency_count_hz(clocks: &CLOCKS) -> HertzU32 {
         .fc0_ref_khz()
         .write(|w| unsafe { w.fc0_ref_khz().bits(XOSC_CRYSTAL_FREQ / 1000) });
 
-    // Corresponds to a 1ms tests time, which seems to give good enough accuracy
+    // Corresponds to a 1ms test time, which seems to give good enough accuracy
     clocks
         .fc0_interval()
         .write(|w| unsafe { w.fc0_interval().bits(10) });

@@ -365,7 +365,7 @@ pub fn real_main() {
     let current_recording_window = current_recording_window.unwrap();
     let record_audio_now = if let RecordingMode::Audio(recording_request_type) = recording_mode {
         if prioritise_frame_preview && !recording_request_type.is_user_requested() {
-            // We're not trying to make a tests audio recording, and the user is interacting
+            // We're not trying to make a test audio recording, and the user is interacting
             // with sidekick.
             false
         } else {
