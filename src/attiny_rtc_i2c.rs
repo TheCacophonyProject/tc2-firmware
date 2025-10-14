@@ -779,8 +779,9 @@ impl MainI2C {
         #[allow(clippy::cast_possible_truncation)]
         let wake_day = wakeup_datetime_utc.date_naive().day() as u8;
 
-        info!(
-            "Set alarm in mode {}, Current time: {}, Next alarm: {}",
+        debug!(
+            "Set alarm in {} mins,  mode {}, Current time: {}, Next alarm: {}",
+            (*wakeup_datetime_utc - now.date_time_utc).num_minutes(),
             mode,
             now,
             FormattedNZTime(*wakeup_datetime_utc)
@@ -843,7 +844,7 @@ impl MainI2C {
                     } else if alarm_mode != mode {
                         Err("alarm mode didn't match set alarm mode")
                     } else {
-                        info!("Got scheduled alarm.");
+                        debug!("Got scheduled alarm.");
                         Ok(())
                     }
                 }

@@ -2,7 +2,7 @@ use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDet
 use crate::pdm_filter::PDMFilter;
 use crate::re_exports::bsp;
 use crate::re_exports::bsp::pac::PIO1;
-use crate::re_exports::log::{info, warn};
+use crate::re_exports::log::{debug, info, warn};
 use crate::synced_date_time::SyncedDateTime;
 #[cfg(feature = "no-std")]
 use cortex_m::prelude::*;
@@ -104,7 +104,7 @@ impl PdmMicrophone {
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
-        info!(
+        debug!(
             "mic clock speed {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0
         );
@@ -175,7 +175,7 @@ impl PdmMicrophone {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
         let clock_divider = self.system_clock_hz.to_MHz() as f32 / (clock_rate * 2.0);
 
-        info!(
+        debug!(
             "Altering mic clock to {} divider {}",
             clock_rate, clock_divider
         );
@@ -184,7 +184,7 @@ impl PdmMicrophone {
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
         sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
-        info!(
+        debug!(
             "Altered mic clock speed {} divider {} fraction {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
             clock_divider as u16,
@@ -220,7 +220,7 @@ impl PdmMicrophone {
         time: &SyncedDateTime,
         user_requested_test_recording: bool,
     ) -> bool {
-        info!("Recording for {} seconds ", num_seconds);
+        info!("Recording audio for {} seconds ", num_seconds);
         self.enable();
 
         let mut timer = time.get_timer();
@@ -235,7 +235,7 @@ impl PdmMicrophone {
         #[allow(clippy::cast_precision_loss)]
         #[allow(clippy::cast_possible_truncation)]
         let adjusted_sample_rate = self.alter_mic_clock(3.072) as u32;
-        info!(
+        debug!(
             "Adjusted sample rate becomes {}, system clock {}",
             adjusted_sample_rate,
             self.system_clock_hz.to_MHz()

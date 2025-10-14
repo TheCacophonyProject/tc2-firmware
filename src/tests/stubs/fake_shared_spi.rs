@@ -3,8 +3,8 @@ use crate::byte_slice_cursor::Cursor;
 use crate::ext_spi_transfers::{RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH};
 use crate::onboard_flash::{
     BLOCK_ERASE, BlockIndex, CACHE_READ, FEATURE_STATUS, FLASH_SPI_HEADER, FLASH_SPI_HEADER_SMALL,
-    GET_FEATURES, OnboardFlash, PAGE_READ, PROGRAM_EXECUTE, PROGRAM_LOAD, PageIndex, RESET,
-    SET_FEATURES, WRITE_ENABLE,
+    FLASH_USER_PAGE_SIZE, FlashSpiFullPayload, GET_FEATURES, OnboardFlash, PAGE_READ,
+    PROGRAM_EXECUTE, PROGRAM_LOAD, Page, PageIndex, RESET, SET_FEATURES, WRITE_ENABLE,
 };
 use crate::tests::stubs::fake_rpi_event_logger::{
     DiscardedRecordingInfo, FileType, LoggerEvent, LoggerEventKind, NewConfigInfo, WakeReason,
@@ -34,6 +34,122 @@ pub struct SpiEnabledPeripheral {
 pub struct StoragePage {
     pub inner: [u8; 2048 + 128],
 }
+
+impl StoragePage {
+    fn cache_data(&self) -> &[u8] {
+        &self.inner[..]
+    }
+
+    pub fn user_data(&self) -> &[u8] {
+        &self.cache_data()[0..FLASH_USER_PAGE_SIZE]
+    }
+
+    #[allow(dead_code)]
+    pub fn metadata(&self) -> &[u8] {
+        &self.cache_data()[FLASH_USER_PAGE_SIZE..]
+    }
+
+    pub fn user_metadata_1(&self) -> &[u8] {
+        &self.cache_data()[0x820..=0x83f]
+    }
+
+    fn bad_block_data(&self) -> &[u8] {
+        &self.cache_data()[0x800..=0x803]
+    }
+
+    pub fn is_part_of_bad_block(&self) -> bool {
+        self.bad_block_data().iter().any(|x| x != &0xff)
+    }
+
+    // User metadata 1 contains 32 bytes total
+    // [0] = set to zero if page is used.
+    // [1] = set to zero if this is the *last* page for a file.
+    // [2, 3] = length of page used as little-endian u16
+    pub fn page_is_used(&self) -> bool {
+        self.user_metadata_1()[0] == 0
+    }
+
+    pub fn is_user_requested_test_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b011 == 0b010
+    }
+
+    pub fn is_status_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b001 == 0b001
+    }
+
+    pub fn is_startup_status_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b011 == 0b001
+    }
+
+    pub fn is_shutdown_status_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b011 == 0b011
+    }
+
+    pub fn is_cptv_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b100 == 0b100
+    }
+
+    pub fn is_audio_recording(&self) -> bool {
+        self.user_metadata_1()[4] & 0b100 == 0b000
+    }
+
+    pub fn file_type(&self) -> crate::onboard_flash::FileType {
+        if self.is_cptv_recording() {
+            if self.is_startup_status_recording() {
+                crate::onboard_flash::FileType::CptvStartup
+            } else if self.is_shutdown_status_recording() {
+                crate::onboard_flash::FileType::CptvShutdown
+            } else if self.is_user_requested_test_recording() {
+                crate::onboard_flash::FileType::CptvUserRequested
+            } else {
+                crate::onboard_flash::FileType::CptvScheduled
+            }
+        } else if self.is_user_requested_test_recording() {
+            crate::onboard_flash::FileType::AudioUserRequested
+        } else {
+            crate::onboard_flash::FileType::AudioScheduled
+        }
+    }
+
+    // NOTE: File written time is only available in the metadata section of the *first page* in a file.
+    pub fn file_written_time(&self) -> Option<DateTime<Utc>> {
+        let start = LittleEndian::read_u16(&self.user_metadata_1()[16..=17]);
+        if start == u16::MAX {
+            None
+        } else {
+            let timetamp = LittleEndian::read_i64(&self.user_metadata_1()[16..24]);
+            DateTime::from_timestamp_micros(timetamp)
+        }
+    }
+
+    pub fn file_start_block_index(&self) -> Option<u16> {
+        let start = LittleEndian::read_u16(&self.user_metadata_1()[12..=13]);
+        if start == u16::MAX { None } else { Some(start) }
+    }
+
+    pub fn previous_file_start_block_index(&self) -> Option<u16> {
+        let block = LittleEndian::read_u16(&self.user_metadata_1()[14..=15]);
+        if block == u16::MAX { None } else { Some(block) }
+    }
+
+    fn is_last_page_for_file(&self) -> bool {
+        self.user_metadata_1()[1] == 0
+    }
+
+    pub fn page_bytes_used(&self) -> usize {
+        LittleEndian::read_u16(&self.user_metadata_1()[2..=3]) as usize
+    }
+
+    pub fn page_crc(&self) -> u16 {
+        let crc_1 = LittleEndian::read_u16(&self.user_metadata_1()[8..=9]);
+        let crc_2 = LittleEndian::read_u16(&self.user_metadata_1()[10..=11]);
+        if crc_1 != crc_2 {
+            warn!("crc mismatch {} vs {}", crc_1, crc_2);
+        }
+        crc_1
+    }
+}
+
 #[derive(Clone)]
 pub struct StorageBlock {
     pub inner: [StoragePage; 64],
@@ -48,9 +164,6 @@ pub const CAMERA_BEGIN_AND_END_FILE_TRANSFER: u8 = 0x6;
 pub const CAMERA_GET_MOTION_DETECTION_MASK: u8 = 0x7;
 pub const CAMERA_SEND_LOGGER_EVENT: u8 = 0x8;
 pub const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
-
-static NEXT_RPI_RESPONSE: LazyLock<Mutex<[u8; RPI_RETURN_PAYLOAD_LENGTH]>> =
-    LazyLock::new(|| Mutex::new([0; RPI_RETURN_PAYLOAD_LENGTH]));
 
 pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 36;
 
@@ -234,12 +347,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
             .clone()
     });
 
-    {
-        let mut return_payload_buf = NEXT_RPI_RESPONSE.lock().unwrap();
+    TEST_SIM_STATE.with(|s| {
         // This sequence is used to synchronise the return payload start on the rp2040, since
         // it seems to have a fair bit of slop/offsetting.
-        return_payload_buf[0..4].copy_from_slice(&[1, 2, 3, 4]);
-    }
+        s.borrow_mut().next_rpi_response[0..4].copy_from_slice(&[1, 2, 3, 4])
+    });
 
     let mut transfer_block = 0;
     let is_file_transfer_message =
@@ -260,24 +372,30 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
     let num_bytes_check = num_bytes == num_bytes_dup;
     if !num_bytes_check || !header_crc_check || !transfer_type_check {
         warn!("rpi received invalid message");
-        let mut return_payload_buf = NEXT_RPI_RESPONSE.lock().unwrap();
-        LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
-        LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
+        TEST_SIM_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            LittleEndian::write_u16(&mut s.next_rpi_response[4..6], 0);
+            LittleEndian::write_u16(&mut s.next_rpi_response[6..8], 0);
+        });
         // spi.write(&return_payload_buf).unwrap();
     }
     if num_bytes == 0 {
         // warn!("zero-sized payload");
-        let mut return_payload_buf = NEXT_RPI_RESPONSE.lock().unwrap();
-        LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
-        LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
+        TEST_SIM_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            LittleEndian::write_u16(&mut s.next_rpi_response[4..6], 0);
+            LittleEndian::write_u16(&mut s.next_rpi_response[6..8], 0);
+        });
         // spi.write(&return_payload_buf).unwrap();
     }
     if !(CAMERA_CONNECT_INFO..=CAMERA_STARTUP_HANDSHAKE).contains(&transfer_type) {
         // Unknown transfer type
         warn!("rpi received unknown message type");
-        let mut return_payload_buf = NEXT_RPI_RESPONSE.lock().unwrap();
-        LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
-        LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
+        TEST_SIM_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            LittleEndian::write_u16(&mut s.next_rpi_response[4..6], 0);
+            LittleEndian::write_u16(&mut s.next_rpi_response[6..8], 0);
+        });
         // spi.write(&return_payload_buf).unwrap();
     }
 
@@ -285,9 +403,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         let chunk = &bytes[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + num_bytes];
         // Write back the crc we calculated.
         let crc = crc_check.checksum(chunk);
-        let mut return_payload_buf = NEXT_RPI_RESPONSE.lock().unwrap();
-        LittleEndian::write_u16(&mut return_payload_buf[4..6], crc);
-        LittleEndian::write_u16(&mut return_payload_buf[6..8], crc);
+        TEST_SIM_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            LittleEndian::write_u16(&mut s.next_rpi_response[4..6], crc);
+            LittleEndian::write_u16(&mut s.next_rpi_response[6..8], crc);
+        });
 
         if transfer_type == CAMERA_STARTUP_HANDSHAKE {
             debug!("rPi Got camera startup handshake {chunk:?}");
@@ -296,20 +416,22 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                 TEST_SIM_STATE.with(|s| s.borrow().pending_forced_offload_request);
             let prefer_not_to_offload_files_now =
                 TEST_SIM_STATE.with(|s| s.borrow().prefer_not_to_offload_files_now);
+            TEST_SIM_STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let config_length = device_config.write_to_slice(
+                    &mut s.next_rpi_response[14..],
+                    prefer_not_to_offload_files_now,
+                    force_offload_files_now,
+                );
+                config_crc =
+                    crc_check.checksum(&s.next_rpi_response[14..14 + usize::from(config_length)]);
 
-            let config_length = device_config.write_to_slice(
-                &mut return_payload_buf[14..],
-                prefer_not_to_offload_files_now,
-                force_offload_files_now,
-            );
-            config_crc =
-                crc_check.checksum(&return_payload_buf[14..14 + usize::from(config_length)]);
-
-            LittleEndian::write_u16(&mut return_payload_buf[8..10], config_crc);
-            LittleEndian::write_u16(&mut return_payload_buf[10..12], config_crc);
-            return_payload_buf[12] = config_length;
-            return_payload_buf[13] = config_length;
-            debug!("Sending camera device config to rp2040");
+                LittleEndian::write_u16(&mut s.next_rpi_response[8..10], config_crc);
+                LittleEndian::write_u16(&mut s.next_rpi_response[10..12], config_crc);
+                s.next_rpi_response[12] = config_length;
+                s.next_rpi_response[13] = config_length;
+                debug!("Sending camera device config to rp2040");
+            });
         } else if transfer_type == CAMERA_GET_MOTION_DETECTION_MASK {
             let piece_number = &chunk[0];
             let piece = device_config.mask_piece(*piece_number as usize);
@@ -319,8 +441,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
             piece_with_length[1..1 + piece.len()].copy_from_slice(piece);
             let crc = crc_check.checksum(&piece_with_length[0..1 + piece.len()]);
             // info!("Sending camera mask config piece {piece_number}, crc {crc}");
-            LittleEndian::write_u16(&mut return_payload_buf[8..10], crc);
-            return_payload_buf[10..10 + piece.len() + 1].copy_from_slice(&piece_with_length);
+            TEST_SIM_STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                LittleEndian::write_u16(&mut s.next_rpi_response[8..10], crc);
+                s.next_rpi_response[10..10 + piece.len() + 1].copy_from_slice(&piece_with_length);
+            });
         }
         // Always write the return buffer
         // spi.write(&return_payload_buf).unwrap();
@@ -762,7 +887,10 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
     Ok(())
 }
 pub fn read_from_rpi(dst: &mut [u8]) -> Result<(), ()> {
-    let response = NEXT_RPI_RESPONSE.lock().unwrap();
-    dst.copy_from_slice(&response[..]);
+    TEST_SIM_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        dst.copy_from_slice(&state.next_rpi_response[..]);
+    });
+
     Ok(())
 }

@@ -42,7 +42,14 @@ pub enum ExtTransferMessage {
 type StaticSlot<T> = Mutex<RefCell<Option<T>>>;
 type RpiPingPin = Pin<Gpio5, FunctionSio<SioInput>, PullUp>;
 // We can store our ping pin here when we enter the ping-back interrupt
+
+#[cfg(feature = "std")]
+thread_local! { static GLOBAL_PING_PIN: StaticSlot<RpiPingPin> = Mutex::new(RefCell::new(None)); }
+#[cfg(not(feature = "std"))]
 static GLOBAL_PING_PIN: StaticSlot<RpiPingPin> = Mutex::new(RefCell::new(None));
+#[cfg(feature = "std")]
+thread_local! { static GLOBAL_ALARM: StaticSlot<Alarm0> = Mutex::new(RefCell::new(None)); }
+#[cfg(not(feature = "std"))]
 static GLOBAL_ALARM: StaticSlot<Alarm0> = Mutex::new(RefCell::new(None));
 
 #[cfg(not(feature = "std"))]
@@ -186,6 +193,11 @@ impl ExtSpiTransfers {
         // Give away our pins by moving them into the `GLOBAL_PINS` variable.
         // We won't need to access them in the main thread again
         crate::re_exports::critical_section::with(|cs| {
+            #[cfg(feature = "std")]
+            {
+                GLOBAL_PING_PIN.with(|val| val.borrow(cs).replace(Some(ping_pin)));
+            }
+            #[cfg(not(feature = "std"))]
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
         let alarm_timeout = timeout.unwrap_or(300);
@@ -194,6 +206,11 @@ impl ExtSpiTransfers {
             .expect("Alarm schedule failed");
         alarm.enable_interrupt();
         crate::re_exports::critical_section::with(|cs| {
+            #[cfg(feature = "std")]
+            {
+                GLOBAL_ALARM.with(|val| val.borrow(cs).replace(Some(alarm)));
+            }
+            #[cfg(not(feature = "std"))]
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
         });
         // Unmask the IO_BANK0/TIMER_0) IRQ so that the NVIC interrupt controller
@@ -210,6 +227,14 @@ impl ExtSpiTransfers {
         pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
         pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
         let (ping_pin, mut alarm) = crate::re_exports::critical_section::with(|cs| {
+            #[cfg(feature = "std")]
+            {
+                (
+                    GLOBAL_PING_PIN.with(|val| val.borrow(cs).take().unwrap()),
+                    GLOBAL_ALARM.with(|val| val.borrow(cs).take().unwrap()),
+                )
+            }
+            #[cfg(not(feature = "std"))]
             (
                 GLOBAL_PING_PIN.borrow(cs).take().unwrap(),
                 GLOBAL_ALARM.borrow(cs).take().unwrap(),
@@ -479,7 +504,8 @@ impl ExtSpiTransfers {
                                         self.return_payload_offset = Some(start + 8);
                                     }
                                 } else {
-                                    info!("Return crc mismatch");
+                                    // FIXME: Seeing this in test simulations
+                                    warn!("Return crc mismatch");
                                 }
                             }
                         }

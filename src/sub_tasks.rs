@@ -7,7 +7,7 @@ use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
 use crate::re_exports::bsp::hal::Watchdog;
 use crate::re_exports::bsp::pac::{DMA, RESETS};
-use crate::re_exports::log::{info, unreachable, warn};
+use crate::re_exports::log::{debug, info, unreachable, warn};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
@@ -252,7 +252,7 @@ fn offload_recordings_and_events(
                     }
                 }
                 if is_last_page_for_file {
-                    info!("Got last file part at {}:{}", block, page);
+                    debug!("Got last file part at {}:{}", block, page);
                 }
                 let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                 let current_crc = crc_check.checksum(part);

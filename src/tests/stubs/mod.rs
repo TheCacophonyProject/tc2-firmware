@@ -1,6 +1,5 @@
 pub mod bsp;
 pub mod fake_critical_section;
-pub mod fake_i2c;
 pub mod fake_rpi_detection_mask;
 pub mod fake_rpi_device_config;
 pub mod fake_rpi_event_logger;

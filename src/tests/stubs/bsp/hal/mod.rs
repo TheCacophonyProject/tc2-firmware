@@ -23,6 +23,12 @@ pub mod timer {
         fn finished(&self) -> bool {
             TEST_SIM_STATE.with(|s| {
                 let s = s.borrow();
+                if s.offloads_fail_on_restart_iteration
+                    .is_some_and(|r| r == s.restart_num)
+                {
+                    // The pi fails to respond during this restart iteration for test purposes.
+                    return true;
+                }
                 if s.camera_state.pi_is_powered_on() {
                     // Pi is ready to receive
                     !s.tc2_agent_state.is_ready()
@@ -609,6 +615,8 @@ pub mod dma {
     }
 
     pub mod double_buffer {
+        use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+
         pub struct Config<CH1, CH2, T, BUF: 'static> {
             ch: (CH1, CH2),
             rx: T,
@@ -635,7 +643,16 @@ pub mod dma {
 
         impl<CH1, CH2, BUF, T, NEXT> Transfer<(CH1, CH2), BUF, T, NEXT> {
             pub fn is_done(&self) -> bool {
-                false
+                TEST_SIM_STATE.with(|s| {
+                    let s = s.borrow();
+                    if s.audio_recording_fails_on_restart_iteration
+                        .is_some_and(|r| r == s.restart_num)
+                    {
+                        true
+                    } else {
+                        false
+                    }
+                })
             }
 
             pub fn wait(self) -> (NEXT, Transfer<(CH1, CH2), BUF, T, ()>) {

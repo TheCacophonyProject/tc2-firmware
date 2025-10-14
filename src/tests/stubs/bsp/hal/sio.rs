@@ -2,11 +2,13 @@ use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::frame_processing::FrameBuffer;
 use crate::re_exports::log::info;
 use byteorder::{ByteOrder, LittleEndian};
-use chrono::Duration;
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use codec::decode::CptvDecoder;
 extern crate std;
+use crate::attiny_rtc_i2c::decode_bcd;
 use crate::formatted_time::FormattedNZTime;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+use log::{error, warn};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::path::Path;
@@ -99,6 +101,29 @@ pub fn advance_one_frame() {
     TEST_SIM_STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.current_time += Duration::milliseconds(115);
+        let now = s.current_time;
+        if s.rtc_alarm_state.is_initialised() {
+            if !s.rtc_alarm_state.already_triggered() {
+                let minutes = decode_bcd(s.rtc_alarm_state.minutes & 0b0111_1111);
+                let hours = decode_bcd(s.rtc_alarm_state.hours & 0b0011_1111);
+                let day = decode_bcd(s.rtc_alarm_state.day & 0b0011_1111);
+
+                let naive_date =
+                    NaiveDate::from_ymd_opt(now.year(), now.month(), u32::from(day)).unwrap();
+                let naive_time =
+                    NaiveTime::from_hms_opt(u32::from(hours), u32::from(minutes), 0).unwrap();
+                let utc_datetime = NaiveDateTime::new(naive_date, naive_time).and_utc();
+                if now >= utc_datetime {
+                    // Make sure the alarm is set to "has been triggered".
+                    // warn!("Setting alarm as triggered");
+                    s.rtc_alarm_state.enabled |= 0b0000_1000;
+                    assert!(s.rtc_alarm_state.already_triggered());
+                }
+            }
+        } else {
+            error!("Alarm not initialised");
+        }
+
         if s.cptv_decoder.is_none() {
             let next_file_path = if s.current_cptv_file.is_none() {
                 s.cptv_files.as_ref().unwrap().first().unwrap().clone()
@@ -214,7 +239,6 @@ pub fn copy_last_frame(frame_buffer: &mut Option<&'static mut FrameBuffer>) {
                 let fpa_temp_kelvin_x_100 = ((frame.frame_temp_c + 273.15) * 100.0) as u16;
                 LittleEndian::write_u16(&mut header[48..=49], fpa_temp_kelvin_x_100);
 
-                // FIXME?  Check that these values come out correctly in the written file.
                 let fpa_temp_kelvin_x_100_at_last_ffc =
                     ((frame.last_ffc_temp_c + 273.15) * 100.0) as u16;
                 LittleEndian::write_u16(&mut header[58..=59], fpa_temp_kelvin_x_100_at_last_ffc);

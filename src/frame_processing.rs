@@ -327,9 +327,9 @@ pub fn thermal_motion_task(
 ) {
     info!("=== Core 0 Thermal Motion start ===");
     if THERMAL_DEV_MODE {
-        warn!("DEV MODE");
+        debug!("DEV MODE");
     } else {
-        warn!("FIELD MODE");
+        debug!("FIELD MODE");
     }
     let mut timer = time.get_timer();
     let mut peripherals = unsafe { Peripherals::steal() };
@@ -396,13 +396,13 @@ pub fn thermal_motion_task(
             StatusRecordingState::MadeStartup
         };
 
-        info!(
-            "Initial status recording state: {:?}",
-            status_recording_state
-        );
         if config.use_high_power_mode() {
             info!("High power mode");
         } else {
+            info!(
+                "Initial status recording state: {:?}",
+                status_recording_state
+            );
             info!("Low power mode");
         }
 
@@ -638,7 +638,11 @@ pub fn thermal_motion_task(
                     should_start_new_recording = false;
                     info!("Would start recording, but outside recording window");
                 } else if bk.status_recording.in_progress() {
-                    info!("Making status recording {}", bk.status_recording);
+                    info!(
+                        "Making status recording {} at {}",
+                        bk.status_recording,
+                        FormattedNZTime(time.date_time())
+                    );
                 } else if test_recording_in_progress.is_some() {
                     info!(
                         "Making user-requested tests recording {:?}",
@@ -1018,6 +1022,11 @@ fn do_periodic_bookkeeping(
             } else if scheduled_alarm.is_thermal_alarm() {
                 let _ = i2c.enter_thermal_mode();
             }
+            info!(
+                "Alarm triggered during thermal loop at {}, {}",
+                FormattedNZTime(time.date_time()),
+                scheduled_alarm,
+            );
             shutdown_lepton_thread(sio);
             return BookkeepingResponse {
                 did_execute: true,
@@ -1081,7 +1090,6 @@ fn do_periodic_bookkeeping(
             if config.use_high_power_mode() {
                 // Tell rPi it is outside its recording window in high-power
                 // mode, and can go to sleep.
-
                 if !config.is_continuous_recorder()
                     && camera_state.is_ok_and(|state| !state.pi_is_powered_off())
                     && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
@@ -1089,6 +1097,12 @@ fn do_periodic_bookkeeping(
                 {
                     events.log(Event::ToldRpiToSleep, time, fs);
                 }
+
+                warn!(
+                    "Ending current high power window at {}, restart to offload events",
+                    FormattedNZTime(time.date_time())
+                );
+
                 // Restart to clear events
                 shutdown_lepton_thread(sio);
                 return BookkeepingResponse {
@@ -1162,7 +1176,7 @@ fn advance_time_by_n_frames(frames_elapsed: u32, time: &mut SyncedDateTime) {
 }
 
 fn shutdown_lepton_thread(sio: &mut Sio) {
-    info!("Tell core1 to get ready to sleep");
+    info!("Power down lepton");
     // Power down frame acquisition
     // Tell core1 we're exiting the recording loop, and it should
     // power down the lepton module, then restart us.

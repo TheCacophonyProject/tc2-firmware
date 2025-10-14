@@ -2,6 +2,7 @@ extern crate std;
 
 use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState};
 use crate::device_config::DeviceConfig as FirmwareDeviceConfig;
+use crate::ext_spi_transfers::RPI_RETURN_PAYLOAD_LENGTH;
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{BlockIndex, PageIndex};
 use crate::tests::stubs::fake_rpi_device_config::DeviceConfig;
@@ -31,6 +32,10 @@ impl RtcAlarm {
             && self.day == 0
             && self.weekday_alarm_mode == 0
             && self.enabled == 0)
+    }
+
+    pub fn already_triggered(&self) -> bool {
+        self.enabled & 0b0000_1000 == 0b0000_1000
     }
 }
 
@@ -63,6 +68,10 @@ pub struct SimState {
     pub(crate) cptv_decoder: Option<codec::decode::CptvDecoder<std::fs::File>>,
     pub(crate) current_thermal_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
     pub(crate) current_test_window: (DateTime<Utc>, DateTime<Utc>),
+    pub(crate) next_rpi_response: [u8; RPI_RETURN_PAYLOAD_LENGTH],
+    pub(crate) restart_num: u32,
+    pub(crate) offloads_fail_on_restart_iteration: Option<u32>,
+    pub(crate) audio_recording_fails_on_restart_iteration: Option<u32>,
 }
 
 pub struct FileOffload {
@@ -166,6 +175,10 @@ thread_local! {
         cptv_files: None,
         current_cptv_file: None,
         cptv_decoder: None,
+        next_rpi_response: [0; RPI_RETURN_PAYLOAD_LENGTH],
+        restart_num: 0,
+        offloads_fail_on_restart_iteration: None,
+        audio_recording_fails_on_restart_iteration: None,
     });
 
 }

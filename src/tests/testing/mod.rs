@@ -1,7 +1,9 @@
 #![allow(non_snake_case)]
+mod audio_cant_keep_up;
+mod bad_flash_blocks;
+mod flash_ecc_errors;
 mod high_power__always_on__audio_and_thermal;
 mod high_power__always_on__audio_disabled;
-mod high_power__audio_only;
 mod high_power__default_window__audio_and_thermal;
 mod high_power__default_window__audio_disabled;
 mod high_power__default_window__audio_or_thermal;
@@ -17,3 +19,4 @@ mod low_power__default_window__audio_or_thermal;
 mod low_power__fixed_window__audio_and_thermal;
 mod low_power__fixed_window__audio_disabled;
 mod low_power__fixed_window__audio_or_thermal;
+mod rpi_spi_offload_errors;

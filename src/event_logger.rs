@@ -300,7 +300,7 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
     }
 }
 
-type EventIndex = u16;
+pub(crate) type EventIndex = u16;
 
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "std", derive(Debug))]
@@ -379,13 +379,14 @@ pub const MAX_EVENTS_IN_LOGGER: u16 = 1280;
 const EVENT_CODE_LENGTH: usize = 2;
 const EVENT_TIMESTAMP_LENGTH: usize = 8;
 const EVENT_PAYLOAD_LENGTH: usize = 8;
-const EVENT_LENGTH: usize = EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH + EVENT_PAYLOAD_LENGTH;
+pub(crate) const EVENT_LENGTH: usize =
+    EVENT_CODE_LENGTH + EVENT_TIMESTAMP_LENGTH + EVENT_PAYLOAD_LENGTH;
 
 // 2043, 2044, 2045, 2046, 2047: event log
 // 2041, 2042: device config
 
-const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 5;
-const FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS;
+pub(crate) const FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS - 5;
+pub(crate) const FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX: u16 = TOTAL_FLASH_BLOCKS;
 pub struct EventLogger {
     next_event_index: Option<EventIndex>,
 }

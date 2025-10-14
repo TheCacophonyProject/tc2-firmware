@@ -193,8 +193,6 @@ pub fn real_main() {
     );
     if let Err(e) = dc_result {
         error!("{:?}", e);
-
-        // FIXME: Need to make sure we're writing to fake flash to drive this forwards.
         // NOTE: returns and restarts if we can't get a config.
         return;
     }
@@ -395,6 +393,9 @@ pub fn real_main() {
             sm1,
         );
     } else {
+        // If we're in audio only mode, but it's not time to record audio, we should immediately go
+        // to sleep.
+
         let current_recording_window = if THERMAL_DEV_MODE {
             (time.date_time(), time.date_time() + Duration::minutes(60))
         } else {
@@ -422,13 +423,23 @@ pub fn real_main() {
             "Alarm is in the future: {}, is not imminent: {}",
             alarm_is_in_the_future, alarm_is_not_imminent
         );
-        let should_shutdown = recording_mode == RecordingMode::None
-            && !inside_thermal_window
-            && alarm_is_not_imminent
-            && i2c
-                .get_camera_state()
-                .is_ok_and(CameraState::pi_is_powered_off);
+        let should_shutdown = config.is_audio_only_device()
+            || (recording_mode == RecordingMode::None
+                && !inside_thermal_window
+                && alarm_is_not_imminent
+                && i2c
+                    .get_camera_state()
+                    .is_ok_and(CameraState::pi_is_powered_off));
         if should_shutdown {
+            if config.is_audio_only_device()
+                && i2c
+                    .get_camera_state()
+                    .is_ok_and(|state| !state.pi_is_powered_off())
+                && i2c.advise_raspberry_pi_it_may_shutdown().is_ok()
+            {
+                events.log(Event::ToldRpiToSleep, &time, &mut fs);
+            }
+
             info!("Tell attiny to shut us down");
             events.log(Event::Rp2040Sleep, &time, &mut fs);
             timer.delay_ms(1000);

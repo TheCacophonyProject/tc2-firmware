@@ -84,8 +84,7 @@ to 00:00, or 12:00 to 12:00.
 | High power | Absolute: 10am - 10pm    | AudioOrThermal       | `./testing/high_power__fixed_window__audio_or_thermal.rs`    | 
 | High power | Relative: Dusk-Dawn      | AudioAndThermal      | `./testing/high_power__default_window__audio_and_thermal.rs` | 
 | High power | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/high_power__fixed_window__audio_and_thermal.rs`   | 
-| High power | Absolute: 24/7           | AudioAndThermal      | `./testing/high_power__always_on__audio_and_thermal.rs`      | 
-| High power | N/A                      | AudioOnly            | `./testing/high_power__audio_only.rs`                        | 
+| High power | Absolute: 24/7           | AudioAndThermal      | `./testing/high_power__always_on__audio_and_thermal.rs`      |  
 | Low power  | Relative: Dusk-Dawn      | Disabled             | `./testing/low_power__default_window__audio_disabled.rs`     | 
 | Low power  | Absolute: 24/7           | Disabled             | `./testing/low_power__always_on__audio_disabled.rs`          | 
 | Low power  | Absolute: 10am - 10pm    | Disabled             | `./testing/low_power__fixed_window__audio_disabled.rs`       | 
@@ -100,6 +99,10 @@ to 00:00, or 12:00 to 12:00.
 
 Run the entire test suite with:
 `cargo test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu --package tc2-firmware`
+
+Run a tests for a given mode with a command like:
+`cargo test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu --package tc2-firmware --test tc2-firmware-tests tests::testing::low_power__default_window__audio_and_thermal`
+
 Run a single test with a command like:
 `cargo test --workspace --features std --no-default-features --target=x86_64-unknown-linux-gnu --package tc2-firmware --test tc2-firmware-tests tests::testing::low_power__default_window__audio_and_thermal::low_power_mode_dusk_til_dawn_audio_and_thermal -- --exact`
 

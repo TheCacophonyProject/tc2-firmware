@@ -7,41 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
-// mod tc2_agent_state {
-//     pub const NOT_READY: u8 = 0b0000_0000;
-//     /// tc2-agent is ready to accept files or recording streams from the rp2040
-//     pub const READY: u8 = 0b0000_0010;
-//     /// taking an audio or thermal recording, not safe to reboot rp2040
-//     pub const RECORDING: u8 = 0b0000_0100;
-//     /// Requested tests audio recording.  Cleared by rp2040 when tests audio recording
-//     /// is completed
-//     pub const REQUESTED_TEST_AUDIO_RECORDING: u8 = 0b0000_1000;
-//
-//     #[allow(unused)]
-//     /// This is set by the thermal process on the rp2040 when it wants to reset to take
-//     /// a scheduled audio recording
-//     pub const TAKE_AUDIO: u8 = 0b0001_0000;
-//
-//     #[allow(unused)]
-//     /// Set by the rp2040 when offloading files, and unset at the end of the offload.
-//     /// Can be unset during offload by tc2-agent to interrupt the upload and start getting
-//     /// thermal frames delivered
-//     pub const OFFLOAD: u8 = 0b0010_0000;
-//
-//     #[allow(unused)]
-//     /// Set by the audio process on the rp2040 when it wants to restart back into thermal mode
-//     /// after taking a scheduled audio recording during a thermal recording window when in
-//     /// `AudioMode::AudioAndThermal`
-//     pub const THERMAL_MODE: u8 = 0b0100_0000;
-//
-//     pub const REQUESTED_LONG_AUDIO_RECORDING: u8 = 0b1000_0000;
-//
-//     // TODO: What if we could do tests recordings in both modes, and we had to set the MODE bit as well
-//     //  as the tests recording bit? Test and Long tests would have different hard-coded meanings for each.
-//
-//     // FIXME: Can you currently take a tests audio recording when you have audio disabled?
-//     //  Answer - no, and this is by design.
-// }
 
 pub mod tc2_agent_state {
     pub const NOT_READY: u8 = 0x00;

@@ -14,7 +14,7 @@ use crate::re_exports::bsp::hal::pio::PIO;
 use crate::re_exports::bsp::hal::pio::SM1;
 use crate::re_exports::bsp::hal::pio::UninitStateMachine;
 use crate::re_exports::bsp::pac::{DMA, PIO1, Peripherals, RESETS};
-use crate::re_exports::log::{error, info, warn};
+use crate::re_exports::log::{debug, error, info};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
@@ -65,9 +65,9 @@ pub fn record_audio(
 ) {
     info!("=== Core 0 Audio Recording start ===");
     if AUDIO_DEV_MODE {
-        warn!("DEV MODE");
+        debug!("DEV MODE");
     } else {
-        warn!("FIELD MODE");
+        debug!("FIELD MODE");
     }
     watchdog.feed();
     // Are we going to record now?

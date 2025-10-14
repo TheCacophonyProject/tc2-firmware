@@ -22,7 +22,7 @@ use crate::re_exports::bsp::hal::spi::{Disabled, Enabled};
 use crate::re_exports::bsp::hal::{Spi, Watchdog};
 use crate::re_exports::bsp::pac::RESETS;
 use crate::re_exports::bsp::pac::SPI1;
-use crate::re_exports::log::{assert_eq, error, info, warn};
+use crate::re_exports::log::{assert_eq, debug, error, info, warn};
 use crate::synced_date_time::SyncedDateTime;
 use crate::utils::{extend_lifetime, extend_lifetime_mut};
 use byteorder::{ByteOrder, LittleEndian};
@@ -51,7 +51,7 @@ pub(crate) const FEATURE_STATUS: u8 = 0xc0;
 const _FEATURE_CONFIG: u8 = 0xb0;
 const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const _FEATURE_DIE_SELECT: u8 = 0xd0;
-const NUM_EVENT_BYTES: usize = 18;
+pub const NUM_EVENT_BYTES: usize = 18;
 
 pub const TOTAL_FLASH_BLOCKS: u16 = 2048;
 const NUM_CONFIG_BLOCKS: u8 = 2;
@@ -162,7 +162,7 @@ pub struct Page {
 }
 
 impl Page {
-    fn new(blank_page: FlashSpiFullPayload) -> Page {
+    pub fn new(blank_page: FlashSpiFullPayload) -> Page {
         // NOTE: We include 3 bytes at the beginning of the buffer for the command + column address
         blank_page[0] = CACHE_READ;
         blank_page[1] = 0;
@@ -388,6 +388,7 @@ pub struct OnboardFlash {
     system_clock_hz: HertzU32,
     pub file_types_found: FileTypes,
     pub last_startup_recording_time: Option<DateTime<Utc>>,
+    pub oldest_recording_time: Option<DateTime<Utc>>,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -427,12 +428,13 @@ impl OnboardFlash {
             system_clock_hz,
             file_types_found: FileTypes::default(),
             last_startup_recording_time: None,
+            oldest_recording_time: None,
         }
     }
     pub fn init(&mut self, peripheral: SPI1, resets: &mut RESETS) {
         self.take_spi(peripheral, resets);
         // Init the spi peripheral and either init the FAT, or
-        info!("Initing onboard flash");
+        debug!("Initing onboard flash");
 
         // NOTE: We don't try to use all the flash memory efficiently.  Files always start at the
         //  beginning of a block, and if when they end part way through a block, we don't use that
@@ -693,6 +695,21 @@ impl OnboardFlash {
                             last_file_block_index = block_index;
                             num_files += 1;
 
+                            if self.oldest_recording_time.is_none() {
+                                if self.read_page(block_index, 0).is_ok() {
+                                    self.read_page_metadata(block_index);
+                                    self.wait_for_all_ready();
+                                    if self.current_page.file_written_time().is_some() {
+                                        self.oldest_recording_time =
+                                            self.current_page.file_written_time();
+                                    }
+                                }
+                                if self.read_page(block_index, 1).is_ok() {
+                                    self.read_page_metadata(block_index);
+                                    self.wait_for_all_ready();
+                                }
+                            }
+
                             if self.current_page.is_cptv_recording() {
                                 if self.current_page.is_startup_status_recording() {
                                     // For the file time, we need to go back and read the first page.
@@ -733,7 +750,7 @@ impl OnboardFlash {
                             file_start_block_index = self.current_page.file_start_block_index();
                             if self.first_used_block_index.is_none() {
                                 // This is the starting block of the first file stored.
-                                info!("Storing first used block {}", block_index);
+                                debug!("Storing first used block {}", block_index);
                                 self.first_used_block_index = Some(block_index);
                             }
                         } else {
@@ -745,16 +762,16 @@ impl OnboardFlash {
                                 self.file_start_block_index = file_start_block_index;
                                 self.current_block_index = block_index;
                                 self.current_page_index = 0;
-                                info!(
+                                debug!(
                                     "Setting file_start_block_index {:?}",
                                     self.file_start_block_index
                                 );
-                                info!(
+                                debug!(
                                     "Setting last_used_block_index {:?}",
                                     self.last_used_block_index
                                 );
-                                info!("Setting current_block_index {}", self.current_block_index);
-                                info!("Setting next starting block index {}", block_index);
+                                debug!("Setting current_block_index {}", self.current_block_index);
+                                debug!("Setting next starting block index {}", block_index);
                             }
                         }
                     }
@@ -850,7 +867,7 @@ impl OnboardFlash {
             if let Some(start_block_index) = self.file_start_block_index {
                 let mut block_index = start_block_index;
                 let mut page_index = 1;
-                info!(
+                debug!(
                     "Checking if last recording is complete from block {}",
                     block_index
                 );
@@ -999,7 +1016,7 @@ impl OnboardFlash {
             return Err("File hasn't been written to");
         }
         let start_block_index = self.file_start_block_index.unwrap();
-        info!(
+        debug!(
             "Erasing latest file {:?}:0 to {:?}",
             start_block_index, self.last_used_block_index
         );
@@ -1174,7 +1191,7 @@ impl OnboardFlash {
                             self.current_page_index = 0;
                             self.previous_file_start_block_index =
                                 self.current_page.previous_file_start_block_index();
-                            info!(
+                            debug!(
                                 "Set file start to {:?}:{:?} and previous {:?}",
                                 self.current_block_index, 0, self.previous_file_start_block_index
                             );
@@ -1190,7 +1207,7 @@ impl OnboardFlash {
             self.current_block_index = self.find_start(last_block_index);
             self.current_page_index = 0;
             self.file_start_block_index = Some(self.current_block_index);
-            info!(
+            debug!(
                 "Searched for file start found {:?}:{:?}",
                 self.current_block_index, self.last_used_block_index
             );
@@ -1343,7 +1360,7 @@ impl OnboardFlash {
         self.previous_file_start_block_index = self.file_start_block_index;
         self.current_page_index = start_page;
 
-        warn!(
+        debug!(
             "Starting file at {}:{}",
             self.current_block_index, self.current_page_index,
         );
@@ -1611,7 +1628,7 @@ impl OnboardFlash {
                 }
             }
 
-            warn!("Ending file at {}:{}", block, page);
+            debug!("Ending file at {}:{}", block, page);
         }
         // PROGRAM_LOAD
         self.spi_write(&bytes[1..]);

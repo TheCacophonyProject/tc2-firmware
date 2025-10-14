@@ -9,7 +9,7 @@ use std::format;
 use std::string::String;
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeReason {
     Unknown = 0,
     ThermalOffload = 1,
@@ -153,7 +153,7 @@ impl NewConfigInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LoggerEventKind {
     Rp2040Sleep,
     OffloadedRecording(FileType),
@@ -294,20 +294,27 @@ pub struct LoggerEvent {
 }
 
 impl LoggerEvent {
-    pub fn inner_time(&self) -> String {
+    pub fn date_time(&self) -> DateTime<Utc> {
+        DateTime::from_timestamp_millis(self.timestamp / 1000)
+            .unwrap_or(chrono::Local::now().with_timezone(&Utc))
+    }
+
+    pub fn date_time_inner(&self) -> Option<DateTime<Utc>> {
         match self.event {
             LoggerEventKind::Rp2040MissedAudioAlarm(ts)
             | LoggerEventKind::SetAudioAlarm(ts)
-            | LoggerEventKind::SetThermalAlarm(ts) => {
-                format!(
-                    "({})",
-                    FormattedNZTime(
-                        DateTime::from_timestamp_millis(ts / 1000)
-                            .unwrap_or(chrono::Local::now().with_timezone(&Utc))
-                    ),
-                )
-            }
-            _ => String::from(""),
+            | LoggerEventKind::SetThermalAlarm(ts) => Some(
+                DateTime::from_timestamp_millis(ts / 1000)
+                    .unwrap_or(chrono::Local::now().with_timezone(&Utc)),
+            ),
+            _ => None,
+        }
+    }
+
+    pub fn inner_time(&self) -> String {
+        match self.date_time_inner() {
+            Some(date_time) => format!("({})", FormattedNZTime(date_time)),
+            None => String::from(""),
         }
     }
 }

@@ -27,7 +27,7 @@ impl defmt::Format for FormattedNZTime {
         let (approx_nz_time, nzdt) = self.approx_nz_time();
         defmt::write!(
             fmt,
-            "{}-{}-{} {:02}:{:02}:{} {}",
+            "{}-{}-{} {:02}:{:02}:{:02} {}",
             approx_nz_time.year(),
             approx_nz_time.month(),
             approx_nz_time.day(),
@@ -45,7 +45,7 @@ impl core::fmt::Display for FormattedNZTime {
         let (approx_nz_time, nzdt) = self.approx_nz_time();
         write!(
             fmt,
-            "{}-{}-{} {:02}:{:02}:{} {}",
+            "{}-{}-{} {:02}:{:02}:{:02} {}",
             approx_nz_time.year(),
             approx_nz_time.month(),
             approx_nz_time.day(),
