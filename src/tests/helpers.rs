@@ -1,6 +1,8 @@
+use crate::attiny_rtc_i2c::CameraState;
 use crate::device_config::{AudioMode, DeviceConfig as FirmwareDeviceConfig};
 use crate::entry::real_main;
 use crate::event_logger::{EventIndex, LoggerEvent, MAX_EVENTS_IN_LOGGER};
+use crate::ext_spi_transfers::RPI_RETURN_PAYLOAD_LENGTH;
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{
     BlockIndex, FLASH_SPI_HEADER, NUM_EVENT_BYTES, OnboardFlash, PageIndex,
@@ -8,11 +10,15 @@ use crate::onboard_flash::{
 use crate::re_exports::log::{error, info, warn};
 use crate::tests::stubs::fake_rpi_device_config::DeviceConfig;
 use crate::tests::stubs::fake_rpi_event_logger::{FileType, LoggerEventKind, WakeReason};
-use crate::tests::stubs::fake_shared_spi::StorageBlock;
-use crate::tests::test_state::test_global_state::{EventOffload, FileOffload, TEST_SIM_STATE};
+use crate::tests::stubs::fake_rpi_recording_state::RecordingState;
+use crate::tests::stubs::fake_shared_spi::{StorageBlock, StoragePage};
+use crate::tests::test_state::test_global_state::{
+    EventOffload, FileOffload, RtcAlarm, SimState, TEST_SIM_STATE,
+};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz::Pacific__Auckland;
 use std::cmp::PartialEq;
+use std::time::Instant;
 
 pub fn simulate_camera_with_config(
     config: DeviceConfig,
@@ -27,6 +33,57 @@ pub fn simulate_camera_with_config(
     let firmware_config = rpi_device_config_to_firmware_device_config(&config);
     TEST_SIM_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        if state.used {
+            *state = SimState {
+                used: false,
+                current_time: Default::default(),
+                last_frame: None,
+                frame_num: 0,
+                expected_attiny_firmware_version: 1,
+                camera_state: CameraState::PoweringOn,
+                attiny_power_ctrl_state: 0,
+                attiny_keep_alive: Utc::now(),
+                tc2_agent_state: Default::default(),
+                rtc_alarm_state: RtcAlarm {
+                    minutes: 0,
+                    hours: 0,
+                    day: 0,
+                    weekday_alarm_mode: 0,
+                    enabled: 0,
+                },
+                ecc_error_addresses: vec![],
+                flash_backing_storage: vec![
+                    StorageBlock {
+                        inner: [StoragePage {
+                            inner: [0xff; 2048 + 128]
+                        }; 64]
+                    };
+                    2048
+                ],
+                pending_forced_offload_request: false,
+                prefer_not_to_offload_files_now: false,
+                file_download: None,
+                file_part_count: 0,
+                file_download_start: Instant::now(),
+                fake_pi_recording_state: RecordingState::new(),
+                rosc_drive_iterator: 0,
+                files_offloaded: vec![],
+                events_offloaded: vec![],
+                device_config: None,
+                firmware_device_config: None,
+                thermal_trigger_offsets_mins: None,
+                current_test_window: (Utc::now(), Utc::now()),
+                current_thermal_window: Some((Utc::now(), Utc::now())),
+                cptv_files: None,
+                current_cptv_file: None,
+                cptv_decoder: None,
+                next_rpi_response: [0; RPI_RETURN_PAYLOAD_LENGTH],
+                restart_num: 0,
+                offloads_fail_on_restart_iteration: None,
+                audio_recording_fails_on_restart_iteration: None,
+            }
+        }
+        state.used = true;
         state.current_time = from;
         state.thermal_trigger_offsets_mins = thermal_trigger_recordings_x_mins_into_thermal_window;
         state.cptv_files = cptv_files_to_playback;

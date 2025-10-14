@@ -9,10 +9,9 @@ use crate::tests::stubs::fake_rpi_device_config::DeviceConfig;
 use crate::tests::stubs::fake_rpi_event_logger::{FileType, LoggerEvent};
 use crate::tests::stubs::fake_rpi_recording_state::RecordingState;
 use crate::tests::stubs::fake_shared_spi::{StorageBlock, StoragePage};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use codec::decode::CptvFrame;
 use std::cell::RefCell;
-use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 use std::vec;
 use std::vec::Vec;
@@ -40,6 +39,7 @@ impl RtcAlarm {
 }
 
 pub struct SimState {
+    pub(crate) used: bool,
     pub(crate) current_time: DateTime<Utc>,
     pub(crate) last_frame: Option<CptvFrame>,
     pub(crate) frame_num: u32,
@@ -134,6 +134,7 @@ impl core::fmt::Debug for EventOffload {
 
 thread_local! {
     pub static TEST_SIM_STATE: RefCell<SimState> = RefCell::new(SimState {
+        used: false,
         current_time: Default::default(),
         last_frame: None,
         frame_num: 0,
