@@ -7,6 +7,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use chrono::{
     DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
 };
+use chrono_tz::Tz::Pacific__Auckland;
 use log::{error, info, warn};
 use louvre::triangulate;
 use serde::de::Error;
@@ -399,12 +400,14 @@ impl AbsRelTime {
             let seconds_past_midnight =
                 (abs_time.hour as i32 * 60 * 60) + (abs_time.min as i32 * 60);
             //info!("Seconds past midnight local {}", seconds_past_midnight);
-            let tz_offset = timezone_offset_seconds();
-            // info!(
-            //     "TZ offset {}, seconds past UTC midnight {}",
-            //     tz_offset,
-            //     (seconds_past_midnight - tz_offset) % 86_400
-            // );
+
+            // NOTE: For testing, we have a fixed timezone offset.
+            let tz_offset = 46800; //timezone_offset_seconds();
+            error!(
+                "TZ offset {}, seconds past UTC midnight {}",
+                tz_offset,
+                (seconds_past_midnight - tz_offset) % 86_400
+            );
             (true, (seconds_past_midnight - tz_offset) % 86_400)
         } else {
             (false, self.relative_time_seconds.unwrap())

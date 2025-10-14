@@ -1,4 +1,3 @@
-use crate::re_exports::log::info;
 use crate::tests::helpers::{
     ConfigBuilder, last_shutdown_recording_is_within_4_mins_of,
     last_startup_recording_is_within_2_mins_of, next_or_current_thermal_window,
