@@ -1274,9 +1274,6 @@ impl OnboardFlash {
             let src_range = 0..length + FLASH_SPI_HEADER;
             let dst_range = offset..offset + length + FLASH_SPI_HEADER;
             assert_eq!(src_range.len(), dst_range.len());
-
-            // FIXME: Why is this a bidirectional transfer again?
-            //  That seems to be the main reason we need these Page abstractions.
             let transfer = bidirectional::Config::new(
                 (
                     self.dma_channel_1.take().unwrap(),
@@ -1285,8 +1282,6 @@ impl OnboardFlash {
                 unsafe { extend_lifetime(&current_page[src_range]) },
                 self.spi.take().unwrap(),
                 // To ensure the data is placed in the correct place on the page, offset by -4
-
-                // FIXME: Is everything in the metadata actually offset by 4 bytes?
                 unsafe { extend_lifetime_mut(&mut prev_page[dst_range]) },
             )
             .start();

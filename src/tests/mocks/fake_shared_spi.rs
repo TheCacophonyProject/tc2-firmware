@@ -200,7 +200,6 @@ impl SpiEnabledPeripheral {
         match bytes[0] {
             PROGRAM_LOAD => {
                 // Set the plane to write some bytes to, nop
-                // FIXME: Load needs to also handle offsets into the page
                 let offset_in_page: u16 = (bytes[1] as u16 & 0x0f) << 8 | bytes[2] as u16;
                 self.last_page_offset = offset_in_page as usize;
                 self.buffer.drain(..);

@@ -504,7 +504,6 @@ impl ExtSpiTransfers {
                                         self.return_payload_offset = Some(start + 8);
                                     }
                                 } else {
-                                    // FIXME: Seeing this in test simulations
                                     warn!("Return crc mismatch");
                                 }
                             }

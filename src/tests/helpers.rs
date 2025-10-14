@@ -300,8 +300,10 @@ pub fn next_or_current_thermal_window(config: &DeviceConfig) -> (DateTime<Utc>, 
     info!("Test start date time {}", FormattedNZTime(date));
     let firmware_config = rpi_device_config_to_firmware_device_config(&config);
 
-    // FIXME: Do fixed and 24/7 windows shift with daylight savings time?
-    //  We're using naive UTC after all...
+    // NOTE: Fixed and 24/7 windows shift with daylight savings time, since we're just
+    // coding an offset from UTC in our config.
+    // However, they should get automatically corrected the next time the rPi connects
+    // and updates the absolute offset, so it's not really a big deal.
     firmware_config
         .next_or_current_recording_window(&date)
         .unwrap()

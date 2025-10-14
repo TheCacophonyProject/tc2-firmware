@@ -176,7 +176,6 @@ impl RW_STUB {
             let mut s = s.borrow_mut();
             if s.rosc_drive_iterator == 0 {
                 s.rosc_drive_iterator += 1;
-                // FIXME: Might need to fake some logic here to drive things forwards.
                 None
             } else {
                 Some(rosc::ctrl::FREQ_RANGE_A::HIGH)
