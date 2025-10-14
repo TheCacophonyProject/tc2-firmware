@@ -35,6 +35,7 @@ use crate::entry::real_main;
 use crate::re_exports::bsp::entry;
 use crate::re_exports::bsp::hal::Watchdog;
 use crate::re_exports::bsp::pac::Peripherals;
+use crate::re_exports::log::info;
 use crate::utils::restart;
 use defmt_rtt as _;
 use panic_probe as _;
@@ -45,5 +46,6 @@ fn main() -> ! {
     let peripherals = unsafe { Peripherals::steal() };
     let mut watchdog = Watchdog::new(peripherals.WATCHDOG);
     watchdog.enable_tick_generation(130);
+    info!("Restarting");
     restart(&mut watchdog);
 }

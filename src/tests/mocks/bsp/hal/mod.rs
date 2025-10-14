@@ -666,7 +666,7 @@ pub mod dma {
         use crate::re_exports::bsp::hal::dma::{CH0, Channel};
         use crate::re_exports::bsp::hal::pio::{SM0, Tx};
         use crate::re_exports::bsp::pac::PIO0;
-        use crate::tests::stubs::fake_shared_spi::{read_from_rpi, write_to_rpi};
+        use crate::tests::mocks::fake_shared_spi::{read_from_rpi, write_to_rpi};
 
         pub trait TransferExt {
             type Channel;

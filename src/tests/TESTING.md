@@ -1,21 +1,22 @@
 # Testing rationale and background
 
-Testing TC2 firmware is challenging because the firmware is a no_std firmware crate targeting custom hardware based
-around the RP2040 microcontroller.
+Testing TC2 firmware is challenging because the firmware is a `no_std` firmware crate
+targeting custom hardware based around the RP2040 microcontroller.
 It isn't possible to run as-is using the target architecture and bespoke hardware on
 x86_64 continuous integration machines, or local development machines.
 
-To work around this, we have created a "std" cargo feature, and this is turned on whenever we
-run tests.
+To work around this, a `std` cargo feature has been created,
+and this is turned on whenever tests are run.
 All the RP2040/TC2 (aka DOC AI Cam) camera peripherals the firmware references are
-mocked out, so we can test the high-level control flow logic of the firmware without
+mocked out, so the high-level control flow logic of the firmware can be tested without
 needing a real device.
 The `rp2040-hal` crate is re-exported under `re_exports`, and the mocks
-located in `tests/stubs` take the place of the real HAL code when `std` is enabled.
+located in `tests/mocks` take the place of the real HAL code when `std` is enabled.
 
 With the TC2 firmware we're primarily interested in the high-level control flow logic,
-so we're not testing the low-level details of the camera peripherals. The reason for this is that the control flow logic
-is quite hard to reason about, because we support so many different user configurations.
+so the low-level details of the camera peripherals are not tested.
+The reason for this is that the control flow logic is quite hard to reason about,
+because there are so many different supported user configurations.
 
 # Testing
 
@@ -55,8 +56,7 @@ Once offloading is complete, the RP2040 will power off the raspberry pi again.
 
 This window can be an absolute time range, or a relative time range (relative to dawn and dusk).
 If not specified, the window is calculated as starting 30mins before dusk and ending 30mins after dawn, since
-historically
-the project has been primarily interested in capturing nocturnal predators of New Zealand birds.
+historically the project has been primarily interested in capturing nocturnal predators of New Zealand birds.
 It's possible to configure the window to be a fixed time range, i.e. 10am to 10pm.
 It's also technically possible to configure the window to be a mixture of the two, i.e. 10am until 30mins before
 dusk, but in practice this is not used.
@@ -73,7 +73,7 @@ to 00:00, or 12:00 to 12:00.
 - `Disabled` (no audio recording, will just be ready to trigger thermal recordings during the configured thermal
   recording window)
 
-## Testing matrix
+## Device config testing matrix
 
 | Power mode | Thermal recording window | Audio recording mode | Test file                                                    |
 |------------|--------------------------|----------------------|--------------------------------------------------------------|
@@ -94,6 +94,15 @@ to 00:00, or 12:00 to 12:00.
 | Low power  | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/low_power__fixed_window__audio_and_thermal.rs`    | 
 | Low power  | Absolute: 24/7           | AudioAndThermal      | `./testing/low_power__always_on__audio_and_thermal.rs`       | 
 | Low power  | N/A                      | AudioOnly            | `./testing/low_power__audio_only.rs`                         |
+
+## Additional tests
+
+| Purpose                                                               | Test file                             |
+|-----------------------------------------------------------------------|---------------------------------------|
+| Make sure offload failures to rPi immediately restart and retry       | `./testing/rpi_spi_offload_errors.rs` |
+| When reads from microphone can't keep up, ensure we restart and retry | `./testing/audio_cant_keep_up.rs`     |
+| Make sure we gracefully work around bad flash blocks (TODO)           | `./testing/bad_flash_blocks.rs`       |
+| Make sure we handle unrecoverable flash ECC errors (TODO)             | `./testing/flash_ecc_errors.rs`       |
 
 ## Running tests
 

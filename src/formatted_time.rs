@@ -7,8 +7,8 @@ impl FormattedNZTime {
         // beginning of April and end of September – but that's okay, it's just for debug display.
         let month = self.0.month();
         let day = self.0.day();
-        let nzdt = if (4..=10).contains(&month) {
-            (month == 4 && day < 7) || (month == 10 && day > 23)
+        let nzdt = if (4..=9).contains(&month) {
+            (month == 4 && day < 7) || (month == 9 && day > 23)
         } else {
             true
         };

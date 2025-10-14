@@ -7,9 +7,9 @@ pub use cortex_m;
 #[cfg(not(feature = "std"))]
 pub use critical_section;
 #[cfg(feature = "std")]
-pub use tests::stubs::bsp;
+pub use tests::mocks::bsp;
 #[cfg(feature = "std")]
-pub use tests::stubs::fake_critical_section as critical_section;
+pub use tests::mocks::fake_critical_section as critical_section;
 
 #[allow(unused)]
 pub mod log {

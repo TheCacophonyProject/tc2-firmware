@@ -4,7 +4,7 @@ use crate::tests::helpers::{
     num_thermal_recordings_offloaded, num_thermal_recordings_stored_in_flash,
     simulate_camera_with_config, test_start_and_end_time, wake_reason_present,
 };
-use crate::tests::stubs::fake_rpi_event_logger::WakeReason;
+use crate::tests::mocks::fake_rpi_event_logger::WakeReason;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use chrono::Duration;
 use test_log::test;

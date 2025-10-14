@@ -3,7 +3,7 @@ use crate::tests::helpers::{
     ConfigBuilder, num_audio_recordings_stored_in_flash, offloaded_event_exists,
     simulate_camera_with_config, stored_event_exists, test_start_and_end_time,
 };
-use crate::tests::stubs::fake_rpi_event_logger::LoggerEventKind;
+use crate::tests::mocks::fake_rpi_event_logger::LoggerEventKind;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use chrono::Duration;
 use test_log::test;

@@ -2,12 +2,11 @@ extern crate std;
 use core::fmt;
 use std::collections::HashMap;
 // Read camera config file
-use crate::tests::stubs::fake_rpi_detection_mask::DetectionMask;
+use crate::tests::mocks::fake_rpi_detection_mask::DetectionMask;
 use byteorder::{LittleEndian, WriteBytesExt};
 use chrono::{
     DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
 };
-use chrono_tz::Tz::Pacific__Auckland;
 use log::{error, info, warn};
 use louvre::triangulate;
 use serde::de::Error;
@@ -403,11 +402,11 @@ impl AbsRelTime {
 
             // NOTE: For testing, we have a fixed timezone offset.
             let tz_offset = 46800; //timezone_offset_seconds();
-            error!(
-                "TZ offset {}, seconds past UTC midnight {}",
-                tz_offset,
-                (seconds_past_midnight - tz_offset) % 86_400
-            );
+            // error!(
+            //     "TZ offset {}, seconds past UTC midnight {}",
+            //     tz_offset,
+            //     (seconds_past_midnight - tz_offset) % 86_400
+            // );
             (true, (seconds_past_midnight - tz_offset) % 86_400)
         } else {
             (false, self.relative_time_seconds.unwrap())

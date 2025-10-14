@@ -16,7 +16,7 @@ use crate::re_exports::bsp::hal::{Spi, Timer};
 use crate::re_exports::bsp::pac;
 use crate::re_exports::bsp::pac::{DMA, PIO0, RESETS, SPI1, interrupt};
 use crate::re_exports::critical_section::Mutex;
-use crate::re_exports::log::{info, warn};
+use crate::re_exports::log::{debug, info, warn};
 use crate::utils::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
@@ -592,7 +592,7 @@ fn maybe_abort_dma_transfer(
             .busy()
             .bit_is_set()
     {
-        info!(
+        debug!(
             "Aborting dma transfer at {}/{}, #{}",
             prev_read_address - transfer_start_address,
             transfer_end_address - transfer_start_address,

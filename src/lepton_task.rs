@@ -225,7 +225,7 @@ pub fn frame_acquisition_loop(
                 if needs_restart {
                     info!("Powering down lepton module");
                     lepton.power_down_sequence();
-                    warn!("Request reset");
+                    info!("Lepton powered down");
                     sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
                     // NOTE: Frame processing thread returns and restarts
                     loop {
@@ -568,6 +568,7 @@ pub fn frame_acquisition_loop(
                         if needs_restart {
                             info!("Powering down lepton module");
                             lepton.power_down_sequence();
+                            info!("Lepton powered down");
                             sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
                             // NOTE: Frame processing thread returns and restarts
                             loop {

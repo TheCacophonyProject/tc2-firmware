@@ -696,6 +696,7 @@ pub fn work_out_recording_mode(
     } else {
         Tc2AgentState::default()
     };
+
     let tc2_agent_ready = tc2_agent_state.is_ready();
     let pi_is_asleep = !(pi_is_awake && tc2_agent_ready);
     let is_audio_only_device =
@@ -723,14 +724,7 @@ pub fn work_out_recording_mode(
             }
         } else if events.latest_audio_recording_failed(fs) {
             error!("Latest audio recording failed");
-            let recording_request_type = if tc2_agent_state.short_test_audio_recording_requested() {
-                RecordingRequestType::test_recording(10)
-            } else if tc2_agent_state.long_test_audio_recording_requested() {
-                RecordingRequestType::test_recording(60 * 5)
-            } else {
-                RecordingRequestType::scheduled_recording()
-            };
-            RecordingMode::Audio(recording_request_type)
+            RecordingMode::Audio(RecordingRequestType::scheduled_recording())
         } else {
             // We don't know why were woken up, but we don't need to make a recording.
             // We could have been woken by user action, and the pi is currently booting,
@@ -754,7 +748,7 @@ pub fn work_out_recording_mode(
         if prioritise_frame_preview {
             warn!("Prioritising frame preview mode");
             RecordingMode::None
-        } else if config.is_audio_device() {
+        } else if config.is_audio_device() && !tc2_agent_state.test_thermal_recording_requested() {
             if tc2_agent_state.test_audio_recording_requested() {
                 let recording_request_type =
                     if tc2_agent_state.short_test_audio_recording_requested() {

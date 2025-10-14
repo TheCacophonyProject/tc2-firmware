@@ -8,10 +8,10 @@ use crate::onboard_flash::{
     BlockIndex, FLASH_SPI_HEADER, NUM_EVENT_BYTES, OnboardFlash, PageIndex,
 };
 use crate::re_exports::log::{error, info, warn};
-use crate::tests::stubs::fake_rpi_device_config::DeviceConfig;
-use crate::tests::stubs::fake_rpi_event_logger::{FileType, LoggerEventKind, WakeReason};
-use crate::tests::stubs::fake_rpi_recording_state::RecordingState;
-use crate::tests::stubs::fake_shared_spi::{StorageBlock, StoragePage};
+use crate::tests::mocks::fake_rpi_device_config::DeviceConfig;
+use crate::tests::mocks::fake_rpi_event_logger::{FileType, LoggerEventKind, WakeReason};
+use crate::tests::mocks::fake_rpi_recording_state::RecordingState;
+use crate::tests::mocks::fake_shared_spi::{StorageBlock, StoragePage};
 use crate::tests::test_state::test_global_state::{
     EventOffload, FileOffload, RtcAlarm, SimState, TEST_SIM_STATE,
 };
@@ -224,6 +224,11 @@ impl ConfigBuilder {
         self
     }
 
+    pub(crate) fn custom_recording_window(mut self, from: &str, until: &str) -> Self {
+        self.recording_window = Some((String::from(from), String::from(until)));
+        self
+    }
+
     pub(crate) fn build(self) -> DeviceConfig {
         let location = self.location.unwrap_or((-43.5, 172.64));
         let latitude = location.0;
@@ -303,6 +308,13 @@ pub fn next_or_current_thermal_window(config: &DeviceConfig) -> (DateTime<Utc>, 
 }
 
 pub fn test_start_and_end_time(config: &DeviceConfig) -> (DateTime<Utc>, DateTime<Utc>) {
+    test_start_and_end_time_with_min_duration(config, Duration::hours(24))
+}
+
+pub fn test_start_and_end_time_with_min_duration(
+    config: &DeviceConfig,
+    min_duration: Duration,
+) -> (DateTime<Utc>, DateTime<Utc>) {
     let (start, end) = next_or_current_thermal_window(config);
     info!(
         "Next or current window {} - {}",
@@ -312,9 +324,9 @@ pub fn test_start_and_end_time(config: &DeviceConfig) -> (DateTime<Utc>, DateTim
     let duration = end - start;
 
     // If less than 24 hours, recalculate to a 24‑hour window centered on the midpoint
-    let (extended_start, extended_end) = if duration < Duration::hours(24) {
+    let (extended_start, extended_end) = if duration < min_duration {
         let mid = start + duration / 2;
-        (mid - Duration::hours(12), mid + Duration::hours(12))
+        (mid - (min_duration / 2), mid + (min_duration / 2))
     } else {
         (start, end)
     };

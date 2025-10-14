@@ -1,7 +1,7 @@
 extern crate std;
 use crate::attiny_rtc_i2c::Tc2AgentState;
 use crate::re_exports::log::{error, info};
-use crate::tests::stubs::fake_rpi_test_recording_status::TestRecordingStatus;
+use crate::tests::mocks::fake_rpi_test_recording_status::TestRecordingStatus;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};

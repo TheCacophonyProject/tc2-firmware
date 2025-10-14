@@ -6,10 +6,10 @@ use crate::onboard_flash::{
     FLASH_USER_PAGE_SIZE, FlashSpiFullPayload, GET_FEATURES, OnboardFlash, PAGE_READ,
     PROGRAM_EXECUTE, PROGRAM_LOAD, Page, PageIndex, RESET, SET_FEATURES, WRITE_ENABLE,
 };
-use crate::tests::stubs::fake_rpi_event_logger::{
+use crate::tests::mocks::fake_rpi_event_logger::{
     DiscardedRecordingInfo, FileType, LoggerEvent, LoggerEventKind, NewConfigInfo, WakeReason,
 };
-use crate::tests::stubs::fake_rpi_recording_state::RecordingMode;
+use crate::tests::mocks::fake_rpi_recording_state::RecordingMode;
 use crate::tests::test_state::test_global_state::{EventOffload, FileOffload, TEST_SIM_STATE};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Utc};
@@ -165,7 +165,7 @@ pub const CAMERA_GET_MOTION_DETECTION_MASK: u8 = 0x7;
 pub const CAMERA_SEND_LOGGER_EVENT: u8 = 0x8;
 pub const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
 
-pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 36;
+pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 37;
 
 impl SpiEnabledPeripheral {
     pub fn reset(&mut self) {
@@ -888,7 +888,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
 }
 pub fn read_from_rpi(dst: &mut [u8]) -> Result<(), ()> {
     TEST_SIM_STATE.with(|state| {
-        let mut state = state.borrow_mut();
+        let state = state.borrow();
         dst.copy_from_slice(&state.next_rpi_response[..]);
     });
 

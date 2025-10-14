@@ -14,7 +14,7 @@ use crate::re_exports::bsp::hal::dma::DMAExt;
 use crate::re_exports::bsp::hal::pio::PIOExt;
 use crate::re_exports::bsp::hal::{Clock, I2C, Sio, Timer, Watchdog};
 use crate::re_exports::bsp::pac::Peripherals;
-use crate::re_exports::log::{error, info, warn};
+use crate::re_exports::log::{debug, error, info, warn};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::startup_functions::{
     get_device_config, get_synced_time, maybe_offload_files_and_events_on_startup,
@@ -417,9 +417,12 @@ pub fn real_main() {
         let alarm_is_in_the_past = !alarm_is_in_the_future;
 
         // FIXME: If the alarm is in the past, shouldn't it fail validation, and a new one be created?
+        // FIXME: Sometimes if an audio alarm is scheduled within a couple of mins of the previous one,
+        //  it goes into thermal mode, and then restarts, but the audio alarm fails to trigger on
+        //  restart.  Try to test and fix this.
         let alarm_is_not_imminent = alarm_is_in_the_past
             || time.date_time() + Duration::minutes(2) < scheduled_alarm.date_time();
-        warn!(
+        debug!(
             "Alarm is in the future: {}, is not imminent: {}",
             alarm_is_in_the_future, alarm_is_not_imminent
         );

@@ -4,7 +4,7 @@ use crate::tests::helpers::{
     offloaded_event_count, offloaded_event_does_not_exist, simulate_camera_with_config,
     test_start_and_end_time,
 };
-use crate::tests::stubs::fake_rpi_event_logger::LoggerEventKind;
+use crate::tests::mocks::fake_rpi_event_logger::LoggerEventKind;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use test_log::test;
 

@@ -721,6 +721,7 @@ pub fn thermal_motion_task(
                         }
                         timer.delay_ms(100);
                         shutdown_lepton_thread(&mut sio);
+                        timer.delay_ms(100);
                         return;
                     } else if let Err(e) = i2c.stopped_recording() {
                         error!("Error clearing recording flag on attiny: {}", e);
@@ -885,6 +886,7 @@ pub fn thermal_motion_task(
             }
             // Request restart to offload.
             shutdown_lepton_thread(&mut sio);
+            timer.delay_ms(100);
             return;
         }
 
@@ -1185,6 +1187,7 @@ fn shutdown_lepton_thread(sio: &mut Sio) {
     loop {
         let response = sio.fifo.read_blocking();
         if response == Core0Task::LeptonReadyToSleep.into() {
+            info!("Lepton thread asleep, returning");
             break;
         }
     }
