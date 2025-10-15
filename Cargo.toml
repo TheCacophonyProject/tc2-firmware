@@ -1,7 +1,7 @@
 [package]
 edition = "2024"
 name = "tc2-firmware"
-version = "0.10.0"
+version = "0.11.0"
 resolver = "2"
 
 [[bin]]
@@ -10,38 +10,55 @@ path = "src/main.rs"
 test = false
 doctest = false
 bench = false
+required-features = ["no-std"]
+
+[[test]]
+name = "tc2-firmware-tests"
+path = "src/main_test.rs"
+required-features = ["std"]
 
 [dependencies]
 
 # bsp dependencies: from rp-hal-boards/rp-pico
-cortex-m = "0.7.7"
+cortex-m = { version = "0.7.7", optional = true }
 rp2040-boot2 = { version = "0.3.0", optional = true }
 cortex-m-rt = { version = "0.7.5", optional = true }
 
 # our dependencies
 embedded-hal = { version = "1.0.0" }
-embedded-io = "0.6.1"
-defmt = "1.0.1"
-defmt-rtt = "1.0.0"
-panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+embedded-io = "0.7.1"
+defmt = { version = "1.0.1", optional = true }
+defmt-rtt = { version = "1.0.0", optional = true }
+panic-probe = { version = "1.0.0", optional = true }
 byteorder = { version = "1.5.0", default-features = false }
 bytemuck = "1.23.1"
+#env_logger = { version = "0.11.8", optional = true }
+test-log = { version = "0.2.18", optional = true }
 
-critical-section = "1.2.0"
+critical-section = { version = "1.2.0", optional = true }
 fugit = "0.3.7"
 crc = "3.3.0"
 chrono = { version = "0.4.41", default-features = false }
+chrono-tz = { version = "0.10.4", optional = true }
 num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 
-rp2040-hal = "0.11.0"
+rp2040-hal = { version = "0.11.0", optional = true }
 
 pio = "0.2.1"
-pio-proc = "0.2.1"
+pio-proc = { version = "0.2.1" }
 picorand = "0.1.2"
+
+# Test only crates
+serde = { version = "1.0.223", features = ["derive"], optional = true }
+toml = { version = "0.9.6", optional = true }
+louvre = { version = "0.2.1", optional = true }
+sun-times = { version = "0.2.0", optional = true }
+log = { version = "0.4.28", optional = true }
+codec = { git = "https://github.com/TheCacophonyProject/cptv-tools.git", optional = true }
 
 [features]
 # This is the set of features we enable by default
-default = ["boot2", "rt", "critical-section-impl", "rom-func-cache", "defmt", "rom-v2-intrinsics"]
+default = ["no-std"]
 
 # critical section that is safe for multicore use
 critical-section-impl = ["rp2040-hal/critical-section-impl"]
@@ -66,6 +83,35 @@ disable-intrinsics = ["rp2040-hal/disable-intrinsics"]
 
 # This enables ROM functions for f64 math that were not present in the earliest RP2040s
 rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
+
+no-std = [
+    "cortex-m",
+    "boot2",
+    "rt",
+    "critical-section-impl",
+    "rom-func-cache",
+    "rom-v2-intrinsics",
+    "panic-probe/print-defmt",
+    "defmt",
+    "dep:defmt",
+    "dep:critical-section",
+    "dep:defmt-rtt",
+    "dep:panic-probe",
+    "dep:rp2040-hal",
+]
+
+std = [
+    "dep:serde",
+    "dep:louvre",
+    "dep:toml",
+    "dep:sun-times",
+    "dep:log",
+    "dep:chrono-tz",
+    "dep:codec",
+    "dep:test-log",
+    "byteorder/std",
+    "serde/derive"
+]
 
 # cargo build/run
 [profile.dev]
@@ -107,6 +153,7 @@ codegen-units = 1
 debug = 2
 debug-assertions = true
 incremental = false
+# NOTE: set opt-level to 0 if you need to use a debugger to step through the code.
 opt-level = 3
 overflow-checks = true
 

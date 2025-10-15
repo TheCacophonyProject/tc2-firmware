@@ -1,30 +1,30 @@
-use crate::bsp::pac::Peripherals;
+use crate::constants::FFC_INTERVAL_MS;
 use crate::frame_processing::{Core0Task, FrameBuffer, StaticFrameBuffer};
 use crate::lepton::{FFCStatus, LeptonFirmwareInfo, LeptonModule, LeptonPins, init_lepton_module};
 use crate::lepton_telemetry::Telemetry;
-use crate::utils::restart;
-use crate::{FFC_INTERVAL_MS, bsp};
-use bsp::hal::gpio::Interrupt;
-use bsp::hal::pac::RESETS;
-use bsp::hal::rosc::RingOscillator;
-use bsp::hal::sio::SioFifo;
+use crate::re_exports::bsp::hal::gpio::Interrupt;
+use crate::re_exports::bsp::hal::rosc::RingOscillator;
+use crate::re_exports::bsp::hal::sio::SioFifo;
+use crate::re_exports::bsp::hal::{Sio, Timer, Watchdog};
+use crate::re_exports::bsp::pac::Peripherals;
+use crate::re_exports::bsp::pac::RESETS;
+use crate::re_exports::cortex_m::asm::nop;
+use crate::re_exports::critical_section;
+use crate::re_exports::log::{assert_eq, error, info, warn};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use crc::{CRC_16_XMODEM, Crc};
-use critical_section::Mutex;
-use defmt::{info, warn};
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::{Sio, Timer, Watchdog};
 
 pub const LEPTON_SPI_CLOCK_FREQ: u32 = 40_000_000;
 
 #[allow(dead_code)]
 fn go_dormant_until_next_vsync(
-    rosc: RingOscillator<bsp::hal::rosc::Enabled>,
+    rosc: RingOscillator<crate::re_exports::bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
     rosc_freq: HertzU32,
     got_sync: bool,
-) -> RingOscillator<bsp::hal::rosc::Enabled> {
+) -> RingOscillator<crate::re_exports::bsp::hal::rosc::Enabled> {
     if got_sync && lepton.is_awake() {
         lepton.vsync.clear_interrupt(Interrupt::EdgeHigh);
         unsafe { rosc.dormant() };
@@ -39,10 +39,10 @@ fn go_dormant_until_next_vsync(
 
 pub fn lepton_core1_task(
     lepton_pins: LeptonPins,
-    watchdog: Watchdog,
+    watchdog: &Watchdog,
     system_clock_freq: HertzU32,
     peripheral_clock_freq: HertzU32,
-    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
+    rosc: &RingOscillator<crate::re_exports::bsp::hal::rosc::Enabled>,
     static_frame_buffer_a: StaticFrameBuffer,
     static_frame_buffer_b: StaticFrameBuffer,
     timer: Timer,
@@ -84,7 +84,7 @@ pub fn lepton_core1_task(
     );
 
     let result = fifo.read_blocking();
-    defmt::assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
+    assert_eq!(result, Core0Task::ReadyToReceiveLeptonConfig.into());
     let main_lepton_firmware = LittleEndian::read_u32(&[gpp_major, gpp_minor, gpp_build, 0]);
     let dsp_lepton_firmware = LittleEndian::read_u32(&[dsp_major, dsp_minor, dsp_build, 0]);
     fifo.write_blocking(Core0Task::SendIntercoreArray.into());
@@ -95,7 +95,7 @@ pub fn lepton_core1_task(
     fifo.write_blocking(dsp_lepton_firmware);
 
     let result = fifo.read_blocking();
-    defmt::assert_eq!(result, Core0Task::Ready.into());
+    assert_eq!(result, Core0Task::Ready.into());
     frame_acquisition_loop(
         rosc,
         &mut lepton,
@@ -142,15 +142,15 @@ struct FrameLoopState {
 #[allow(clippy::too_many_lines)]
 #[allow(unused_variables)]
 pub fn frame_acquisition_loop(
-    rosc: &RingOscillator<bsp::hal::rosc::Enabled>,
+    rosc: &RingOscillator<crate::re_exports::bsp::hal::rosc::Enabled>,
     lepton: &mut LeptonModule,
     sio_fifo: &mut SioFifo,
     peripheral_clock_freq: HertzU32,
     system_clock_freq: HertzU32,
     resets: &mut RESETS,
-    frame_buffer_local: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    frame_buffer_local_2: &'static Mutex<RefCell<Option<&mut FrameBuffer>>>,
-    mut watchdog: Watchdog,
+    frame_buffer_local: &'static critical_section::Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    frame_buffer_local_2: &'static critical_section::Mutex<RefCell<Option<&mut FrameBuffer>>>,
+    watchdog: &Watchdog,
 ) -> ! {
     let mut selected_frame_buffer = 0;
     let mut frame_counter = 0u32;
@@ -225,8 +225,12 @@ pub fn frame_acquisition_loop(
                 if needs_restart {
                     info!("Powering down lepton module");
                     lepton.power_down_sequence();
-                    warn!("Request reset");
-                    restart(&mut watchdog);
+                    info!("Lepton powered down");
+                    sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
+                    // NOTE: Frame processing thread returns and restarts
+                    loop {
+                        nop();
+                    }
                 }
             }
             if selected_frame_buffer == 0 {
@@ -434,7 +438,7 @@ pub fn frame_acquisition_loop(
                             buffer.packet(segment_index, packet_id),
                         );
                     } else {
-                        defmt::error!("Failed to write to frame buffer");
+                        error!("Failed to write to frame buffer");
                     }
                 });
 
@@ -564,8 +568,12 @@ pub fn frame_acquisition_loop(
                         if needs_restart {
                             info!("Powering down lepton module");
                             lepton.power_down_sequence();
-                            warn!("Request reset");
-                            restart(&mut watchdog);
+                            info!("Lepton powered down");
+                            sio_fifo.write(Core0Task::LeptonReadyToSleep.into());
+                            // NOTE: Frame processing thread returns and restarts
+                            loop {
+                                nop();
+                            }
                         }
                     }
                 }

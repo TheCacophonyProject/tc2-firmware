@@ -1,19 +1,22 @@
-use crate::EXPECTED_ATTINY_FIRMWARE_VERSION;
-use crate::bsp::pac::I2C1;
 use crate::device_config::get_datetime_utc;
 use crate::formatted_time::FormattedNZTime;
+use crate::re_exports::bsp::pac::I2C1;
+use crate::re_exports::log::{debug, error, info, warn};
 use crate::synced_date_time::SyncedDateTime;
 use byteorder::{BigEndian, ByteOrder};
 use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use core::cmp::PartialEq;
 use crc::{Algorithm, Crc};
-use defmt::{Format, Formatter, error, info, warn};
+
+use crate::constants::EXPECTED_ATTINY_FIRMWARE_VERSION;
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
+use crate::re_exports::bsp::hal::gpio::{
+    FunctionI2C, FunctionSio, Pin, PullNone, PullUp, SioInput, SioOutput,
+};
+use crate::re_exports::bsp::hal::{I2C, Timer};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::i2c::{Error, ErrorKind, I2c};
-use rp2040_hal::gpio::bank0::{Gpio3, Gpio6, Gpio7};
-use rp2040_hal::gpio::{FunctionI2C, FunctionSio, Pin, PullNone, PullUp, SioInput, SioOutput};
-use rp2040_hal::{I2C, Timer};
 
 pub type I2CConfig = I2C<
     I2C1,
@@ -48,8 +51,15 @@ pub mod tc2_agent_state {
     pub const LONG_TEST_RECORDING: u8 = 1 << 7;
 }
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 pub struct Tc2AgentState(u8);
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for Tc2AgentState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Tc2AgentState(0b{:08b})", self.0)
+    }
+}
 
 impl From<u8> for Tc2AgentState {
     fn from(value: u8) -> Self {
@@ -64,7 +74,7 @@ impl From<Tc2AgentState> for u8 {
 }
 
 impl Tc2AgentState {
-    fn flag_is_set(&self, flag: u8) -> bool {
+    pub(crate) fn flag_is_set(self, flag: u8) -> bool {
         self.0 & flag != 0
     }
 
@@ -76,64 +86,72 @@ impl Tc2AgentState {
         self.0 &= !flag;
     }
 
-    pub fn is_not_ready(&self) -> bool {
+    pub fn is_not_ready(self) -> bool {
         self.0 == 0
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub fn is_ready(self) -> bool {
         self.flag_is_set(tc2_agent_state::READY)
     }
 
-    pub fn recording_in_progress(&self) -> bool {
+    pub fn recording_in_progress(self) -> bool {
         self.flag_is_set(tc2_agent_state::RECORDING)
     }
 
-    pub fn test_audio_recording_requested(&self) -> bool {
+    pub fn test_audio_recording_requested(self) -> bool {
         self.short_test_audio_recording_requested() || self.long_test_audio_recording_requested()
     }
 
-    pub fn test_thermal_recording_requested(&self) -> bool {
+    pub fn test_thermal_recording_requested(self) -> bool {
         self.short_test_thermal_recording_requested()
             || self.long_test_thermal_recording_requested()
     }
 
-    pub fn short_test_audio_recording_requested(&self) -> bool {
+    pub fn short_test_audio_recording_requested(self) -> bool {
         self.requested_audio_mode() && self.flag_is_set(tc2_agent_state::SHORT_TEST_RECORDING)
     }
 
-    pub fn long_test_audio_recording_requested(&self) -> bool {
+    pub fn long_test_audio_recording_requested(self) -> bool {
         self.requested_audio_mode() && self.flag_is_set(tc2_agent_state::LONG_TEST_RECORDING)
     }
 
-    pub fn short_test_thermal_recording_requested(&self) -> bool {
+    pub fn short_test_thermal_recording_requested(self) -> bool {
         self.requested_thermal_mode() && self.flag_is_set(tc2_agent_state::SHORT_TEST_RECORDING)
     }
 
-    pub fn long_test_thermal_recording_requested(&self) -> bool {
+    pub fn long_test_thermal_recording_requested(self) -> bool {
         self.requested_thermal_mode() && self.flag_is_set(tc2_agent_state::LONG_TEST_RECORDING)
     }
 
-    pub fn test_recording_requested(&self) -> bool {
+    pub fn test_recording_requested(self) -> bool {
         self.test_audio_recording_requested() || self.test_thermal_recording_requested()
     }
 
-    pub fn is_offloading_files(&self) -> bool {
+    pub fn is_offloading_files(self) -> bool {
         self.flag_is_set(tc2_agent_state::OFFLOAD)
     }
 
-    pub fn requested_thermal_mode(&self) -> bool {
+    pub fn requested_thermal_mode(self) -> bool {
         self.flag_is_set(tc2_agent_state::THERMAL_MODE)
     }
-    pub fn requested_audio_mode(&self) -> bool {
+    pub fn requested_audio_mode(self) -> bool {
         self.flag_is_set(tc2_agent_state::AUDIO_MODE)
     }
 }
 
 #[repr(u8)]
-#[derive(PartialEq, Eq, Format, Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub enum AlarmMode {
     Audio = 0,
     Thermal = 1,
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for AlarmMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl TryFrom<u8> for AlarmMode {
@@ -149,7 +167,9 @@ impl TryFrom<u8> for AlarmMode {
 }
 
 #[repr(u8)]
-#[derive(Format, PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum CameraState {
     PoweringOn = 0x00,
     PoweredOn = 0x01,
@@ -209,7 +229,9 @@ impl From<u8> for CameraConnectionState {
     }
 }
 
-#[derive(Format, Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone, PartialEq)]
 pub enum RecordingMode {
     Audio(RecordingRequestType),
     Thermal(RecordingRequestType),
@@ -227,13 +249,17 @@ impl RecordingMode {
     }
 }
 
-#[derive(Format, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub struct RecordingTypeDetail {
     user_requested: bool,
     pub duration_seconds: u32,
 }
 
-#[derive(Format, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum RecordingRequestType {
     Test(RecordingTypeDetail),
     Scheduled(RecordingTypeDetail),
@@ -295,7 +321,8 @@ fn map_i2c_err(e: ErrorKind) -> &'static str {
 }
 
 #[repr(u8)]
-#[derive(Format)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum CameraConnectionState {
     NoConnection = 0x00,
     ConnectedToWifi = 0x01,
@@ -304,19 +331,19 @@ pub enum CameraConnectionState {
     HotspotSetup = 0x04,
 }
 
-const ATTINY_ADDRESS: u8 = 0x25;
-const RTC_ADDRESS: u8 = 0x51;
-const ATTINY_REG_VERSION: u8 = 0x01;
-const ATTINY_REG_CAMERA_STATE: u8 = 0x02;
-const ATTINY_REG_CAMERA_CONNECTION: u8 = 0x03;
-const ATTINY_REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
-const ATTINY_REG_KEEP_ALIVE: u8 = 0x0e;
+pub const ATTINY_ADDRESS: u8 = 0x25;
+pub const RTC_ADDRESS: u8 = 0x51;
+pub const ATTINY_REG_VERSION: u8 = 0x01;
+pub const ATTINY_REG_CAMERA_STATE: u8 = 0x02;
+pub const ATTINY_REG_CAMERA_CONNECTION: u8 = 0x03;
+pub const ATTINY_REG_RP2040_PI_POWER_CTRL: u8 = 0x05;
+pub const ATTINY_REG_KEEP_ALIVE: u8 = 0x0e;
 // const REG_PI_WAKEUP: u8 = 0x06;
-const ATTINY_REG_TC2_AGENT_STATE: u8 = 0x07;
+pub const ATTINY_REG_TC2_AGENT_STATE: u8 = 0x07;
 
-const RTC_REG_ALARM_CONTROL: u8 = 0x01;
-const RTC_REG_DATETIME_SECONDS: u8 = 0x02;
-const RTC_REG_ALARM_MINUTES: u8 = 0x09;
+pub const RTC_REG_ALARM_CONTROL: u8 = 0x01;
+pub const RTC_REG_DATETIME_SECONDS: u8 = 0x02;
+pub const RTC_REG_ALARM_MINUTES: u8 = 0x09;
 const DEFAULT_MAX_I2C_ATTEMPTS: u8 = 100;
 
 pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
@@ -330,14 +357,14 @@ pub const CRC_AUG_CCITT: Algorithm<u16> = Algorithm {
     residue: 0x0000,
 };
 
-fn decode_bcd(input: u8) -> u8 {
+pub fn decode_bcd(input: u8) -> u8 {
     let digits: u8 = input & 0xf;
     let tens: u8 = (input >> 4) & 0x7;
     10 * tens + digits
 }
 
 /// Convert the decimal value to Binary Coded Decimal.
-fn encode_bcd(input: u8) -> u8 {
+pub(crate) fn encode_bcd(input: u8) -> u8 {
     let digits: u8 = input % 10;
     let tens: u8 = input / 10;
     let tens = tens << 4;
@@ -348,6 +375,19 @@ pub struct ScheduledAlarmTime {
     pub time: chrono::DateTime<Utc>,
     pub mode: AlarmMode,
     pub already_triggered: bool,
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for ScheduledAlarmTime {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(
+            fmt,
+            "ScheduledAlarmTime: {}, mode: {:?}, already_triggered: {}",
+            FormattedNZTime(self.date_time()),
+            self.mode,
+            self.already_triggered
+        )
+    }
 }
 
 impl ScheduledAlarmTime {
@@ -365,8 +405,9 @@ impl ScheduledAlarmTime {
     }
 }
 
-impl Format for ScheduledAlarmTime {
-    fn format(&self, fmt: Formatter) {
+#[cfg(feature = "no-std")]
+impl defmt::Format for ScheduledAlarmTime {
+    fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(
             fmt,
             "ScheduledAlarmTime: {}, mode: {}, already_triggered: {}",
@@ -717,7 +758,7 @@ impl MainI2C {
                     timer,
                 );
                 if print {
-                    info!("Synced DateTime with RTC {}", synced_time);
+                    debug!("Synced DateTime with RTC {}", synced_time);
                 }
 
                 Ok(synced_time)
@@ -738,8 +779,9 @@ impl MainI2C {
         #[allow(clippy::cast_possible_truncation)]
         let wake_day = wakeup_datetime_utc.date_naive().day() as u8;
 
-        info!(
-            "Set alarm in mode {}, Current time: {}, Next alarm: {}",
+        debug!(
+            "Set alarm in {} mins,  mode {}, Current time: {}, Next alarm: {}",
+            (*wakeup_datetime_utc - now.date_time_utc).num_minutes(),
             mode,
             now,
             FormattedNZTime(*wakeup_datetime_utc)
@@ -802,7 +844,7 @@ impl MainI2C {
                     } else if alarm_mode != mode {
                         Err("alarm mode didn't match set alarm mode")
                     } else {
-                        info!("Got scheduled alarm.");
+                        debug!("Got scheduled alarm.");
                         Ok(())
                     }
                 }
@@ -924,7 +966,7 @@ impl MainI2C {
 }
 
 const EEPROM_LENGTH: usize = 1 + 1 + 3 * 4 + 1 + 8 + 4 + 2;
-const EEPROM_I2C_ADDRESS: u8 = 0x50;
+pub const EEPROM_I2C_ADDRESS: u8 = 0x50;
 
 pub struct Eeprom {
     inner: [u8; EEPROM_LENGTH],
@@ -961,7 +1003,7 @@ impl Eeprom {
             info!("No EEPROM data");
             false
         } else if self.version() != 0xca {
-            info!(
+            debug!(
                 "Incorrect first byte got {} should be {}",
                 self.version(),
                 0xca

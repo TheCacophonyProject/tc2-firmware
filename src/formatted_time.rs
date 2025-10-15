@@ -1,8 +1,4 @@
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
-
-#[cfg(feature = "defmt")]
-use defmt::Formatter;
-
 pub struct FormattedNZTime(pub DateTime<Utc>);
 
 impl FormattedNZTime {
@@ -11,8 +7,8 @@ impl FormattedNZTime {
         // beginning of April and end of September – but that's okay, it's just for debug display.
         let month = self.0.month();
         let day = self.0.day();
-        let nzdt = if (4..=10).contains(&month) {
-            (month == 4 && day < 7) || (month == 10 && day > 23)
+        let nzdt = if (4..=9).contains(&month) {
+            (month == 4 && day < 7) || (month == 9 && day > 23)
         } else {
             true
         };
@@ -25,13 +21,13 @@ impl FormattedNZTime {
     }
 }
 
-#[cfg(feature = "defmt")]
+#[cfg(feature = "no-std")]
 impl defmt::Format for FormattedNZTime {
-    fn format(&self, fmt: Formatter) {
+    fn format(&self, fmt: defmt::Formatter) {
         let (approx_nz_time, nzdt) = self.approx_nz_time();
         defmt::write!(
             fmt,
-            "DateTime: {}-{}-{} {:02}:{:02}:{} {}",
+            "{}-{}-{} {:02}:{:02}:{:02} {}",
             approx_nz_time.year(),
             approx_nz_time.month(),
             approx_nz_time.day(),
@@ -40,5 +36,23 @@ impl defmt::Format for FormattedNZTime {
             approx_nz_time.second(),
             if nzdt { "NZDT" } else { "NZST" },
         );
+    }
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for FormattedNZTime {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let (approx_nz_time, nzdt) = self.approx_nz_time();
+        write!(
+            fmt,
+            "{}-{}-{} {:02}:{:02}:{:02} {}",
+            approx_nz_time.year(),
+            approx_nz_time.month(),
+            approx_nz_time.day(),
+            approx_nz_time.hour(),
+            approx_nz_time.minute(),
+            approx_nz_time.second(),
+            if nzdt { "NZDT" } else { "NZST" },
+        )
     }
 }

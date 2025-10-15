@@ -1,9 +1,14 @@
 use crate::attiny_rtc_i2c::{CameraState, MainI2C};
 use crate::event_logger::{EventLogger, LoggerEvent};
 use crate::onboard_flash::OnboardFlash;
+
+#[cfg(feature = "no-std")]
 use defmt::{info, warn};
+#[cfg(feature = "std")]
+use log::{info, warn};
+
+use crate::re_exports::bsp::hal::{Timer, Watchdog};
 use embedded_hal::delay::DelayNs;
-use rp2040_hal::{Timer, Watchdog};
 
 #[allow(clippy::needless_pass_by_value)]
 fn poll_until_tc2_agent_is_ready(

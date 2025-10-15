@@ -1,19 +1,17 @@
-use crate::FIRMWARE_VERSION;
 use crate::attiny_rtc_i2c::MainI2C;
-use crate::bsp;
-use crate::bsp::pac::{DMA, RESETS};
+use crate::constants::FIRMWARE_VERSION;
 use crate::device_config::DeviceConfig;
 use crate::event_logger::{DiscardedRecordingInfo, Event, EventLogger, LoggerEvent};
 use crate::ext_spi_transfers::{ExtSpiTransfers, ExtTransferMessage};
 use crate::formatted_time::FormattedNZTime;
 use crate::onboard_flash::{FilePartReturn, FileType, OnboardFlash};
+use crate::re_exports::bsp::hal::Watchdog;
+use crate::re_exports::bsp::pac::{DMA, RESETS};
+use crate::re_exports::log::{debug, info, unreachable, warn};
 use crate::rpi_power::wake_raspberry_pi;
 use crate::synced_date_time::SyncedDateTime;
-use crate::utils::restart;
-use bsp::hal::Watchdog;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
-use defmt::{error, info, unreachable, warn};
 
 pub fn maybe_offload_events(
     pi_spi: &mut ExtSpiTransfers,
@@ -254,7 +252,7 @@ fn offload_recordings_and_events(
                     }
                 }
                 if is_last_page_for_file {
-                    info!("Got last file part at {}:{}", block, page);
+                    debug!("Got last file part at {}:{}", block, page);
                 }
                 let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                 let current_crc = crc_check.checksum(part);
@@ -321,7 +319,7 @@ fn offload_recordings_and_events(
 
         if !file_ended && !interrupted_by_user && success_transferring_parts_to_rpi {
             info!(
-                "Incomplete file at block {} erasing",
+                "Incomplete file at block {:?} erasing",
                 fs.file_start_block_index
             );
             watchdog.feed();
@@ -354,7 +352,7 @@ fn offload_recordings_and_events(
     }
     if success_transferring_parts_to_rpi {
         info!(
-            "Completed file offload, transferred {} files start {} previous is {}",
+            "Completed file offload, transferred {:?} files start {:?} previous is {:?}",
             file_count, fs.file_start_block_index, fs.previous_file_start_block_index
         );
         // Always rescan to update what kinds of files we have
@@ -370,7 +368,7 @@ fn offload_recordings_and_events(
     }
 }
 
-/// Returns `(Option<DeviceConfig>, true, _, _)` when config was updated
+/// Returns `Ok((Option<DeviceConfig>, true, _, _))` when config was updated
 #[allow(clippy::too_many_lines)]
 pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     fs: &mut OnboardFlash,
@@ -379,8 +377,7 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
     dma: &mut DMA,
     existing_config: Option<DeviceConfig>,
     event_count: u16,
-    watchdog: &mut Watchdog,
-) -> (Option<DeviceConfig>, bool, bool, bool) {
+) -> Result<(Option<DeviceConfig>, bool, bool, bool), &'static str> {
     let mut payload = [0u8; 16];
     let mut config_was_updated = false;
     let mut prioritise_frame_preview = false;
@@ -417,20 +414,17 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 let crc = LittleEndian::read_u16(&device_config[4..6]);
                 let crc_2 = LittleEndian::read_u16(&device_config[6..8]);
                 if crc != crc_2 {
-                    error!("Provided CRCs don't match.");
-                    restart(watchdog);
+                    return Err("Provided CRCs don't match.");
                 }
                 let length = device_config[8];
                 let length_2 = device_config[9];
                 if length != length_2 {
-                    error!("Lengths of device config don't match.");
-                    restart(watchdog);
+                    return Err("Lengths of device config don't match.");
                 }
                 let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
                 let crc_calc = crc_check.checksum(&device_config[10..10 + usize::from(length)]);
                 if crc_calc != crc {
-                    error!("New DeviceConfig CRC failure.");
-                    restart(watchdog);
+                    return Err("New DeviceConfig CRC failure.");
                 }
 
                 let mut new_config = DeviceConfig::from_bytes(&device_config[4..]);
@@ -514,17 +508,17 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
             if let Some(spi_free) = pi_spi.disable() {
                 fs.take_spi(spi_free, resets);
             }
-            new_config
+            Ok(new_config)
         } else {
             if let Some(spi_free) = pi_spi.disable() {
                 fs.take_spi(spi_free, resets);
             }
-            (
+            Ok((
                 existing_config,
                 config_was_updated,
                 prioritise_frame_preview,
                 force_offload_now,
-            )
+            ))
         }
     } else {
         warn!("Flash spi not enabled");
@@ -535,11 +529,11 @@ pub fn get_existing_device_config_or_config_from_pi_on_initial_handshake(
                 existing_config.device_name()
             );
         }
-        (
+        Ok((
             existing_config,
             config_was_updated,
             prioritise_frame_preview,
             force_offload_now,
-        )
+        ))
     }
 }

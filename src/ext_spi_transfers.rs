@@ -1,29 +1,32 @@
-use crate::bsp;
-use crate::bsp::pac;
-use crate::bsp::pac::{DMA, PIO0, RESETS, SPI1, interrupt};
 use crate::onboard_flash::{BlockIndex, FLASH_USER_PAGE_SIZE};
+use crate::re_exports::bsp;
+use crate::re_exports::bsp::hal::dma::single_buffer::Transfer;
+
+use crate::re_exports::bsp::hal::dma::{CH0, Channel, single_buffer};
+use crate::re_exports::bsp::hal::gpio::Interrupt::LevelLow;
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio5, Gpio12, Gpio13, Gpio14, Gpio15};
+use crate::re_exports::bsp::hal::gpio::{
+    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, PullUp, SioInput,
+};
+use crate::re_exports::bsp::hal::pio::{
+    PIO, PIOBuilder, Running, Rx, SM0, ShiftDirection, StateMachine, Tx, UninitStateMachine,
+};
+use crate::re_exports::bsp::hal::timer::{Alarm, Alarm0};
+use crate::re_exports::bsp::hal::{Spi, Timer};
+use crate::re_exports::bsp::pac;
+use crate::re_exports::bsp::pac::{DMA, PIO0, RESETS, SPI1, interrupt};
+use crate::re_exports::critical_section::Mutex;
+use crate::re_exports::log::{debug, info, warn};
 use crate::utils::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
-use critical_section::Mutex;
-use defmt::{Format, info, warn};
 use fugit::MicrosDurationU32;
-use rp2040_hal::dma::single_buffer::Transfer;
-use rp2040_hal::dma::{CH0, Channel, single_buffer};
-use rp2040_hal::gpio::Interrupt::LevelLow;
-use rp2040_hal::gpio::bank0::{Gpio5, Gpio12, Gpio13, Gpio14, Gpio15};
-use rp2040_hal::gpio::{
-    FunctionNull, FunctionPio0, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, PullUp, SioInput,
-};
-use rp2040_hal::pio::{
-    PIO, PIOBuilder, Running, Rx, SM0, ShiftDirection, StateMachine, Tx, UninitStateMachine,
-};
-use rp2040_hal::timer::{Alarm, Alarm0};
-use rp2040_hal::{Spi, Timer};
 
 #[repr(u8)]
-#[derive(Copy, Clone, Format, PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ExtTransferMessage {
     CameraConnectInfo = 0x1,
     CameraRawFrameTransfer = 0x2,
@@ -39,9 +42,17 @@ pub enum ExtTransferMessage {
 type StaticSlot<T> = Mutex<RefCell<Option<T>>>;
 type RpiPingPin = Pin<Gpio5, FunctionSio<SioInput>, PullUp>;
 // We can store our ping pin here when we enter the ping-back interrupt
+
+#[cfg(feature = "std")]
+thread_local! { static GLOBAL_PING_PIN: StaticSlot<RpiPingPin> = Mutex::new(RefCell::new(None)); }
+#[cfg(not(feature = "std"))]
 static GLOBAL_PING_PIN: StaticSlot<RpiPingPin> = Mutex::new(RefCell::new(None));
+#[cfg(feature = "std")]
+thread_local! { static GLOBAL_ALARM: StaticSlot<Alarm0> = Mutex::new(RefCell::new(None)); }
+#[cfg(not(feature = "std"))]
 static GLOBAL_ALARM: StaticSlot<Alarm0> = Mutex::new(RefCell::new(None));
 
+#[cfg(not(feature = "std"))]
 #[interrupt]
 fn IO_IRQ_BANK0() {
     critical_section::with(|cs| {
@@ -53,6 +64,7 @@ fn IO_IRQ_BANK0() {
     });
 }
 
+#[cfg(not(feature = "std"))]
 #[interrupt]
 fn TIMER_IRQ_0() {
     critical_section::with(|cs| {
@@ -70,8 +82,8 @@ pub const RPI_RETURN_PAYLOAD_LENGTH: usize = 32 + 104;
 // The number of bytes in the header sent for any transfers via `ExtSpiTransfers`
 pub const RPI_TRANSFER_HEADER_LENGTH: usize =
     (MESSAGE_TYPE_U8 * 2) + (PAYLOAD_LENGTH_LE_U32 * 2) + (CRC_OR_PROGRESS_LE_U16 * 4);
-type SpiEnabledPeripheral = Spi<
-    rp2040_hal::spi::Enabled,
+pub type SpiEnabledPeripheral = Spi<
+    crate::re_exports::bsp::hal::spi::Enabled,
     SPI1,
     (
         Pin<Gpio15, FunctionSpi, PullNone>, // miso
@@ -160,31 +172,13 @@ impl ExtSpiTransfers {
     pub fn enable(&mut self, spi: SPI1, resets: &mut RESETS) {
         self.disable_pio_spi();
         if self.spi.is_none() {
-            self.cs_enabled = Some(
-                self.cs_disabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionSpi>()
-                    .into_pull_type(),
-            );
+            self.cs_enabled = Some(self.cs_disabled.take().unwrap().reconfigure());
             let spi = Spi::<_, _, _, 8>::new(
                 spi,
                 (
-                    self.miso_disabled
-                        .take()
-                        .unwrap()
-                        .into_function::<FunctionSpi>()
-                        .into_pull_type(),
-                    self.mosi_disabled
-                        .take()
-                        .unwrap()
-                        .into_function::<FunctionSpi>()
-                        .into_pull_type(),
-                    self.clk_disabled
-                        .take()
-                        .unwrap()
-                        .into_function::<FunctionSpi>()
-                        .into_pull_type(),
+                    self.miso_disabled.take().unwrap().reconfigure(),
+                    self.mosi_disabled.take().unwrap().reconfigure(),
+                    self.clk_disabled.take().unwrap().reconfigure(),
                 ),
             )
             .init_slave(resets, embedded_hal::spi::MODE_3);
@@ -192,13 +186,18 @@ impl ExtSpiTransfers {
         }
     }
     pub fn ping(&mut self, timer: &mut Timer, timeout: Option<u32>) -> bool {
-        let ping_pin = self.ping.take().unwrap().into_pull_up_input();
+        let ping_pin = self.ping.take().unwrap().reconfigure();
         ping_pin.set_interrupt_enabled(LevelLow, true);
         let mut alarm = timer.alarm_0().unwrap();
 
         // Give away our pins by moving them into the `GLOBAL_PINS` variable.
         // We won't need to access them in the main thread again
-        critical_section::with(|cs| {
+        crate::re_exports::critical_section::with(|cs| {
+            #[cfg(feature = "std")]
+            {
+                GLOBAL_PING_PIN.with(|val| val.borrow(cs).replace(Some(ping_pin)));
+            }
+            #[cfg(not(feature = "std"))]
             GLOBAL_PING_PIN.borrow(cs).replace(Some(ping_pin));
         });
         let alarm_timeout = timeout.unwrap_or(300);
@@ -206,7 +205,12 @@ impl ExtSpiTransfers {
             .schedule(MicrosDurationU32::micros(alarm_timeout))
             .expect("Alarm schedule failed");
         alarm.enable_interrupt();
-        critical_section::with(|cs| {
+        crate::re_exports::critical_section::with(|cs| {
+            #[cfg(feature = "std")]
+            {
+                GLOBAL_ALARM.with(|val| val.borrow(cs).replace(Some(alarm)));
+            }
+            #[cfg(not(feature = "std"))]
             GLOBAL_ALARM.borrow(cs).replace(Some(alarm));
         });
         // Unmask the IO_BANK0/TIMER_0) IRQ so that the NVIC interrupt controller
@@ -218,11 +222,19 @@ impl ExtSpiTransfers {
             pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
         }
         // Block until resumed by an interrupt from either the pin or from the alarm
-        cortex_m::asm::wfi();
+        crate::re_exports::cortex_m::asm::wfi();
 
         pac::NVIC::mask(pac::Interrupt::IO_IRQ_BANK0);
         pac::NVIC::mask(pac::Interrupt::TIMER_IRQ_0);
-        let (ping_pin, mut alarm) = critical_section::with(|cs| {
+        let (ping_pin, mut alarm) = crate::re_exports::critical_section::with(|cs| {
+            #[cfg(feature = "std")]
+            {
+                (
+                    GLOBAL_PING_PIN.with(|val| val.borrow(cs).take().unwrap()),
+                    GLOBAL_ALARM.with(|val| val.borrow(cs).take().unwrap()),
+                )
+            }
+            #[cfg(not(feature = "std"))]
             (
                 GLOBAL_PING_PIN.borrow(cs).take().unwrap(),
                 GLOBAL_ALARM.borrow(cs).take().unwrap(),
@@ -233,7 +245,7 @@ impl ExtSpiTransfers {
         let _ = alarm.cancel();
         alarm.disable_interrupt();
         ping_pin.set_interrupt_enabled(LevelLow, false);
-        self.ping = Some(ping_pin.into_pull_down_input());
+        self.ping = Some(ping_pin.reconfigure());
         !finished
     }
 
@@ -308,6 +320,8 @@ impl ExtSpiTransfers {
         transfer_start_address: u32,
         transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
     ) -> bool {
+        #[cfg(feature = "std")]
+        use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
         // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
         maybe_abort_dma_transfer(
@@ -335,27 +349,9 @@ impl ExtSpiTransfers {
             && self.cs_disabled.is_some()
             && self.clk_disabled.is_some()
         {
-            self.miso_pio = Some(
-                self.miso_disabled
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
-            self.cs_pio = Some(
-                self.cs_disabled
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
-            self.clk_pio = Some(
-                self.clk_disabled
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
+            self.miso_pio = Some(self.miso_disabled.take().unwrap().reconfigure());
+            self.cs_pio = Some(self.cs_disabled.take().unwrap().reconfigure());
+            self.clk_pio = Some(self.clk_disabled.take().unwrap().reconfigure());
             let spi_cs_pin_id = 13;
             let miso_id = 15;
             // Setup a PIO-based SPI slave interface to send bytes to the raspberry pi
@@ -385,21 +381,9 @@ impl ExtSpiTransfers {
             let (sm, program) = sm.uninit(rx, tx);
             self.pio.uninstall(program);
 
-            self.miso_disabled = Some(
-                self.miso_pio
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
-            self.cs_disabled = Some(self.cs_pio.take().unwrap().into_function().into_pull_type());
-            self.clk_disabled = Some(
-                self.clk_pio
-                    .take()
-                    .unwrap()
-                    .into_function()
-                    .into_pull_type(),
-            );
+            self.miso_disabled = Some(self.miso_pio.take().unwrap().reconfigure());
+            self.cs_disabled = Some(self.cs_pio.take().unwrap().reconfigure());
+            self.clk_disabled = Some(self.clk_pio.take().unwrap().reconfigure());
 
             self.state_machine_0_uninit = Some(sm);
         }
@@ -415,6 +399,8 @@ impl ExtSpiTransfers {
         dma_peripheral: &mut DMA,
         progress_block: Option<BlockIndex>,
     ) -> bool {
+        #[cfg(feature = "std")]
+        use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
         // The transfer header contains the transfer type (2x)
         // the number of bytes to read for the payload (should this be twice?)
         // the 16 bit crc of the payload (twice)
@@ -487,14 +473,13 @@ impl ExtSpiTransfers {
                         .ch_read_addr()
                         .read()
                         .bits();
-
+                    // gp 5th August 2024 this was sometimes hanging, added the abort. maybe fixed??
                     let _aborted = maybe_abort_dma_transfer(
                         dma_peripheral,
                         transfer_read_address + return_length,
                         transfer_read_address,
                         1,
                     );
-                    //gp 5th August 2024 this was sometimes hanging, added the abort. maybe fixed??
                     let (r_ch0, spi, r_buf) = transfer.wait();
                     self.dma_channel_0 = Some(r_ch0);
                     // Find offset crc in buffer:
@@ -519,7 +504,7 @@ impl ExtSpiTransfers {
                                         self.return_payload_offset = Some(start + 8);
                                     }
                                 } else {
-                                    info!("Return crc mismatch");
+                                    warn!("Return crc mismatch");
                                 }
                             }
                         }
@@ -543,17 +528,11 @@ impl ExtSpiTransfers {
             let spi = self.spi.take().unwrap();
             let spi_disabled = spi.disable();
             let (spi_free, (miso, mosi, clk)) = spi_disabled.free();
-            self.mosi_disabled = Some(mosi.into_function::<FunctionNull>().into_pull_type());
-            self.cs_disabled = Some(
-                self.cs_enabled
-                    .take()
-                    .unwrap()
-                    .into_function::<FunctionNull>()
-                    .into_pull_type(),
-            );
+            self.mosi_disabled = Some(mosi.reconfigure());
+            self.cs_disabled = Some(self.cs_enabled.take().unwrap().reconfigure());
 
-            self.clk_disabled = Some(clk.into_function::<FunctionNull>().into_pull_type());
-            self.miso_disabled = Some(miso.into_function::<FunctionNull>().into_pull_type());
+            self.clk_disabled = Some(clk.reconfigure());
+            self.miso_disabled = Some(miso.reconfigure());
             Some(spi_free)
         } else {
             None
@@ -612,7 +591,7 @@ fn maybe_abort_dma_transfer(
             .busy()
             .bit_is_set()
     {
-        info!(
+        debug!(
             "Aborting dma transfer at {}/{}, #{}",
             prev_read_address - transfer_start_address,
             transfer_end_address - transfer_start_address,

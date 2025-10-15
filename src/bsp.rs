@@ -53,7 +53,7 @@ extern crate cortex_m_rt;
 ///   loop {}
 /// }
 /// ```
-#[cfg(feature = "rt")]
+#[cfg(feature = "no-std")]
 pub use hal::entry;
 
 /// The linker will place this boot block at the start of our program image. We
