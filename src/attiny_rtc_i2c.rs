@@ -857,9 +857,7 @@ impl MainI2C {
     fn take_i2c_lock(&mut self) -> Option<I2cLockedPin> {
         let mut lock_pin = self.unlocked_pin.take().unwrap();
         if lock_pin.is_high().unwrap_or(false) {
-            let mut pin: I2cLockedPin = lock_pin
-                .into_push_pull_output()
-                .into_pull_type::<PullNone>();
+            let mut pin: I2cLockedPin = lock_pin.reconfigure();
             let _ = pin.set_low();
             Some(pin)
         } else {
@@ -870,7 +868,7 @@ impl MainI2C {
 
     /// Restore the pin to "unlocked" (input set to pull-up).
     fn restore_i2c_lock_pin(&mut self, pin: I2cLockedPin) {
-        let pin: I2cUnlockedPin = pin.into_pull_up_input();
+        let pin: I2cUnlockedPin = pin.reconfigure();
         self.unlocked_pin = Some(pin);
     }
 
