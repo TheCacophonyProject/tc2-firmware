@@ -63,8 +63,8 @@ impl BitCursor {
     }
 
     #[inline(always)]
-    pub fn flush_residual_bits(&mut self) {
-        if self.used_bits > 17 {
+    pub fn flush_residual_bits(&mut self, completely: bool) {
+        if self.used_bits > 17 || completely {
             let _ = self.do_flush();
         }
     }
@@ -85,32 +85,48 @@ impl BitCursor {
         }
     }
 
-    pub fn end_aligned(&mut self) -> bool {
-        if self.used_bits != 0 {
-            let extra_bytes = if self.used_bits <= 8 {
-                1
-            } else if self.used_bits <= 16 {
-                2
-            } else if self.used_bits <= 24 {
-                3
-            } else {
-                4
-            };
+    pub fn end_aligned(&mut self) -> (bool, ([u8; 4], u8)) {
+        #[allow(clippy::cast_possible_truncation)]
+        let num_free_bytes = USER_BUFFER_LENGTH.saturating_sub(self.cursor) as u32;
+        // Write as many of these extra bytes as possible into the buffer.
+        // We may end up with some remaining bytes we need to flush into the next page.
+        let extra_bytes_to_write: u32 = if self.used_bits == 0 {
+            0
+        } else if self.used_bits <= 8 {
+            1
+        } else if self.used_bits <= 16 {
+            2
+        } else if self.used_bits <= 24 {
+            3
+        } else {
+            4
+        };
 
-            let num_bits = (extra_bytes * 8) - self.used_bits;
-            if num_bits != 0 {
-                self.write_bits(0, num_bits);
-            }
-            let mut parts = [0u8; 4];
-            LittleEndian::write_u32(&mut parts, self.accumulator);
-            self.accumulator = 0;
-            self.used_bits = 0;
-            for i in 0..extra_bytes {
+        let num_bits = (extra_bytes_to_write * 8) - self.used_bits;
+        if num_bits != 0 {
+            self.write_bits(0, num_bits);
+        }
+        let available_extra_bytes = num_free_bytes.min(extra_bytes_to_write);
+        let mut parts = [0u8; 4];
+        LittleEndian::write_u32(&mut parts, self.accumulator);
+        self.accumulator = 0;
+        self.used_bits = 0;
+        if available_extra_bytes != 0 {
+            for i in 0..available_extra_bytes {
                 self.buffer[PAGE_COMMAND_ADDRESS..PAGE_COMMAND_ADDRESS + USER_BUFFER_LENGTH]
                     [self.cursor] = parts[i as usize];
                 self.cursor += 1;
             }
         }
-        self.is_full()
+        let num_remaining_bytes = (extra_bytes_to_write - available_extra_bytes) as usize;
+        let mut remaining_bytes = [0u8; 4];
+        if num_remaining_bytes != 0 {
+            remaining_bytes[0..num_remaining_bytes].copy_from_slice(
+                &parts[available_extra_bytes as usize
+                    ..available_extra_bytes as usize + num_remaining_bytes],
+            );
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        (self.is_full(), (remaining_bytes, num_remaining_bytes as u8))
     }
 }

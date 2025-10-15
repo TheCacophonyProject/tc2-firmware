@@ -1,20 +1,21 @@
-use crate::bsp;
-use crate::bsp::pac::PIO1;
 use crate::onboard_flash::{OnboardFlash, RecordingFileType, RecordingFileTypeDetails};
 use crate::pdm_filter::PDMFilter;
+use crate::re_exports::bsp;
+use crate::re_exports::bsp::pac::PIO1;
+use crate::re_exports::log::{debug, info, warn};
 use crate::synced_date_time::SyncedDateTime;
+#[cfg(feature = "no-std")]
 use cortex_m::prelude::*;
-use defmt::{info, warn};
 use fugit::HertzU32;
 
-use crate::utils::extend_lifetime_generic_mut;
-use rp2040_hal::dma::Channel;
-use rp2040_hal::dma::{CH3, CH4, double_buffer};
-use rp2040_hal::gpio::bank0::{Gpio0, Gpio1};
-use rp2040_hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
-use rp2040_hal::pio::{
+use crate::re_exports::bsp::hal::dma::Channel;
+use crate::re_exports::bsp::hal::dma::{CH3, CH4, double_buffer};
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio0, Gpio1};
+use crate::re_exports::bsp::hal::gpio::{FunctionNull, FunctionPio1, Pin, PullNone};
+use crate::re_exports::bsp::hal::pio::{
     PIO, PIOBuilder, Running, Rx, SM1, ShiftDirection, StateMachine, Tx, UninitStateMachine,
 };
+use crate::utils::extend_lifetime_generic_mut;
 
 const PDM_DECIMATION: usize = 64;
 const _SAMPLE_RATE: usize = 48000;
@@ -71,18 +72,10 @@ impl PdmMicrophone {
 
     #[allow(clippy::cast_precision_loss)]
     pub fn enable(&mut self) {
-        let data: Pin<Gpio0, FunctionPio1, PullNone> = self
-            .data_disabled
-            .take()
-            .unwrap()
-            .into_function()
-            .into_pull_type();
-        let clk: Pin<Gpio1, FunctionPio1, PullNone> = self
-            .clk_disabled
-            .take()
-            .unwrap()
-            .into_function()
-            .into_pull_type();
+        let data: Pin<Gpio0, FunctionPio1, PullNone> =
+            self.data_disabled.take().unwrap().reconfigure();
+        let clk: Pin<Gpio1, FunctionPio1, PullNone> =
+            self.clk_disabled.take().unwrap().reconfigure();
 
         let data_pin_id = data.id().num;
         let clk_pin_id = clk.id().num;
@@ -96,7 +89,7 @@ impl PdmMicrophone {
         // We may also need to apply a gain step.
 
         let program_with_defines = pio_proc::pio_file!("./src/pdm_microphone.pio");
-        let installed_program: rp2040_hal::pio::InstalledProgram<PIO1> =
+        let installed_program: crate::re_exports::bsp::hal::pio::InstalledProgram<PIO1> =
             self.pio.install(&program_with_defines.program).unwrap();
 
         // needs to run 4 instructions per every clock cycle
@@ -111,7 +104,7 @@ impl PdmMicrophone {
         let clock_divider_fractional =
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
-        info!(
+        debug!(
             "mic clock speed {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0
         );
@@ -182,7 +175,7 @@ impl PdmMicrophone {
         let (mut sm, tx) = self.state_machine_1_running.take().unwrap();
         let clock_divider = self.system_clock_hz.to_MHz() as f32 / (clock_rate * 2.0);
 
-        info!(
+        debug!(
             "Altering mic clock to {} divider {}",
             clock_rate, clock_divider
         );
@@ -191,7 +184,7 @@ impl PdmMicrophone {
             (255.0 * (clock_divider - (clock_divider as u32) as f32)) as u8;
 
         sm.clock_divisor_fixed_point(clock_divider as u16, clock_divider_fractional);
-        info!(
+        debug!(
             "Altered mic clock speed {} divider {} fraction {}",
             self.system_clock_hz.to_MHz() as f32 / clock_divider / 2.0,
             clock_divider as u16,
@@ -211,8 +204,8 @@ impl PdmMicrophone {
         // let (sm, _program) = sm.uninit(rx, tx);
         // self.pio.uninstall(_program);
 
-        self.data_disabled = Some(self.data.take().unwrap().into_function().into_pull_type());
-        self.clk_disabled = Some(self.clk.take().unwrap().into_function().into_pull_type());
+        self.data_disabled = Some(self.data.take().unwrap().reconfigure());
+        self.clk_disabled = Some(self.clk.take().unwrap().reconfigure());
     }
 
     #[allow(clippy::too_many_lines)]
@@ -227,7 +220,7 @@ impl PdmMicrophone {
         time: &SyncedDateTime,
         user_requested_test_recording: bool,
     ) -> bool {
-        info!("Recording for {} seconds ", num_seconds);
+        info!("Recording audio for {} seconds ", num_seconds);
         self.enable();
 
         let mut timer = time.get_timer();
@@ -242,7 +235,7 @@ impl PdmMicrophone {
         #[allow(clippy::cast_precision_loss)]
         #[allow(clippy::cast_possible_truncation)]
         let adjusted_sample_rate = self.alter_mic_clock(3.072) as u32;
-        info!(
+        debug!(
             "Adjusted sample rate becomes {}, system clock {}",
             adjusted_sample_rate,
             self.system_clock_hz.to_MHz()

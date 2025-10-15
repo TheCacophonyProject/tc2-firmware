@@ -10,51 +10,48 @@
 
 // We keep a pointer to the next free byte offset updated, though we may only be able to write things
 // in blocks of a certain size.
-
-use crate::Utc;
-use crate::bsp::pac::SPI1;
-use crate::byte_slice_cursor::CursorMut;
-use crate::utils::{extend_lifetime, extend_lifetime_mut};
-
-use byteorder::{ByteOrder, LittleEndian};
-use chrono::DateTime;
-use crc::{CRC_16_XMODEM, Crc};
-use defmt::{Format, error, info, warn};
-
 use crate::attiny_rtc_i2c::RecordingRequestType;
+use crate::byte_slice_cursor::CursorMut;
 use crate::event_logger::{Event, EventLogger};
-use crate::synced_date_time::SyncedDateTime;
-use cortex_m::prelude::*;
-use embedded_hal::digital::OutputPin;
-use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::dma::{CH1, CH2, Channel, bidirectional};
-use rp2040_hal::gpio::bank0::{Gpio8, Gpio9, Gpio10, Gpio11};
-use rp2040_hal::gpio::{
+use crate::re_exports::bsp::hal::dma::{CH1, CH2, Channel, bidirectional};
+use crate::re_exports::bsp::hal::gpio::bank0::{Gpio8, Gpio9, Gpio10, Gpio11};
+use crate::re_exports::bsp::hal::gpio::{
     FunctionNull, FunctionSio, FunctionSpi, Pin, PullDown, PullNone, SioOutput,
 };
-use rp2040_hal::pac::RESETS;
-use rp2040_hal::spi::Enabled;
-use rp2040_hal::{Spi, Watchdog};
+use crate::re_exports::bsp::hal::spi::{Disabled, Enabled};
+use crate::re_exports::bsp::hal::{Spi, Watchdog};
+use crate::re_exports::bsp::pac::RESETS;
+use crate::re_exports::bsp::pac::SPI1;
+use crate::re_exports::log::{assert_eq, debug, error, info, warn};
+use crate::synced_date_time::SyncedDateTime;
+use crate::utils::{extend_lifetime, extend_lifetime_mut};
+use byteorder::{ByteOrder, LittleEndian};
+use chrono::{DateTime, Utc};
+#[cfg(feature = "no-std")]
+use cortex_m::prelude::*;
+use crc::{CRC_16_XMODEM, Crc};
+use embedded_hal::digital::OutputPin;
+use fugit::{HertzU32, RateExtU32};
 
-const WRITE_ENABLE: u8 = 0x06;
+pub(crate) const WRITE_ENABLE: u8 = 0x06;
 
-const BLOCK_ERASE: u8 = 0xd8;
+pub(crate) const BLOCK_ERASE: u8 = 0xd8;
 pub const PROGRAM_LOAD: u8 = 0x02;
 pub const PROGRAM_EXECUTE: u8 = 0x10;
-const RESET: u8 = 0xff;
-const GET_FEATURES: u8 = 0x0f;
-const SET_FEATURES: u8 = 0x1f;
+pub(crate) const RESET: u8 = 0xff;
+pub(crate) const GET_FEATURES: u8 = 0x0f;
+pub(crate) const SET_FEATURES: u8 = 0x1f;
 const _DEVICE_ID: u8 = 0x9f;
 pub const PAGE_READ: u8 = 0x13;
 const _PAGE_READ_RANDOM: u8 = 0x30;
 const _PAGE_READ_LAST: u8 = 0x3f;
-const CACHE_READ: u8 = 0x0b;
+pub(crate) const CACHE_READ: u8 = 0x0b;
 
-const FEATURE_STATUS: u8 = 0xc0;
+pub(crate) const FEATURE_STATUS: u8 = 0xc0;
 const _FEATURE_CONFIG: u8 = 0xb0;
 const FEATURE_BLOCK_LOCK: u8 = 0xa0;
 const _FEATURE_DIE_SELECT: u8 = 0xd0;
-const NUM_EVENT_BYTES: usize = 18;
+pub const NUM_EVENT_BYTES: usize = 18;
 
 pub const TOTAL_FLASH_BLOCKS: u16 = 2048;
 const NUM_CONFIG_BLOCKS: u8 = 2;
@@ -67,7 +64,7 @@ pub struct OnboardFlashStatus {
     inner: u8,
 }
 
-#[derive(Format)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct EccStatus {
     pub okay: bool,
     should_relocate: bool,
@@ -76,7 +73,8 @@ pub struct EccStatus {
 pub type BlockIndex = u16;
 pub type PageIndex = u8;
 
-#[derive(Copy, Clone, Format)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct RecordingFileTypeDetails {
     pub user_requested: bool,
     pub startup_status: bool,
@@ -164,7 +162,7 @@ pub struct Page {
 }
 
 impl Page {
-    fn new(blank_page: FlashSpiFullPayload) -> Page {
+    pub fn new(blank_page: FlashSpiFullPayload) -> Page {
         // NOTE: We include 3 bytes at the beginning of the buffer for the command + column address
         blank_page[0] = CACHE_READ;
         blank_page[1] = 0;
@@ -311,7 +309,7 @@ pub struct FilePartReturn<'a> {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
-type SpiEnabledPeripheral = Spi<
+pub type SpiEnabledPeripheral = Spi<
     Enabled,
     SPI1,
     (
@@ -323,7 +321,9 @@ type SpiEnabledPeripheral = Spi<
 >;
 
 #[repr(u8)]
-#[derive(Format, PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(PartialEq, Clone, Copy)]
 pub enum FileType {
     Unknown = 0,
     CptvScheduled = 1 << 0,
@@ -388,6 +388,7 @@ pub struct OnboardFlash {
     system_clock_hz: HertzU32,
     pub file_types_found: FileTypes,
     pub last_startup_recording_time: Option<DateTime<Utc>>,
+    pub oldest_recording_time: Option<DateTime<Utc>>,
 }
 /// Each block is made up 64 pages of 2176 bytes. 139,264 bytes per block.
 /// Each page has a 2048 byte data storage section and a 128byte spare area for ECC codes.
@@ -427,12 +428,13 @@ impl OnboardFlash {
             system_clock_hz,
             file_types_found: FileTypes::default(),
             last_startup_recording_time: None,
+            oldest_recording_time: None,
         }
     }
     pub fn init(&mut self, peripheral: SPI1, resets: &mut RESETS) {
         self.take_spi(peripheral, resets);
         // Init the spi peripheral and either init the FAT, or
-        info!("Initing onboard flash");
+        debug!("Initing onboard flash");
 
         // NOTE: We don't try to use all the flash memory efficiently.  Files always start at the
         //  beginning of a block, and if when they end part way through a block, we don't use that
@@ -693,6 +695,21 @@ impl OnboardFlash {
                             last_file_block_index = block_index;
                             num_files += 1;
 
+                            if self.oldest_recording_time.is_none() {
+                                if self.read_page(block_index, 0).is_ok() {
+                                    self.read_page_metadata(block_index);
+                                    self.wait_for_all_ready();
+                                    if self.current_page.file_written_time().is_some() {
+                                        self.oldest_recording_time =
+                                            self.current_page.file_written_time();
+                                    }
+                                }
+                                if self.read_page(block_index, 1).is_ok() {
+                                    self.read_page_metadata(block_index);
+                                    self.wait_for_all_ready();
+                                }
+                            }
+
                             if self.current_page.is_cptv_recording() {
                                 if self.current_page.is_startup_status_recording() {
                                     // For the file time, we need to go back and read the first page.
@@ -733,7 +750,7 @@ impl OnboardFlash {
                             file_start_block_index = self.current_page.file_start_block_index();
                             if self.first_used_block_index.is_none() {
                                 // This is the starting block of the first file stored.
-                                info!("Storing first used block {}", block_index);
+                                debug!("Storing first used block {}", block_index);
                                 self.first_used_block_index = Some(block_index);
                             }
                         } else {
@@ -745,16 +762,16 @@ impl OnboardFlash {
                                 self.file_start_block_index = file_start_block_index;
                                 self.current_block_index = block_index;
                                 self.current_page_index = 0;
-                                info!(
-                                    "Setting file_start_block_index {}",
+                                debug!(
+                                    "Setting file_start_block_index {:?}",
                                     self.file_start_block_index
                                 );
-                                info!(
-                                    "Setting last_used_block_index {}",
+                                debug!(
+                                    "Setting last_used_block_index {:?}",
                                     self.last_used_block_index
                                 );
-                                info!("Setting current_block_index {}", self.current_block_index);
-                                info!("Setting next starting block index {}", block_index);
+                                debug!("Setting current_block_index {}", self.current_block_index);
+                                debug!("Setting next starting block index {}", block_index);
                             }
                         }
                     }
@@ -796,13 +813,18 @@ impl OnboardFlash {
         let miso = self.miso_disabled.take().unwrap();
         let mosi = self.mosi_disabled.take().unwrap();
         let clk = self.clk_disabled.take().unwrap();
-        let spi = Spi::new(
-            peripheral,
+        let spi = Spi::<
+            Disabled,
+            SPI1,
             (
-                mosi.into_function().into_pull_type(),
-                miso.into_function().into_pull_type(),
-                clk.into_function().into_pull_type(),
+                Pin<Gpio11, FunctionSpi, PullDown>, //, SCK
+                Pin<Gpio8, FunctionSpi, PullDown>,  // MISO
+                Pin<Gpio10, FunctionSpi, PullDown>, // MOSI
             ),
+            8,
+        >::new(
+            peripheral,
+            (mosi.reconfigure(), miso.reconfigure(), clk.reconfigure()),
         )
         .init(
             resets,
@@ -845,7 +867,7 @@ impl OnboardFlash {
             if let Some(start_block_index) = self.file_start_block_index {
                 let mut block_index = start_block_index;
                 let mut page_index = 1;
-                info!(
+                debug!(
                     "Checking if last recording is complete from block {}",
                     block_index
                 );
@@ -988,14 +1010,14 @@ impl OnboardFlash {
             || self.last_used_block_index.unwrap() < self.file_start_block_index.unwrap()
         {
             info!(
-                "Nothing to erase start {} last used block {}",
+                "Nothing to erase start {:?} last used block {:?}",
                 self.file_start_block_index, self.last_used_block_index
             );
             return Err("File hasn't been written to");
         }
         let start_block_index = self.file_start_block_index.unwrap();
-        info!(
-            "Erasing latest file {}:0 to {}",
+        debug!(
+            "Erasing latest file {:?}:0 to {:?}",
             start_block_index, self.last_used_block_index
         );
 
@@ -1027,9 +1049,9 @@ impl OnboardFlash {
             let spi_enabled = self.spi.take().unwrap();
             let spi_disabled = spi_enabled.disable();
             let (spi, (mosi, miso, clk)) = spi_disabled.free();
-            self.mosi_disabled = Some(mosi.into_pull_down_disabled().into_pull_type());
-            self.clk_disabled = Some(clk.into_pull_down_disabled().into_pull_type());
-            self.miso_disabled = Some(miso.into_pull_down_disabled().into_pull_type());
+            self.mosi_disabled = Some(mosi.reconfigure());
+            self.clk_disabled = Some(clk.reconfigure());
+            self.miso_disabled = Some(miso.reconfigure());
 
             Some(spi)
         } else {
@@ -1169,7 +1191,7 @@ impl OnboardFlash {
                             self.current_page_index = 0;
                             self.previous_file_start_block_index =
                                 self.current_page.previous_file_start_block_index();
-                            info!(
+                            debug!(
                                 "Set file start to {:?}:{:?} and previous {:?}",
                                 self.current_block_index, 0, self.previous_file_start_block_index
                             );
@@ -1185,7 +1207,7 @@ impl OnboardFlash {
             self.current_block_index = self.find_start(last_block_index);
             self.current_page_index = 0;
             self.file_start_block_index = Some(self.current_block_index);
-            info!(
+            debug!(
                 "Searched for file start found {:?}:{:?}",
                 self.current_block_index, self.last_used_block_index
             );
@@ -1251,10 +1273,7 @@ impl OnboardFlash {
             let offset = offset as usize;
             let src_range = 0..length + FLASH_SPI_HEADER;
             let dst_range = offset..offset + length + FLASH_SPI_HEADER;
-            crate::assert_eq!(src_range.len(), dst_range.len());
-
-            // FIXME: Why is this a bidirectional transfer again?
-            //  That seems to be the main reason we need these Page abstractions.
+            assert_eq!(src_range.len(), dst_range.len());
             let transfer = bidirectional::Config::new(
                 (
                     self.dma_channel_1.take().unwrap(),
@@ -1263,8 +1282,6 @@ impl OnboardFlash {
                 unsafe { extend_lifetime(&current_page[src_range]) },
                 self.spi.take().unwrap(),
                 // To ensure the data is placed in the correct place on the page, offset by -4
-
-                // FIXME: Is everything in the metadata actually offset by 4 bytes?
                 unsafe { extend_lifetime_mut(&mut prev_page[dst_range]) },
             )
             .start();
@@ -1338,7 +1355,7 @@ impl OnboardFlash {
         self.previous_file_start_block_index = self.file_start_block_index;
         self.current_page_index = start_page;
 
-        warn!(
+        debug!(
             "Starting file at {}:{}",
             self.current_block_index, self.current_page_index,
         );
@@ -1475,6 +1492,9 @@ impl OnboardFlash {
         recording_file_type: RecordingFileType,
         time: Option<&SyncedDateTime>,
     ) -> Result<(), &str> {
+        if user_bytes_length == 0 {
+            return Ok(());
+        }
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
 
@@ -1603,7 +1623,7 @@ impl OnboardFlash {
                 }
             }
 
-            warn!("Ending file at {}:{}", block, page);
+            debug!("Ending file at {}:{}", block, page);
         }
         // PROGRAM_LOAD
         self.spi_write(&bytes[1..]);

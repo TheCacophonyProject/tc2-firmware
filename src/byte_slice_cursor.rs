@@ -23,7 +23,7 @@ impl<'a> Cursor<'a> {
         self.pos = pos;
     }
     pub fn remaining_slice(&self) -> &[u8] {
-        let len = self.pos.min(self.inner.as_ref().len());
+        let len = self.pos.min(self.inner.len());
         &self.inner[len..]
     }
 

@@ -1,12 +1,12 @@
-use crate::bsp;
-use crate::bsp::XOSC_CRYSTAL_FREQ;
-use crate::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
-use crate::bsp::pac::{CLOCKS, ROSC, XOSC};
+use crate::re_exports::bsp;
+use crate::re_exports::bsp::XOSC_CRYSTAL_FREQ;
+use crate::re_exports::bsp::hal::Clock;
+use crate::re_exports::bsp::hal::clocks::{ClockSource, ClocksManager, StoppableClock};
+use crate::re_exports::bsp::hal::rosc::RingOscillator;
+use crate::re_exports::bsp::hal::xosc::setup_xosc_blocking;
+use crate::re_exports::bsp::pac::rosc::ctrl::FREQ_RANGE_A;
+use crate::re_exports::bsp::pac::{CLOCKS, ROSC, XOSC};
 use fugit::{HertzU32, RateExtU32};
-use rp2040_hal::Clock;
-use rp2040_hal::clocks::{ClockSource, ClocksManager, StoppableClock};
-use rp2040_hal::rosc::RingOscillator;
-use rp2040_hal::xosc::setup_xosc_blocking;
 
 fn set_rosc_div(rosc: &ROSC, div: u32) {
     assert!(div <= 32);
@@ -129,7 +129,7 @@ fn increase_freq_range(rosc: &ROSC) -> bool {
 fn rosc_frequency_count_hz(clocks: &CLOCKS) -> HertzU32 {
     // Wait for the frequency counter to be ready
     while clocks.fc0_status().read().running().bit_is_set() {
-        cortex_m::asm::nop();
+        crate::re_exports::cortex_m::asm::nop();
     }
 
     // Set the speed of the reference clock in kHz.
@@ -157,7 +157,7 @@ fn rosc_frequency_count_hz(clocks: &CLOCKS) -> HertzU32 {
 
     // Wait until the measurement is ready
     while clocks.fc0_status().read().done().bit_is_clear() {
-        cortex_m::asm::nop();
+        crate::re_exports::cortex_m::asm::nop();
     }
 
     let speed_hz = clocks.fc0_result().read().khz().bits() * 1000;

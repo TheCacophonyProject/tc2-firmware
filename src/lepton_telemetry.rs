@@ -1,8 +1,9 @@
 use crate::lepton::FFCStatus;
+use crate::re_exports::log::warn;
 use byteorder::{ByteOrder, LittleEndian};
-use defmt::{Format, warn};
 
-#[derive(Debug, Format)]
+#[derive(Debug)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
 pub struct Telemetry {
     pub revision: [u8; 2],
     pub frame_num: u32,

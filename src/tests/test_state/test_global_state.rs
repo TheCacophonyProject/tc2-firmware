@@ -1,0 +1,185 @@
+extern crate std;
+
+use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState};
+use crate::device_config::DeviceConfig as FirmwareDeviceConfig;
+use crate::ext_spi_transfers::RPI_RETURN_PAYLOAD_LENGTH;
+use crate::formatted_time::FormattedNZTime;
+use crate::onboard_flash::{BlockIndex, PageIndex};
+use crate::tests::mocks::fake_rpi_device_config::DeviceConfig;
+use crate::tests::mocks::fake_rpi_event_logger::{FileType, LoggerEvent};
+use crate::tests::mocks::fake_rpi_recording_state::RecordingState;
+use crate::tests::mocks::fake_shared_spi::{StorageBlock, StoragePage};
+use chrono::{DateTime, Utc};
+use codec::decode::CptvFrame;
+use std::cell::RefCell;
+use std::time::Instant;
+use std::vec;
+use std::vec::Vec;
+
+pub struct RtcAlarm {
+    pub minutes: u8,
+    pub(crate) hours: u8,
+    pub(crate) day: u8,
+    pub(crate) weekday_alarm_mode: u8,
+    pub enabled: u8,
+}
+
+impl RtcAlarm {
+    pub fn is_initialised(&self) -> bool {
+        !(self.minutes == 0
+            && self.hours == 0
+            && self.day == 0
+            && self.weekday_alarm_mode == 0
+            && self.enabled == 0)
+    }
+
+    pub fn already_triggered(&self) -> bool {
+        self.enabled & 0b0000_1000 == 0b0000_1000
+    }
+}
+
+pub struct SimState {
+    pub(crate) used: bool,
+    pub(crate) current_time: DateTime<Utc>,
+    pub(crate) last_frame: Option<CptvFrame>,
+    pub(crate) frame_num: u32,
+    pub(crate) expected_attiny_firmware_version: u8,
+    pub(crate) camera_state: CameraState,
+    pub(crate) attiny_power_ctrl_state: u8,
+    pub(crate) attiny_keep_alive: DateTime<Utc>,
+    pub(crate) tc2_agent_state: Tc2AgentState,
+    pub(crate) rtc_alarm_state: RtcAlarm,
+    pub(crate) ecc_error_addresses: Vec<(BlockIndex, PageIndex)>,
+    pub(crate) flash_backing_storage: Vec<StorageBlock>,
+    pub(crate) pending_forced_offload_request: bool,
+    pub(crate) prefer_not_to_offload_files_now: bool,
+    pub(crate) file_download: Option<Vec<u8>>,
+    pub(crate) file_part_count: usize,
+    pub(crate) file_download_start: Instant,
+    pub(crate) fake_pi_recording_state: RecordingState,
+    pub(crate) rosc_drive_iterator: usize,
+    pub(crate) files_offloaded: Vec<FileOffload>,
+    pub(crate) events_offloaded: Vec<EventOffload>,
+    pub(crate) device_config: Option<DeviceConfig>,
+    pub(crate) firmware_device_config: Option<FirmwareDeviceConfig>,
+    pub(crate) thermal_trigger_offsets_mins: Option<Vec<u32>>,
+    pub(crate) cptv_files: Option<Vec<String>>,
+    pub(crate) current_cptv_file: Option<String>,
+    pub(crate) cptv_decoder: Option<codec::decode::CptvDecoder<std::fs::File>>,
+    pub(crate) current_thermal_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    pub(crate) current_test_window: (DateTime<Utc>, DateTime<Utc>),
+    pub(crate) next_rpi_response: [u8; RPI_RETURN_PAYLOAD_LENGTH],
+    pub(crate) restart_num: u32,
+    pub(crate) offloads_fail_on_restart_iteration: Option<u32>,
+    pub(crate) audio_recording_fails_on_restart_iteration: Option<u32>,
+}
+
+pub struct FileOffload {
+    pub size: usize,
+    pub file_type: FileType,
+    pub recording_time: DateTime<Utc>,
+    pub offloaded_at: DateTime<Utc>,
+}
+
+impl core::fmt::Debug for FileOffload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "{}",
+            format!(
+                r#"FileOffload {{
+    size: {},
+    file_type: {:?},
+    recording_time: {},
+    offloaded_at: {}
+}}"#,
+                self.size,
+                self.file_type,
+                FormattedNZTime(self.recording_time),
+                FormattedNZTime(self.offloaded_at)
+            )
+        )
+    }
+}
+
+pub struct EventOffload {
+    pub(crate) event: LoggerEvent,
+    pub(crate) offloaded_at: DateTime<Utc>,
+}
+
+impl core::fmt::Debug for EventOffload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{}",
+            format!(
+                r#"EventOffload {{
+    event: LoggerEvent {{
+        event: {:?} {},
+        time: {}
+    }},
+    offloaded_at: {},
+}}"#,
+                self.event.event,
+                self.event.inner_time(),
+                FormattedNZTime(
+                    DateTime::from_timestamp_millis(self.event.timestamp / 1000)
+                        .unwrap_or(chrono::Local::now().with_timezone(&Utc))
+                ),
+                FormattedNZTime(self.offloaded_at)
+            )
+        )
+    }
+}
+
+thread_local! {
+    pub static TEST_SIM_STATE: RefCell<SimState> = RefCell::new(SimState {
+        used: false,
+        current_time: Default::default(),
+        last_frame: None,
+        frame_num: 0,
+        expected_attiny_firmware_version: 1,
+        camera_state: CameraState::PoweringOn,
+        attiny_power_ctrl_state: 0,
+        attiny_keep_alive: Utc::now(),
+        tc2_agent_state: Default::default(),
+        rtc_alarm_state: RtcAlarm {
+            minutes: 0,
+            hours: 0,
+            day: 0,
+            weekday_alarm_mode: 0,
+            enabled: 0
+        },
+        ecc_error_addresses: vec![],
+        flash_backing_storage: vec![
+            StorageBlock {
+                inner: [StoragePage {
+                    inner: [0xff; 2048 + 128]
+                }; 64]
+            };
+            2048
+        ],
+        pending_forced_offload_request: false,
+        prefer_not_to_offload_files_now: false,
+        file_download: None,
+        file_part_count: 0,
+        file_download_start: Instant::now(),
+        fake_pi_recording_state: RecordingState::new(),
+        rosc_drive_iterator: 0,
+        files_offloaded: vec![],
+        events_offloaded: vec![],
+        device_config: None,
+        firmware_device_config: None,
+        thermal_trigger_offsets_mins: None,
+        current_test_window: (Utc::now(), Utc::now()),
+        current_thermal_window: Some((Utc::now(), Utc::now())),
+        cptv_files: None,
+        current_cptv_file: None,
+        cptv_decoder: None,
+        next_rpi_response: [0; RPI_RETURN_PAYLOAD_LENGTH],
+        restart_num: 0,
+        offloads_fail_on_restart_iteration: None,
+        audio_recording_fails_on_restart_iteration: None,
+    });
+
+}
