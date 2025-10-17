@@ -2,6 +2,7 @@
 //  when we do a release, so the tc2-agent can match against it and see if the version is correct
 //  for the agent software.
 // TODO Check against minor version also.
+// Update the version in src/tests/mocks/fake_shared_spi.rs so the tests will pass
 pub const FIRMWARE_VERSION: u32 = 38;
 pub const EXPECTED_ATTINY_FIRMWARE_VERSION: u8 = 1; // Checking against the attiny Major version.
 
