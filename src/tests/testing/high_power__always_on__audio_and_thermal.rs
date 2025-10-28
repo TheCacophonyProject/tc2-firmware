@@ -3,7 +3,7 @@ use crate::tests::helpers::{
     ConfigBuilder, num_audio_recordings_offloaded, num_audio_recordings_stored_in_flash,
     num_thermal_recordings_offloaded, num_thermal_recordings_stored_in_flash,
     offloaded_event_count, offloaded_event_does_not_exist, simulate_camera_with_config,
-    test_start_and_end_time,
+    stored_event_does_not_exist, stored_event_exists, test_start_and_end_time,
 };
 use crate::tests::mocks::fake_rpi_event_logger::LoggerEventKind;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
@@ -57,6 +57,18 @@ fn high_power_mode_always_on_audio_and_thermal() {
         assert!(offloaded_event_does_not_exist(
             &state.events_offloaded,
             LoggerEventKind::Rp2040Sleep
+        ));
+        assert!(stored_event_does_not_exist(
+            &state.flash_backing_storage,
+            LoggerEventKind::Rp2040Sleep
+        ));
+        assert!(offloaded_event_does_not_exist(
+            &state.events_offloaded,
+            LoggerEventKind::ToldRpiToSleep
+        ));
+        assert!(stored_event_does_not_exist(
+            &state.flash_backing_storage,
+            LoggerEventKind::ToldRpiToSleep
         ));
     });
 }
