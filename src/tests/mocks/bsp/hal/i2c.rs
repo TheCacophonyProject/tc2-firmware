@@ -130,46 +130,41 @@ impl<A, B> I2C<I2C1, (A, B)> {
                                 }
                             }
                             0x02 => {
-                                // Tell attiny to shut US down.  Can we simulate this?
-                                // Maybe it's the same as a restart, with the time advanced?
-                                //*CAMERA_STATE.lock().unwrap() = CameraState::PoweringOf;
+                                // Tell attiny to shut US down.
+                                // Advance to the next alarm time when we sleep, and set the
+                                // alarm as "triggered"
+                                let now = s.current_time;
+                                if s.rtc_alarm_state.is_initialised() {
+                                    let minutes =
+                                        decode_bcd(s.rtc_alarm_state.minutes & 0b0111_1111);
+                                    let hours = decode_bcd(s.rtc_alarm_state.hours & 0b0011_1111);
+                                    let day = decode_bcd(s.rtc_alarm_state.day & 0b0011_1111);
 
-                                {
-                                    // Advance to the next alarm time when we sleep.
-                                    let now = s.current_time;
-                                    if s.rtc_alarm_state.is_initialised() {
-                                        let minutes =
-                                            decode_bcd(s.rtc_alarm_state.minutes & 0b0111_1111);
-                                        let hours =
-                                            decode_bcd(s.rtc_alarm_state.hours & 0b0011_1111);
-                                        let day = decode_bcd(s.rtc_alarm_state.day & 0b0011_1111);
-
-                                        let naive_date = NaiveDate::from_ymd_opt(
-                                            now.year(),
-                                            now.month(),
-                                            u32::from(day),
-                                        )
-                                        .unwrap();
-                                        let naive_time = NaiveTime::from_hms_opt(
-                                            u32::from(hours),
-                                            u32::from(minutes),
-                                            0,
-                                        )
-                                        .unwrap();
-                                        let utc_datetime =
-                                            NaiveDateTime::new(naive_date, naive_time).and_utc();
-                                        warn!(
-                                            "Shutting down at {}, with wakeup alarm set in {}mins ({})",
-                                            FormattedNZTime(s.current_time),
-                                            (utc_datetime - s.current_time).num_minutes(),
-                                            FormattedNZTime(utc_datetime),
-                                        );
-                                        s.current_time = utc_datetime;
-                                        // Make sure the alarm is set to "has been triggered".
-                                        s.rtc_alarm_state.enabled |= 0b0000_1000;
-                                    } else {
-                                        error!("Alarm not initialised");
-                                    }
+                                    let naive_date = NaiveDate::from_ymd_opt(
+                                        now.year(),
+                                        now.month(),
+                                        u32::from(day),
+                                    )
+                                    .unwrap();
+                                    let naive_time = NaiveTime::from_hms_opt(
+                                        u32::from(hours),
+                                        u32::from(minutes),
+                                        0,
+                                    )
+                                    .unwrap();
+                                    let utc_datetime =
+                                        NaiveDateTime::new(naive_date, naive_time).and_utc();
+                                    warn!(
+                                        "Shutting down at {}, with wakeup alarm set in {}mins ({})",
+                                        FormattedNZTime(s.current_time),
+                                        (utc_datetime - s.current_time).num_minutes(),
+                                        FormattedNZTime(utc_datetime),
+                                    );
+                                    s.current_time = utc_datetime;
+                                    // Make sure the alarm is set to "has been triggered".
+                                    s.rtc_alarm_state.enabled |= 0b0000_1000;
+                                } else {
+                                    error!("Alarm not initialised");
                                 }
                             }
                             _ => panic!(

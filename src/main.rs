@@ -2,6 +2,8 @@
 #![cfg(feature = "no-std")]
 #![no_main]
 #![warn(clippy::all, clippy::pedantic)]
+extern crate alloc;
+
 mod attiny_rtc_i2c;
 mod audio_task;
 pub mod bsp;
