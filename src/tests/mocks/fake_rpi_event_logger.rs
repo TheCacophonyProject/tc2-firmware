@@ -2,9 +2,9 @@ extern crate std;
 
 use crate::device_config::AudioMode;
 use crate::formatted_time::FormattedNZTime;
+use crate::re_exports::log::{debug, info};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Utc};
-use log::info;
 use std::format;
 use std::string::String;
 
@@ -332,33 +332,33 @@ impl LoggerEvent {
                 "SetAudioAlarm{{{}}}",
                 format!(r#"{{ "alarm-time": {} }}"#, alarm * 1000)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::SetThermalAlarm(alarm) = self.event {
             // Microseconds to nanoseconds
             let json = format!(
                 "SetThermalAlarm{{{}}}",
                 format!(r#"{{ "alarm-time": {} }}"#, alarm * 1000)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::Rp2040MissedAudioAlarm(alarm) = self.event {
             // Microseconds to nanoseconds
             let json = format!(
                 "Rp2040MissedAudioAlarm{{{}}}",
                 format!(r#"{{ "alarm-time": {} }}"#, alarm * 1000)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::ToldRpiToWake(reason) = self.event {
             let json = format!(
                 "ToldRpiToWake{{{}}}",
                 format!(r#"{{ "wakeup-reason": {reason} }}"#)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::LostFrames(lost_frames) = self.event {
             let json = format!(
                 "LostFrames{{{}}}",
                 format!(r#"{{ "lost-frames": "{lost_frames}" }}"#)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::ErasePartialOrCorruptRecording(discard_info) = self.event {
             let recording_type = discard_info.recording_type;
             let json = format!(
@@ -376,7 +376,7 @@ impl LoggerEvent {
                     r#"{{ "recording-type": "{recording_type:?}", "num-frames": "{num_frames}", "seconds-since-last-ffc": "{seconds_since_last_ffc}" }}"#
                 )
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::Rp2040GotNewConfig(new_config_info) = self.event {
             let audio_mode = new_config_info.audio_mode;
             let continuous_recorder = new_config_info.continuous_recorder;
@@ -388,28 +388,28 @@ impl LoggerEvent {
                     r#"{{ "audio-mode": "{audio_mode:?}", "continuous-recorder": "{continuous_recorder}", "high-power-mode": "{high_power_mode}", "rp2040-firmware-version": "{rp2040_firmware_version}" }}"#
                 )
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::UnrecoverableDataCorruption((block, page)) = self.event {
             let json = format!(
                 "UnrecoverableDataCorruption{{{}}}",
                 format!(r#"{{ "block": "{block}", "page": "{page}" }}"#)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else if let LoggerEventKind::OffloadedRecording(file_type) = self.event {
             let json = format!(
                 "OffloadedRecording{{{}}}",
                 format!(r#"{{ "file-type": "{file_type:?}" }}"#)
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         } else {
             let json = format!(
                 "{:?}{}",
                 self.event,
                 json_payload.unwrap_or(String::from("{}"))
             );
-            info!("Log Event {}", json);
+            debug!("Log Event {}", json);
         }
         // Microseconds to nanoseconds
-        info!("Event timestamp: {}", self.timestamp * 1000);
+        debug!("Event timestamp: {}", self.timestamp * 1000);
     }
 }

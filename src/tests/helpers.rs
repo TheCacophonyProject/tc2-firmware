@@ -583,3 +583,10 @@ pub fn stored_event_exists(flash_storage: &Vec<StorageBlock>, event: LoggerEvent
         a == b
     })
 }
+
+pub fn stored_event_does_not_exist(
+    flash_storage: &Vec<StorageBlock>,
+    event: LoggerEventKind,
+) -> bool {
+    !stored_event_exists(flash_storage, event)
+}
