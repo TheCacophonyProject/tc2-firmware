@@ -170,6 +170,37 @@ impl TryFrom<u8> for AlarmMode {
 #[derive(PartialEq, Clone, Copy)]
 #[cfg_attr(feature = "no-std", derive(defmt::Format))]
 #[cfg_attr(feature = "std", derive(Debug))]
+pub enum PowerState {
+    PowerDown = 0x00,
+    PowerOn = 0x01,
+    SleepRP2040 = 0x02,
+    InvalidState = 0x03,
+}
+
+impl From<u8> for PowerState {
+    fn from(value: u8) -> Self {
+        match value {
+            0x00 => PowerState::PowerDown,
+            0x01 => PowerState::PowerOn,
+            0x02 => PowerState::SleepRP2040,
+            x => {
+                warn!("Invalid power state {:x}", x);
+                PowerState::InvalidState
+            }
+        }
+    }
+}
+
+impl PowerState {
+    pub fn is_powered_on(self) -> bool {
+        self == PowerState::PowerOn
+    }
+}
+
+#[repr(u8)]
+#[derive(PartialEq, Clone, Copy)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[cfg_attr(feature = "std", derive(Debug))]
 pub enum CameraState {
     PoweringOn = 0x00,
     PoweredOn = 0x01,
@@ -615,7 +646,7 @@ impl MainI2C {
     }
 
     pub fn tell_pi_to_shutdown(&mut self) -> Result<(), &str> {
-        self.try_attiny_write_command(ATTINY_REG_RP2040_PI_POWER_CTRL, 0x00)
+        self.try_attiny_write_command(ATTINY_REG_RP2040_PI_POWER_CTRL, PowerState::PowerDown as u8)
     }
 
     pub fn advise_raspberry_pi_it_may_shutdown(&mut self) -> Result<(), &str> {
@@ -629,7 +660,7 @@ impl MainI2C {
     }
 
     pub fn tell_pi_to_wakeup(&mut self) -> Result<(), &str> {
-        self.try_attiny_write_command(ATTINY_REG_RP2040_PI_POWER_CTRL, 0x01)
+        self.try_attiny_write_command(ATTINY_REG_RP2040_PI_POWER_CTRL, PowerState::PowerOn as u8)
     }
 
     pub fn get_is_recording(&mut self) -> Result<bool, &str> {
@@ -931,6 +962,11 @@ impl MainI2C {
         } else {
             Ok(())
         }
+    }
+
+    pub fn get_attiny_power_state(&mut self) -> Result<PowerState, &str> {
+        let state = self.try_attiny_read_command(ATTINY_REG_CAMERA_STATE)?;
+        Ok(PowerState::from(state))
     }
 
     pub fn tell_attiny_to_power_down_rp2040(&mut self) -> Result<(), &str> {
