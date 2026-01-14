@@ -72,7 +72,7 @@ pub fn maybe_offload_events(
         }
         info!("Offloaded {} event(s)", events_sent);
         if success {
-            events.clear(fs);
+            // events.clear(fs);
             events.log(Event::OffloadedLogs, time, fs);
         } else {
             events.log(Event::LogOffloadFailed, time, fs);
@@ -309,7 +309,16 @@ fn offload_recordings_and_events(
                     file_count += 1;
                     info!("Offloaded {} file(s)", file_count);
                     watchdog.feed();
-                    let _ = fs.erase_latest_file();
+                    // GP DO NOT CHECK THIS IN
+                    //WILL BREAK EVEYRTHIGN
+                    //**************************************************** */
+                    //**************************************************** */
+                    //**************************************************** */
+                    //**************************************************** */
+                    //**************************************************** */
+                    //**************************************************** */
+                    //**************************************************** */
+                    // let _ = fs.erase_latest_file();
                     file_ended = true;
                     break 'offload_file;
                 }

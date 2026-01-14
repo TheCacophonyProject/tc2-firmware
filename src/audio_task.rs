@@ -19,7 +19,7 @@ use crate::synced_date_time::SyncedDateTime;
 use byteorder::{ByteOrder, LittleEndian};
 use crc::{CRC_16_XMODEM, Crc};
 use fugit::HertzU32;
-pub const AUDIO_DEV_MODE: bool = false;
+pub const AUDIO_DEV_MODE: bool = true;
 
 fn send_camera_connect_info(
     fs: &mut OnboardFlash,
