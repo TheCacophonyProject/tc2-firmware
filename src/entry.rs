@@ -220,7 +220,7 @@ pub fn real_main() {
     if force_offload_now {
         warn!("Booted in offload priority mode");
     }
-    // let force_offload_now = true;
+    let force_offload_now = true;
     let scheduled_alarm = if config_was_updated {
         // If the config was updated, create a new alarm and restart
         None
