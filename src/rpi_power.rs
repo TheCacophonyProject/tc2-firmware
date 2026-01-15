@@ -1,4 +1,4 @@
-use crate::attiny_rtc_i2c::{CameraState, MainI2C};
+use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{EventLogger, LoggerEvent};
 use crate::onboard_flash::OnboardFlash;
 
