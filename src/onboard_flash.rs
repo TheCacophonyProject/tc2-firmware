@@ -678,6 +678,10 @@ impl OnboardFlash {
                     warn!("BAD BLOCK added {}", block_index);
                     *slot = block_index;
                 }
+                if self.current_block_index == block_index {
+                    info!("Current block is bad block so incrementing");
+                    self.current_block_index += 1;
+                }
             } else {
                 //println!("Scan {block_index}");
                 if self.read_page(block_index, 1).is_ok() {
