@@ -965,7 +965,7 @@ impl MainI2C {
     }
 
     pub fn get_attiny_power_state(&mut self) -> Result<PowerState, &str> {
-        let state = self.try_attiny_read_command(ATTINY_REG_CAMERA_STATE)?;
+        let state = self.try_attiny_read_command(ATTINY_REG_RP2040_PI_POWER_CTRL)?;
         Ok(PowerState::from(state))
     }
 

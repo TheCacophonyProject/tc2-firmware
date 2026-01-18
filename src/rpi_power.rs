@@ -40,13 +40,13 @@ pub fn wake_raspberry_pi(
     event_to_log: Option<(&mut OnboardFlash, &mut EventLogger, LoggerEvent)>,
 ) -> bool {
     // if we have told rpi to power off and it hasn't powered off yet, we need to tell it to stay on
-    let powered_off_state = if let Ok(power_state) = i2c.get_attiny_power_state() {
-        power_state.is_powered_on()
+    let needs_to_be_powered_on = if let Ok(power_state) = i2c.get_attiny_power_state() {
+        !power_state.is_powered_on()
     } else {
         true
     };
 
-    if powered_off_state {
+    if needs_to_be_powered_on {
         if i2c.tell_pi_to_wakeup().is_ok() {
             // TODO: Log here if this was an unexpected wakeup
             warn!("Sent rPi wake signal to attiny");
