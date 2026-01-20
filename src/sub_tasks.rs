@@ -72,7 +72,7 @@ pub fn maybe_offload_events(
         }
         info!("Offloaded {} event(s)", events_sent);
         if success {
-            // events.clear(fs);
+            events.clear(fs);
             events.log(Event::OffloadedLogs, time, fs);
         } else {
             events.log(Event::LogOffloadFailed, time, fs);
