@@ -625,7 +625,7 @@ pub fn schedule_next_recording(
         while wakeup <= current_time {
             let r = rng.generate();
             let wake_in = if AUDIO_DEV_MODE {
-                120
+                120 * 30
             } else if r <= short_chance {
                 short_pause + (i64::from(r) * short_window) / i64::from(short_chance)
             } else {

@@ -275,17 +275,17 @@ pub fn real_main() {
         }
     }
 
-    // if !validate_scheduled_alarm(
-    //     &config,
-    //     &mut fs,
-    //     &time,
-    //     &mut i2c,
-    //     &mut events,
-    //     &scheduled_alarm,
-    // ) {
-    //     // NOTE: If the alarm was invalid, a new alarm will be set, and we'll restart.
-    //     return;
-    // }
+    if !validate_scheduled_alarm(
+        &config,
+        &mut fs,
+        &time,
+        &mut i2c,
+        &mut events,
+        &scheduled_alarm,
+    ) {
+        // NOTE: If the alarm was invalid, a new alarm will be set, and we'll restart.
+        return;
+    }
 
     // We ALWAYS have a valid scheduled next alarm at this point.
     let scheduled_alarm = scheduled_alarm.unwrap();
