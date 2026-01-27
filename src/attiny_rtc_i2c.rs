@@ -970,7 +970,10 @@ impl MainI2C {
     }
 
     pub fn tell_attiny_to_power_down_rp2040(&mut self) -> Result<(), &str> {
-        self.try_attiny_write_command(ATTINY_REG_RP2040_PI_POWER_CTRL, 0x02)
+        self.try_attiny_write_command(
+            ATTINY_REG_RP2040_PI_POWER_CTRL,
+            PowerState::SleepRP2040 as u8,
+        )
     }
 
     fn try_read_eeprom_command(&mut self, command: u8, payload: &mut [u8]) -> Result<(), &str> {
