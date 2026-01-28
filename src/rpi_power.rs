@@ -1,4 +1,4 @@
-use crate::attiny_rtc_i2c::{CameraState, MainI2C};
+use crate::attiny_rtc_i2c::MainI2C;
 use crate::event_logger::{EventLogger, LoggerEvent};
 use crate::onboard_flash::OnboardFlash;
 
@@ -39,10 +39,14 @@ pub fn wake_raspberry_pi(
     watchdog: Option<&mut Watchdog>,
     event_to_log: Option<(&mut OnboardFlash, &mut EventLogger, LoggerEvent)>,
 ) -> bool {
-    if i2c
-        .get_camera_state()
-        .is_ok_and(CameraState::pi_is_powered_off)
-    {
+    // if we have told rpi to power off and it hasn't powered off yet, we need to tell it to stay on
+    let needs_to_be_powered_on = if let Ok(power_state) = i2c.get_attiny_power_state() {
+        !power_state.is_powered_on()
+    } else {
+        true
+    };
+
+    if needs_to_be_powered_on {
         if i2c.tell_pi_to_wakeup().is_ok() {
             // TODO: Log here if this was an unexpected wakeup
             warn!("Sent rPi wake signal to attiny");
