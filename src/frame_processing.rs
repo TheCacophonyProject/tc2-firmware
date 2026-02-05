@@ -15,7 +15,7 @@ use crate::lepton::{FFCStatus, LeptonPins};
 use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
 use crate::motion_detector::{MotionTracking, track_motion};
-use crate::onboard_flash::{FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
+use crate::onboard_flash::{FLASH_USER_PAGE_SIZE, FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
 use crate::re_exports::bsp;
 use crate::re_exports::bsp::hal::multicore::{Multicore, Stack};
 use crate::re_exports::bsp::hal::rosc::RingOscillator;
@@ -426,6 +426,12 @@ pub fn thermal_motion_task(
     let mut cptv_stream: Option<CptvStream> = None;
     let mut motion_detection: Option<MotionTracking> = None;
 
+    let medium_power_mode = true;
+    let mut file_page_index = 0;
+    let mut file_block_index = 0;
+    let mut transferring_previous = false;
+    let mut was_offloading = false;
+
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
     #[allow(clippy::large_stack_arrays)]
@@ -494,19 +500,101 @@ pub fn thermal_motion_task(
 
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame including telemetry header to pi if it is available.
-        let transfer = if frame_is_valid {
-            pi_spi.begin_message_pio(
-                ExtTransferMessage::CameraRawFrameTransfer,
-                thread_local_frame_buffer
-                    .as_mut()
-                    .unwrap()
-                    .as_u8_slice_mut(),
-                cptv_stream.is_some(),
-                &mut dma,
-            )
+        let transfer = if medium_power_mode && (cptv_stream.is_some() && transferring_previous) {
+            was_offloading = true;
+            let mut offset = RPI_TRANSFER_HEADER_LENGTH + 4;
+            let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
+
+            // tc2-agent wont like getting more than this for now
+            let max_data: usize = u8_data.len();
+
+            while offset < (max_data - FLASH_USER_PAGE_SIZE) {
+                // read as much as we can into prev_frame_2 up to 39040 bytes
+                // make sure we have written this page first
+
+                if file_block_index > fs.current_block_index
+                    || (fs.current_block_index == file_block_index
+                        && (file_page_index >= fs.current_page_index))
+                {
+                    info!(
+                        "Read all that we can this should be atleast  10 pages, Ceil(160*120 / 2048) have used {} ages now at: {}:{}",
+                        offset / FLASH_USER_PAGE_SIZE,
+                        file_block_index,
+                        file_page_index
+                    );
+                    break;
+                }
+                if let Some(file_part) = fs.read_file_part_at(file_block_index, file_page_index) {
+                    // info!(
+                    //     "Writing data to {} {}",
+                    //     offset,
+                    //     offset + file_part.part.len()
+                    // );
+                    u8_data.as_mut()[offset..offset + file_part.part.len()]
+                        .copy_from_slice(file_part.part);
+                    offset += file_part.part.len();
+                    // advance index
+                    transferring_previous = !file_part.is_last_page_for_file;
+                } else {
+                    info!(
+                        "Could not read data at {}:{} advancing cursor",
+                        file_block_index, file_page_index
+                    );
+
+                    events.log(
+                        Event::UnrecoverableDataCorruption((
+                            file_block_index,
+                            file_page_index as u16,
+                        )),
+                        &time,
+                        &mut fs,
+                    );
+                }
+                advance_file_cursor(&mut fs, &mut file_block_index, &mut file_page_index);
+            }
+            if offset > RPI_TRANSFER_HEADER_LENGTH + 4 {
+                let aligned_offset: usize = (offset + 3) & !3;
+                info!(
+                    "Sending gzip frames offset {} alignted too {}",
+                    offset, aligned_offset
+                );
+
+                // write data lenght into the frame
+                u8_data[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + 4]
+                    .copy_from_slice(&offset.to_be_bytes());
+                pi_spi.begin_message_pio(
+                    ExtTransferMessage::CameraRawFrameTransfer,
+                    &mut u8_data[..aligned_offset],
+                    cptv_stream.is_some(),
+                    &mut dma,
+                    offset as u32,
+                )
+            } else {
+                None
+            }
         } else {
-            None
+            // if was offloading previous need zero the frame here
+            if was_offloading {
+                prev_frame_2.fill(0);
+                was_offloading = false;
+            }
+
+            if frame_is_valid {
+                pi_spi.begin_message_pio(
+                    ExtTransferMessage::CameraRawFrameTransfer,
+                    thread_local_frame_buffer
+                        .as_mut()
+                        .unwrap()
+                        .as_u8_slice_mut(),
+                    cptv_stream.is_some(),
+                    &mut dma,
+                    FRAME_BUFFER_LENGTH as u32 - 2,
+                )
+            } else {
+                None
+            }
         };
+
         if frame_is_valid && bk.logged_frame_transfer.take().is_some() {
             if transfer.is_some() {
                 events.log(Event::StartedSendingFramesToRpi, &time, &mut fs);
@@ -572,25 +660,34 @@ pub fn thermal_motion_task(
             let is_inside_recording_window = config
                 .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
             let is_outside_recording_window = !is_inside_recording_window;
+            if was_offloading {
+                // should be able to do multiple just need to make sure prev_frame_2 is zeros for the start
+                should_start_new_recording = false;
+            } else {
+                should_start_new_recording = fs.can_begin_new_cptv_recordings()
+                    && this_frame_motion_detection.got_new_trigger()
+                    && cptv_stream.is_none();
 
-            should_start_new_recording = fs.can_begin_new_cptv_recordings()
-                && this_frame_motion_detection.got_new_trigger()
-                && cptv_stream.is_none();
-
-            if bk.status_recording.is_pending()
-                && !should_start_new_recording
-                && cptv_stream.is_none()
-                && !fs.is_nearly_full_for_thermal_recordings()
-                && is_inside_recording_window
-            {
-                bk.status_recording.next_state();
-                should_start_new_recording = true;
+                if bk.status_recording.is_pending()
+                    && !should_start_new_recording
+                    && cptv_stream.is_none()
+                    && !fs.is_nearly_full_for_thermal_recordings()
+                    && is_inside_recording_window
+                {
+                    bk.status_recording.next_state();
+                    should_start_new_recording = true;
+                }
             }
             if this_frame_motion_detection.triggering_ended()
                 && cptv_stream.is_none()
                 && is_outside_recording_window
             {
                 info!("Would end recording, but outside window");
+            }
+
+            if should_start_new_recording && medium_power_mode {
+                info!("Starting a recording telling pi to wake up");
+                let _ = i2c.tell_pi_to_wakeup();
             }
 
             if !should_start_new_recording
@@ -752,6 +849,7 @@ pub fn thermal_motion_task(
         }
 
         // TIME to await transfer complete to pi: 27ms when not recording, 2ms when recording
+        // this needs to be before restore_front_buffer, if needed can be be before strating a new transfer in medium power mode
         if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
             let did_abort_transfer =
                 pi_spi.end_message(&dma, transfer_end_address, transfer_start_address, transfer);
@@ -800,6 +898,7 @@ pub fn thermal_motion_task(
                 prev_telemetry.as_ref().unwrap(),
                 &mut fs,
             );
+            info!("Accessing prev frame 2 for rec");
             prev_frame_2.copy_from_slice(current_raw_frame);
             // release the buffer before writing the frame so core1 can continue working
             restore_front_buffer(
@@ -816,8 +915,12 @@ pub fn thermal_motion_task(
             cptv_streamer.push_frame(&prev_frame_2, &mut prev_frame, &telemetry, &mut fs);
             prev_frame.copy_from_slice(&prev_frame_2);
             cptv_stream = Some(cptv_streamer);
+            transferring_previous = true;
             events.log(Event::StartedRecording, &time, &mut fs);
             sio.fifo.write(Core0Task::FrameProcessingComplete.into());
+
+            file_page_index = 1;
+            file_block_index = fs.file_start_block_index.unwrap();
         } else {
             // Should not start new recording
             restore_front_buffer(
@@ -1250,5 +1353,22 @@ fn get_frames_elapsed(
         frames_elapsed
     } else {
         1
+    }
+}
+
+fn advance_file_cursor(
+    fs: &mut OnboardFlash,
+    file_block_index: &mut u16,
+    file_page_index: &mut u8,
+) {
+    if *file_page_index < 63 {
+        *file_page_index += 1;
+    } else {
+        *file_block_index = *file_block_index + 1;
+        while fs.bad_blocks.contains(&file_block_index) {
+            info!("Skipping bad block {}", file_block_index);
+            *file_block_index += 1;
+        }
+        *file_page_index = 0;
     }
 }

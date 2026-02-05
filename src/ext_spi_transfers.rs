@@ -255,6 +255,7 @@ impl ExtSpiTransfers {
         payload: &mut [u8],
         is_recording: bool,
         dma_peripheral: &mut DMA,
+        length: u32,
     ) -> Option<(PioDmaTransfer, u32, u32)> {
         if self.pio_tx.is_some() {
             // The transfer header contains the transfer type (2x)
@@ -263,9 +264,8 @@ impl ExtSpiTransfers {
 
             // It is followed by the payload itself
             #[allow(clippy::cast_possible_truncation)]
-            let length = payload.len() as u32;
             let is_recording = u16::from(is_recording);
-
+            let actual_payload = payload.len() as u32;
             let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
@@ -304,7 +304,11 @@ impl ExtSpiTransfers {
                     .read()
                     .bits();
 
-                Some((transfer, start_read_address + length, start_read_address))
+                Some((
+                    transfer,
+                    start_read_address + actual_payload,
+                    start_read_address,
+                ))
             } else {
                 None
             }
