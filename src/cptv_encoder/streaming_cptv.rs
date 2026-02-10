@@ -673,7 +673,7 @@ impl<'a> CptvStream<'a> {
 
     /// End the current CPTV stream, and write out the CPTV header as a separate gzip member which
     /// will be prepended to the main data stream when transferred out to the raspberry pi.  These
-    /// two gzip 'members' or self-contained gip streams when concatenated are themselves a valid
+    /// two gzip 'members' or self-contained gip streams when concatenaetd are themselves a valid
     /// gzip stream, and therefore make up a valid CPTV file.
     pub fn finalise(&mut self, fs: &mut OnboardFlash, time: &SyncedDateTime) {
         // Write out the gzip trailer for the main data - the CPTV frames.

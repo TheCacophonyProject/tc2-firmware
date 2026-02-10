@@ -256,6 +256,7 @@ impl ExtSpiTransfers {
         is_recording: bool,
         dma_peripheral: &mut DMA,
         length: u32,
+        crc: u16,
     ) -> Option<(PioDmaTransfer, u32, u32)> {
         if self.pio_tx.is_some() {
             // The transfer header contains the transfer type (2x)
@@ -271,10 +272,10 @@ impl ExtSpiTransfers {
             transfer_header[1] = message_type as u8;
             LittleEndian::write_u32(&mut transfer_header[2..6], length);
             LittleEndian::write_u32(&mut transfer_header[6..10], length);
-            LittleEndian::write_u16(&mut transfer_header[10..12], is_recording);
-            LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
-            LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.not());
-            LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.not());
+            LittleEndian::write_u16(&mut transfer_header[10..12], crc);
+            LittleEndian::write_u16(&mut transfer_header[12..14], crc);
+            LittleEndian::write_u16(&mut transfer_header[14..16], crc.not());
+            LittleEndian::write_u16(&mut transfer_header[16..=17], crc.not());
             payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
@@ -290,10 +291,11 @@ impl ExtSpiTransfers {
             }
             let mut timer = self.timer;
             if self.ping(&mut timer, None) {
+                let from = bytemuck::cast_slice(unsafe { extend_lifetime(&payload[..]) });
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
-                    bytemuck::cast_slice(unsafe { extend_lifetime(&payload[..]) }),
+                    from,
                     self.pio_tx.take().unwrap(),
                 );
                 config.bswap(true); // DMA peripheral does our swizzling for us.
