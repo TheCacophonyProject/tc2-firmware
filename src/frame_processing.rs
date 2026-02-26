@@ -426,11 +426,13 @@ pub fn thermal_motion_task(
     let mut cptv_stream: Option<CptvStream> = None;
     let mut motion_detection: Option<MotionTracking> = None;
 
-    let medium_power_mode = true;
+    let mut offset = 0;
+    let medium_power_mode = config.use_medium_power();
     let mut file_page_index = 0;
     let mut file_block_index = 0;
     let mut transferring_previous = false;
     let mut was_offloading = false;
+    let mut retry_transfer = false;
 
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
@@ -504,17 +506,37 @@ pub fn thermal_motion_task(
 
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame including telemetry header to pi if it is available.
-        let transfer = if medium_power_mode
-            && false
-            && (cptv_stream.is_some() || transferring_previous)
-        {
-            let mut pages_away = 0;
+        let transfer = if retry_transfer {
+            info!("Retrying transfer {}", offset);
+            // tc2-agent always reads atleast 2066 so ensure we have more than that
+            let aligned_offset: usize = if offset < 2066 {
+                2068
+            } else {
+                (offset + 3) & !3
+            };
+            let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
+
+            let crc_check = Crc::<u16>::new(&CRC_16_XMODEM);
+            let crc = crc_check.checksum(&u8_data[RPI_TRANSFER_HEADER_LENGTH..offset]);
+
+            pi_spi.begin_message_pio(
+                ExtTransferMessage::CameraRawFrameTransfer,
+                &mut u8_data[..aligned_offset],
+                cptv_stream.is_some(),
+                &mut dma,
+                offset as u32,
+                crc,
+            )
+        } else if medium_power_mode && (cptv_stream.is_some() || transferring_previous) {
+            retry_transfer = false;
+            let mut pages_away;
             if file_block_index == fs.current_block_index {
                 pages_away = fs.current_page_index - file_page_index;
             } else {
                 pages_away = 64 - file_page_index + fs.current_page_index;
             }
-            if cptv_stream.is_some() && pages_away < 10 {
+            offset = RPI_TRANSFER_HEADER_LENGTH;
+            if cptv_stream.is_some() && pages_away <= 0 {
                 info!(
                     "Not transferring as too close {}:{} {}:{} pages away {}",
                     file_block_index,
@@ -537,11 +559,10 @@ pub fn thermal_motion_task(
                 //     pages_away,
                 // );
                 was_offloading = true;
-                let mut offset = RPI_TRANSFER_HEADER_LENGTH;
                 let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
 
                 // tc2-agent wont like getting more than this for now
-                let max_data: usize = u8_data.len();
+                let max_data: usize = 2048 * 5;
 
                 while offset <= (max_data - FLASH_USER_PAGE_SIZE) && pages_away > 5 {
                     // read as much as we can into prev_frame_2 up to 39040 bytes
@@ -567,8 +588,6 @@ pub fn thermal_motion_task(
                     }
                     if let Some(file_part) = fs.read_file_part_at(file_block_index, file_page_index)
                     {
-                        // info!("Read {}:{}", file_block_index, file_page_index);
-                        pages_away -= 1;
                         let crc_check: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
                         let crc = crc_check.checksum(&file_part.part);
                         if crc != file_part.crc16 {
@@ -580,16 +599,15 @@ pub fn thermal_motion_task(
                         //     offset + file_part.part.len(),
                         //     file_part.part.len(),
                         // );
-                        // u8_data.as_mut()[offset..offset + file_part.part.len()]
-                        //     .copy_from_slice(file_part.part);
-                        offset += 2060;
+                        u8_data.as_mut()[offset..offset + file_part.part.len()]
+                            .copy_from_slice(file_part.part);
+                        offset += file_part.part.len();
                         // advance index
                         transferring_previous = !file_part.is_last_page_for_file;
                         if file_part.is_last_page_for_file {
                             info!("Have read last part for file {}", file_part.part.len());
                             break;
                         }
-                        break;
                     } else {
                         info!(
                             "Could not read data at {}:{} advancing cursor",
@@ -605,6 +623,8 @@ pub fn thermal_motion_task(
                             &mut fs,
                         );
                     }
+                    info!("Read data up to {}:{}", file_block_index, file_page_index);
+
                     advance_file_cursor(&mut fs, &mut file_block_index, &mut file_page_index);
                 }
                 if offset > RPI_TRANSFER_HEADER_LENGTH {
@@ -619,7 +639,11 @@ pub fn thermal_motion_task(
                     // write data lenght into the frame
                     // u8_data[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + 4]
                     //     .copy_from_slice(&offset.to_le_bytes());
-                    info!("Sending {}", offset);
+                    info!(
+                        "Sending {} {}",
+                        offset,
+                        u8_data[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + 10]
+                    );
                     pi_spi.begin_message_pio(
                         ExtTransferMessage::CameraRawFrameTransfer,
                         &mut u8_data[..aligned_offset],
@@ -668,6 +692,10 @@ pub fn thermal_motion_task(
             }
         };
 
+        if transfer.is_none() && was_offloading && offset > RPI_TRANSFER_HEADER_LENGTH {
+            warn!("Transfer failed so retrying");
+            retry_transfer = true;
+        }
         if frame_is_valid && bk.logged_frame_transfer.take().is_some() {
             if transfer.is_some() {
                 events.log(Event::StartedSendingFramesToRpi, &time, &mut fs);
@@ -688,7 +716,7 @@ pub fn thermal_motion_task(
         let mut past_ffc_event = true;
         if frame_is_valid
             && telemetry_is_valid
-            && (telemetry.msec_since_last_ffc < 20000
+            && (telemetry.msec_since_last_ffc < 20_000
                 || telemetry.ffc_status == FFCStatus::InProgress)
         {
             past_ffc_event = false;
@@ -932,12 +960,24 @@ pub fn thermal_motion_task(
         if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
             let did_abort_transfer =
                 pi_spi.end_message(&dma, transfer_end_address, transfer_start_address, transfer);
+            retry_transfer = false;
+
             if did_abort_transfer {
+                //revert these
+                retry_transfer = was_offloading && true;
                 warn!(
                     "Transfer aborted for frame #{}, pi must be asleep?",
                     telemetry.frame_num
                 );
             }
+
+            // lse if (was_offloading) {
+            //     info!("Succeededstop sending message");
+            //     shutdown_lepton_thread(&mut sio);
+            //     timer.delay_ms(100);
+
+            //     return;
+            // }
         }
 
         if should_start_new_recording {

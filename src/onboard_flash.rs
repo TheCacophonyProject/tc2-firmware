@@ -1078,22 +1078,24 @@ impl OnboardFlash {
         block_index: u16,
         page_index: u8,
     ) -> Option<FilePartAt<'_>> {
-        let length = 2048;
-        let crc16 = 0;
-        let is_last_page_for_file = false;
+        // { test stuff
+        // let length = 2048;
+        // let crc16 = 0;
+        // let is_last_page_for_file = false;
         //  self.current_page.is_last_page_for_file();
 
-        let timestamp: Option<DateTime<Utc>> = None;
-        let metadata = FileType::CptvStartup;
-        return Some(FilePartAt {
-            part: &[0],
-            crc16,
-            block: block_index,
-            page: page_index,
-            is_last_page_for_file,
-            metadata,
-            timestamp,
-        });
+        // let timestamp: Option<DateTime<Utc>> = None;
+        // let metadata = FileType::CptvStartup;
+        // return Some(FilePartAt {
+        //     part: &[0],
+        //     crc16,
+        //     block: block_index,
+        //     page: page_index,
+        //     is_last_page_for_file,
+        //     metadata,
+        //     timestamp,
+        // });
+        //}
         if let Ok(()) = self.read_page(block_index, page_index) {
             self.read_page_from_cache(block_index);
             if self.current_page.page_is_used() {

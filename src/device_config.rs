@@ -89,6 +89,8 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
+    pub instant_classify: bool,
+
     pub audio_mode: AudioMode,
     pub audio_seed: u32,
     pub crc: u16,
@@ -347,6 +349,7 @@ impl Default for DeviceConfig {
                 end_recording_time: (false, 0),
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
+                instant_classify: false,
                 audio_mode: AudioMode::Disabled,
                 audio_seed: 0,
                 crc: 0,
@@ -413,6 +416,7 @@ impl DeviceConfig {
         };
         let device_name = SmallString::new(device_name);
         let audio_seed = cursor.read_u32();
+        let instant_classify = cursor.read_bool();
 
         Some((
             DeviceConfigInner {
@@ -426,6 +430,7 @@ impl DeviceConfig {
                 end_recording_time,
                 is_continuous_recorder,
                 use_low_power_mode,
+                instant_classify,
                 audio_mode,
                 audio_seed,
                 crc,
@@ -510,6 +515,12 @@ impl DeviceConfig {
         } else {
             Err(())
         }
+    }
+
+    pub fn use_medium_power(&self) -> bool {
+        self.config_inner.use_low_power_mode
+            && self.config_inner.audio_mode != AudioMode::AudioOnly
+            && self.config_inner.instant_classify
     }
 
     pub fn use_low_power_mode(&self) -> bool {
