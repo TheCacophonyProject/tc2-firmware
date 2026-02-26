@@ -253,7 +253,6 @@ impl ExtSpiTransfers {
         &mut self,
         message_type: ExtTransferMessage,
         payload: &mut [u8],
-        is_recording: bool,
         dma_peripheral: &mut DMA,
         length: u32,
         crc: u16,
@@ -265,7 +264,6 @@ impl ExtSpiTransfers {
 
             // It is followed by the payload itself
             #[allow(clippy::cast_possible_truncation)]
-            let is_recording = u16::from(is_recording);
             let actual_payload = payload.len() as u32;
             let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
             transfer_header[0] = message_type as u8;
