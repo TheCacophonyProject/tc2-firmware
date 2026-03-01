@@ -537,8 +537,7 @@ pub fn thermal_motion_task(
             file_offload_offset = RPI_TRANSFER_HEADER_LENGTH;
             // dont do too much after recording has started as it needs a bit more time and since the PI is probably off it wont matter anyway
             if cptv_stream.is_some()
-                && file_offload_offset == 0
-                && pages_away < 5
+                && pages_away < 20
                 && cptv_stream.as_ref().unwrap().starting_block_index == file_block_index
                 && file_page_index == 1
             {
@@ -562,15 +561,18 @@ pub fn thermal_motion_task(
                 // will need to see what works best here
                 let max_data: usize = 2048 * 5;
 
-                while file_offload_offset <= (max_data - FLASH_USER_PAGE_SIZE) && pages_away > 0 {
+                while file_offload_offset <= (max_data + RPI_TRANSFER_HEADER_LENGTH)
+                    && pages_away > 0
+                {
                     // read as much as we can into prev_frame_2 up to 39040 bytes
                     // make sure we have written this page first
                     // info!(
-                    //     "Checking  {}:{} against {}:{}",
+                    //     "Checking  {}:{} against {}:{} pages away {}",
                     //     file_block_index,
                     //     file_page_index,
                     //     fs.current_block_index,
-                    //     fs.current_page_index
+                    //     fs.current_page_index,
+                    //     pages_away
                     // );
                     // if file_block_index > fs.current_block_index
                     //     || (fs.current_block_index == file_block_index
@@ -596,6 +598,16 @@ pub fn thermal_motion_task(
                             info!("Have read last part for file {}", file_part.part.len());
                             break;
                         }
+                        pages_away -= 1;
+                        // info!("Read data offset is {}", file_offload_offset);
+                        // info!(
+                        //     "Other checks  {}:{} against {}:{} pages away {}",
+                        //     file_block_index,
+                        //     file_page_index,
+                        //     fs.current_block_index,
+                        //     fs.current_page_index,
+                        //     pages_away
+                        // );
                     } else {
                         //probably should error here
                         //possibly nothing got written as that failed too though
@@ -613,11 +625,17 @@ pub fn thermal_motion_task(
                             &mut fs,
                         );
                     }
-                    info!("Read data up to {}:{}", file_block_index, file_page_index);
 
                     advance_file_cursor(&mut fs, &mut file_block_index, &mut file_page_index);
                 }
                 if file_offload_offset > RPI_TRANSFER_HEADER_LENGTH {
+                    info!(
+                        "Read data up to {}:{} fs current is {}:{}",
+                        file_block_index,
+                        file_page_index,
+                        fs.current_block_index,
+                        fs.current_page_index
+                    );
                     //stop tc2-agent complaining
                     let aligned_offset: usize = if file_offload_offset < 2066 {
                         2068
@@ -706,7 +724,8 @@ pub fn thermal_motion_task(
         let mut past_ffc_event = true;
         if frame_is_valid
             && telemetry_is_valid
-            && (telemetry.msec_since_last_ffc < 20_000
+            && (telemetry.msec_since_last_ffc < 1000
+                // 20_000
                 || telemetry.ffc_status == FFCStatus::InProgress)
         {
             past_ffc_event = false;
@@ -866,6 +885,10 @@ pub fn thermal_motion_task(
                             &time,
                             &mut fs,
                         );
+                        if medium_power_mode && transferring_previous {
+                            //GP to do could send a message to say it was discarded
+                            transferring_previous = false;
+                        }
                     } else {
                         cptv_stream.finalise(&mut fs, &time);
                         let blocks_used = cptv_start_block_index..fs.last_used_block_index.unwrap();
@@ -959,6 +982,7 @@ pub fn thermal_motion_task(
                     telemetry.frame_num
                 );
             }
+            // sync with PI every X frames until it has received the correct first gzip frame
         }
 
         if should_start_new_recording {
