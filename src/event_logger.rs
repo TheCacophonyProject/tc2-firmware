@@ -172,6 +172,8 @@ pub enum Event {
     RtcVoltageLowError,
     Rp2040GotNewConfig(NewConfigInfo),
     UnrecoverableDataCorruption((u16, u16)),
+    MissedClasification,
+    CouldNotTransfer,
 }
 
 #[cfg(feature = "std")]
@@ -222,6 +224,8 @@ impl From<Event> for u16 {
             SetThermalAlarm(_) => 34,
             Rp2040GotNewConfig(_) => 35,
             UnrecoverableDataCorruption(_) => 36,
+            MissedClasification => 37,
+            CouldNotTransfer => 38,
         }
     }
 }

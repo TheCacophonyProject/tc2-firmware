@@ -519,7 +519,7 @@ impl<'a> CptvStream<'a> {
                 60 * 10 * 9
             };
             //GP CHANGE THIS BACK
-            self.num_frames >= 90
+            self.num_frames >= 180
         }
     }
 
