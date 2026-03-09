@@ -1713,12 +1713,12 @@ impl OnboardFlash {
                 self.advance_file_cursor(is_last);
             }
         }
-        if !status.erase_failed() {
+        if status.erase_failed() {
+            info!("ERASE FAILED");
+        } else {
             // Relocate earlier pages on this block to the next free block
             // Re-write this page
             // Erase and mark the earlier block as bad.
-        } else {
-            info!("ERASE FAILED");
         }
         Ok(())
     }

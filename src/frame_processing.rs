@@ -1609,7 +1609,7 @@ impl MediumPowerState {
     }
 
     pub fn have_started_transfer(&self) -> bool {
-        return self.transferring && self.file_transfers > 0;
+        self.transferring && self.file_transfers > 0
     }
     pub fn should_retry(&self) -> bool {
         self.retry_count <= MAX_RETRIES && self.retry_transfer
@@ -1625,7 +1625,7 @@ impl MediumPowerState {
         if self.file_page_index < 63 {
             self.file_page_index += 1;
         } else {
-            self.file_block_index = self.file_block_index + 1;
+            self.file_block_index += 1;
             while fs.bad_blocks.contains(&self.file_block_index) {
                 self.file_block_index += 1;
             }
