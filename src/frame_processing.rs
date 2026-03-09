@@ -650,8 +650,7 @@ pub fn thermal_motion_task(
         let mut past_ffc_event = true;
         if frame_is_valid
             && telemetry_is_valid
-            && (telemetry.msec_since_last_ffc < 1000
-                // 20_000
+            && (telemetry.msec_since_last_ffc < 20_000
                 || telemetry.ffc_status == FFCStatus::InProgress)
         {
             past_ffc_event = false;
