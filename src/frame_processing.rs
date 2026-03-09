@@ -1444,6 +1444,7 @@ fn get_frames_elapsed(
 }
 
 const MAX_RETRIES: i32 = 270;
+#[allow(clippy::struct_excessive_bools)]
 pub struct MediumPowerState {
     pub retry_count: i32,
     file_transfers: i32,
