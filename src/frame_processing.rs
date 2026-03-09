@@ -15,7 +15,7 @@ use crate::lepton::{FFCStatus, LeptonPins};
 use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
 use crate::motion_detector::{MotionTracking, track_motion};
-use crate::onboard_flash::{FLASH_USER_PAGE_SIZE, FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
+use crate::onboard_flash::{FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
 use crate::re_exports::bsp;
 use crate::re_exports::bsp::hal::multicore::{Multicore, Stack};
 use crate::re_exports::bsp::hal::rosc::RingOscillator;
@@ -520,6 +520,7 @@ pub fn thermal_motion_task(
                 // tc2-agent always reads atleast 2066 so ensure we have more than that
                 let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
 
+                #[allow(clippy::cast_possible_truncation)]
                 pi_spi.begin_message_pio(
                     ExtTransferMessage::CameraRawFrameTransfer,
                     &mut u8_data[..medium_power_state.aligned_offset()],
@@ -578,8 +579,8 @@ pub fn thermal_motion_task(
                         fs.current_page_index,
                         medium_power_state.read_last_part,
                     );
-                    medium_power_state.calculate_crc(&u8_data);
-
+                    medium_power_state.calculate_crc(u8_data);
+                    #[allow(clippy::cast_possible_truncation)]
                     pi_spi.begin_message_pio(
                         ExtTransferMessage::CameraRawFrameTransfer,
                         &mut u8_data[..medium_power_state.aligned_offset()],
@@ -610,6 +611,7 @@ pub fn thermal_motion_task(
             }
 
             if frame_is_valid {
+                #[allow(clippy::cast_possible_truncation)]
                 pi_spi.begin_message_pio(
                     ExtTransferMessage::CameraRawFrameTransfer,
                     thread_local_frame_buffer
@@ -618,7 +620,7 @@ pub fn thermal_motion_task(
                         .as_u8_slice_mut(),
                     &mut dma,
                     FRAME_BUFFER_LENGTH as u32 - 2,
-                    if cptv_stream.is_some() { 1 } else { 0 },
+                    u16::from(cptv_stream.is_some()),
                 )
             } else {
                 None
@@ -1492,7 +1494,7 @@ impl MediumPowerState {
     }
 
     pub fn is_transferring(&self) -> bool {
-        return self.transferring;
+        self.transferring
     }
 
     pub fn update_pages_away(&mut self, fs: &OnboardFlash) {
@@ -1544,7 +1546,7 @@ impl MediumPowerState {
 
             // advance index
             self.read_last_part = file_part.is_last_page_for_file;
-            u8_data[RPI_TRANSFER_HEADER_LENGTH] = file_part.is_last_page_for_file as u8;
+            u8_data[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
             u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = 0;
 
             // info!(
@@ -1568,7 +1570,7 @@ impl MediumPowerState {
             events.log(
                 Event::UnrecoverableDataCorruption((
                     self.file_block_index,
-                    self.file_page_index as u16,
+                    u16::from(self.file_page_index),
                 )),
                 time,
                 fs,
