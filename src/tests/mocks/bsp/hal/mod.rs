@@ -674,6 +674,7 @@ pub mod dma {
             type TX;
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX);
+            fn abort(self) -> (Self::Channel, Self::RX, Self::TX);
         }
 
         pub struct Config<CH1, RX, TX> {
@@ -711,6 +712,12 @@ pub mod dma {
             type TX = Tx<(PIO0, SM0)>;
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
+                // Custom logic for PIO transfers
+                // Add any PIO-specific logic here if needed
+                (self.ch, self.rx, self.tx)
+            }
+
+            fn abort(self) -> (Self::Channel, Self::RX, Self::TX) {
                 // Custom logic for PIO transfers
                 // Add any PIO-specific logic here if needed
                 (self.ch, self.rx, self.tx)
