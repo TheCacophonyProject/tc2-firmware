@@ -736,6 +736,10 @@ pub mod dma {
                 let _ = write_to_rpi(self.rx);
                 (self.ch, self.rx, self.tx)
             }
+
+            fn abort(self) -> (Self::Channel, Self::RX, Self::TX) {
+                (self.ch, self.rx, self.tx)
+            }
         }
 
         // Implement for SPI read transfers (SPI -> buffer)
@@ -748,6 +752,10 @@ pub mod dma {
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = read_from_rpi(self.tx);
+                (self.ch, self.rx, self.tx)
+            }
+
+            fn abort(self) -> (Self::Channel, Self::RX, Self::TX) {
                 (self.ch, self.rx, self.tx)
             }
         }
