@@ -518,8 +518,7 @@ impl<'a> CptvStream<'a> {
             } else {
                 60 * 10 * 9
             };
-            //GP CHANGE THIS BACK
-            self.num_frames >= 90
+            self.num_frames >= max_length_in_frames
         }
     }
 

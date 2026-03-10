@@ -894,15 +894,6 @@ pub fn thermal_motion_task(
             // TIME: 2ms
             prev_frame.copy_from_slice(current_raw_frame);
         }
-        if should_start_new_recording {
-            info!(
-                "Checking if abort is needed {} started? {} state {} transfers {}",
-                medium_power_state.is_transferring(),
-                medium_power_state.have_started_transfer(),
-                medium_power_state.state,
-                medium_power_state.file_transfers
-            )
-        }
         if should_start_new_recording
             && medium_power_state.is_transferring()
             && !medium_power_state.have_started_transfer()
@@ -920,12 +911,13 @@ pub fn thermal_motion_task(
             // TIME to await transfer complete to pi: 27ms when not recording, 2ms when recording
             // this needs to be before restore_front_buffer, if needed can be be before strating a new transfer in medium power mode
             if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
-                let did_abort_transfer = pi_spi.end_message(
-                    &dma,
-                    transfer_end_address,
-                    transfer_start_address,
-                    transfer,
-                );
+                let did_abort_transfer = if medium_power_mode
+                    && medium_power_state.is_transferring()
+                {
+                    pi_spi.end_message_timed(&dma, transfer_end_address, transfer, 65)
+                } else {
+                    pi_spi.end_message(&dma, transfer_end_address, transfer_start_address, transfer)
+                };
 
                 if did_abort_transfer {
                     //revert these
@@ -1619,6 +1611,7 @@ impl MediumPowerState {
             if self.file_block_index < fs.current_block_index || fs.current_page_index != 0 {
                 info!("Need to offload next file");
                 self.file_page_index = 1;
+                self.start_transfer(self.file_block_index);
             } else {
                 info!("No longer offloading zeroing prev");
                 self.stop_transfer();

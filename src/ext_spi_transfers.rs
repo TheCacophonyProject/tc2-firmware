@@ -21,6 +21,7 @@ use crate::utils::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
+use embedded_hal::delay::DelayNs;
 use fugit::MicrosDurationU32;
 
 #[repr(u8)]
@@ -115,6 +116,7 @@ pub struct ExtSpiTransfers {
     state_machine_0_running: Option<RunningPioStateMachine<PIO0, SM0>>,
     pio_tx: Option<Tx<(PIO0, SM0)>>,
     timer: Timer,
+    message_start: fugit::Instant<u64, 1, 1_000_000>,
 }
 const DMA_CHANNEL_NUM: usize = 0;
 
@@ -158,6 +160,7 @@ impl ExtSpiTransfers {
             state_machine_0_running: None,
             pio_tx: None,
             timer,
+            message_start: fugit::Instant::<u64, 1, 1_000_000>::from_ticks(0),
         }
     }
 
@@ -258,6 +261,7 @@ impl ExtSpiTransfers {
         crc: u16,
     ) -> Option<(PioDmaTransfer, u32, u32)> {
         if self.pio_tx.is_some() {
+            self.message_start = self.timer.get_counter();
             // The transfer header contains the transfer type (2x)
             // the number of bytes to read for the payload (2x)
             // the 16 bit crc of the payload (twice)
@@ -317,6 +321,43 @@ impl ExtSpiTransfers {
         }
     }
 
+    pub fn end_message_timed(
+        &mut self,
+        dma_peripheral: &DMA,
+        transfer_end_address: u32,
+        transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
+        max_time_ms: u64,
+    ) -> bool {
+        #[cfg(feature = "std")]
+        use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
+        // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
+        // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
+        let mut time_taken: u64 = (self.timer.get_counter() - self.message_start).to_millis();
+
+        while time_taken < max_time_ms && !transfer.is_done() {
+            self.timer.delay_ms(1);
+            time_taken = (self.timer.get_counter() - self.message_start).to_millis();
+        }
+        if !transfer.is_done() {
+            info!("Aborting took too long {}", time_taken);
+            let (r_ch0, _r_buf, tx) = transfer.abort();
+            self.dma_channel_0 = Some(r_ch0);
+            self.pio_tx = Some(tx);
+            return true;
+        }
+        // Wait for the DMA transfer to finish
+        let (r_ch0, _r_buf, tx) = transfer.wait();
+        let end_read_addr = dma_peripheral
+            .ch(DMA_CHANNEL_NUM)
+            .ch_read_addr()
+            .read()
+            .bits();
+        let did_abort = end_read_addr + 20 < transfer_end_address;
+        self.dma_channel_0 = Some(r_ch0);
+        self.pio_tx = Some(tx);
+        did_abort
+    }
+
     pub fn end_message(
         &mut self,
         dma_peripheral: &DMA,
@@ -328,12 +369,14 @@ impl ExtSpiTransfers {
         use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
         // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
+
         maybe_abort_dma_transfer(
             dma_peripheral,
             transfer_end_address,
             transfer_start_address,
             0,
         );
+
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
         let end_read_addr = dma_peripheral
