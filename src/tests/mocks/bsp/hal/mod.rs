@@ -673,6 +673,7 @@ pub mod dma {
             type RX;
             type TX;
 
+            fn is_done(&self) -> bool;
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX);
             fn abort(self) -> (Self::Channel, Self::RX, Self::TX);
         }
@@ -711,6 +712,10 @@ pub mod dma {
             type RX = &'static [u32];
             type TX = Tx<(PIO0, SM0)>;
 
+            fn is_done(&self) -> bool {
+                true
+            }
+
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 // Custom logic for PIO transfers
                 // Add any PIO-specific logic here if needed
@@ -732,6 +737,10 @@ pub mod dma {
             type RX = &'static mut [u8; N];
             type TX = SpiEnabledPeripheral;
 
+            fn is_done(&self) -> bool {
+                true
+            }
+
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = write_to_rpi(self.rx);
                 (self.ch, self.rx, self.tx)
@@ -749,6 +758,10 @@ pub mod dma {
             type Channel = Channel<CH0>;
             type RX = SpiEnabledPeripheral;
             type TX = &'static mut [u8; N];
+
+            fn is_done(&self) -> bool {
+                true
+            }
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = read_from_rpi(self.tx);
