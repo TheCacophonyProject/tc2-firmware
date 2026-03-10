@@ -429,13 +429,6 @@ pub fn thermal_motion_task(
 
     let medium_power_mode = config.use_medium_power();
     let mut medium_power_state = MediumPowerState::new();
-    // let mut retry_count = 0;
-    // let mut file_transfers = 0;
-    // let mut file_page_index = 0;
-    // let mut file_block_index = 0;
-    // let mut transferring_previous = false;
-    // let mut was_offloading = false;
-    // let mut retry_transfer = false;
 
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
@@ -509,7 +502,7 @@ pub fn thermal_motion_task(
 
         let frame_transfer_start = timer.get_counter();
         // Transfer RAW frame including telemetry header to pi if it is available.
-        let transfer = if medium_power_state.retry_transfer {
+        let transfer = if medium_power_state.state == TransferState::TransferFailed {
             info!(
                 "Retrying transfer {}:{}",
                 medium_power_state.file_block_index, medium_power_state.file_page_index,
@@ -572,11 +565,12 @@ pub fn thermal_motion_task(
                 }
                 if medium_power_state.have_data() {
                     info!(
-                        "Read data up to {}:{} fs current is {}:{} lastpart: {}",
+                        "Read data up to {}:{} fs current is {}:{} state: {:?} read last {}",
                         medium_power_state.file_block_index,
                         medium_power_state.file_page_index,
                         fs.current_block_index,
                         fs.current_page_index,
+                        medium_power_state.state,
                         medium_power_state.read_last_part,
                     );
                     medium_power_state.calculate_crc(u8_data);
@@ -594,7 +588,7 @@ pub fn thermal_motion_task(
             }
         } else {
             // if was offloading previous need zero the frame here
-            if medium_power_state.was_offloading {
+            if medium_power_state.state == TransferState::WasOffloading {
                 if test_recording_in_progress.is_some() {
                     test_recording_in_progress.take();
                     // Finished requested test recording, restart now.
@@ -607,7 +601,7 @@ pub fn thermal_motion_task(
                     return;
                 }
                 prev_frame_2.fill(0);
-                medium_power_state.was_offloading = false;
+                medium_power_state.finished();
             }
 
             if frame_is_valid {
@@ -900,6 +894,15 @@ pub fn thermal_motion_task(
             // TIME: 2ms
             prev_frame.copy_from_slice(current_raw_frame);
         }
+        if should_start_new_recording {
+            info!(
+                "Checking if abort is needed {} started? {} state {} transfers {}",
+                medium_power_state.is_transferring(),
+                medium_power_state.have_started_transfer(),
+                medium_power_state.state,
+                medium_power_state.file_transfers
+            )
+        }
         if should_start_new_recording
             && medium_power_state.is_transferring()
             && !medium_power_state.have_started_transfer()
@@ -908,7 +911,7 @@ pub fn thermal_motion_task(
             if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
                 transfer.abort();
             }
-            info!("Missed classification endinge all previous");
+            info!("Missed classification ending all previous transfers");
             events.log(Event::MissedClasification, &time, &mut fs);
             prev_frame_2.fill(0);
 
@@ -1442,22 +1445,35 @@ fn get_frames_elapsed(
         1
     }
 }
+#[derive(PartialEq)]
+#[cfg_attr(feature = "no-std", derive(defmt::Format))]
+#[derive(Debug, Eq, PartialOrd, Ord)]
+
+pub enum TransferState {
+    Transferring,
+    PartTransferred,
+    TransferFailed,
+    TransferFinished,
+    WasOffloading,
+    Finished,
+}
 
 const MAX_RETRIES: i32 = 270;
 #[allow(clippy::struct_excessive_bools)]
 pub struct MediumPowerState {
     pub retry_count: i32,
-    file_transfers: i32,
+    pub file_transfers: i32,
     pub file_page_index: u8,
     pub file_block_index: u16,
-    transferring: bool,
-    was_offloading: bool,
-    pub retry_transfer: bool,
+    // transferring: bool,
+    // was_offloading: bool,
+    // pub retry_transfer: bool,
     pub pages_away: u8,
     pub file_offload_offset: usize,
     pub read_last_part: bool,
     pub crc_check: Crc<u16>,
     pub crc: u16,
+    pub state: TransferState,
 }
 
 impl MediumPowerState {
@@ -1467,35 +1483,38 @@ impl MediumPowerState {
             file_transfers: 0,
             file_page_index: 0,
             file_block_index: 0,
-            transferring: false,
-            was_offloading: false,
-            retry_transfer: false,
+            // retry_transfer: false,
             pages_away: 0,
             file_offload_offset: OFFLOAD_HEADERS_LENGTH,
             read_last_part: false,
             crc_check: Crc::<u16>::new(&CRC_16_XMODEM),
             crc: 0,
+            state: TransferState::Finished,
         }
     }
 
+    pub fn finished(&mut self) {
+        self.state = TransferState::Finished;
+        self.read_last_part = false;
+    }
+
     pub fn have_data(&self) -> bool {
-        self.transferring && self.file_offload_offset > OFFLOAD_HEADERS_LENGTH
+        self.is_transferring() && self.file_offload_offset > OFFLOAD_HEADERS_LENGTH
     }
     pub fn stop_transfer(&mut self) {
         self.retry_count = 0;
-        self.retry_transfer = false;
-        self.transferring = false;
+        self.state = TransferState::WasOffloading;
         self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
-        self.read_last_part = false;
     }
 
     pub fn abort_transfer(&mut self) {
         self.stop_transfer();
-        self.was_offloading = false;
+        self.read_last_part = false;
+        self.state = TransferState::Finished;
     }
 
     pub fn is_transferring(&self) -> bool {
-        self.transferring
+        self.state < TransferState::TransferFinished
     }
 
     pub fn update_pages_away(&mut self, fs: &OnboardFlash) {
@@ -1507,7 +1526,7 @@ impl MediumPowerState {
     }
 
     pub fn retry_last_transfer(&mut self) {
-        self.retry_transfer = true;
+        self.state = TransferState::TransferFailed;
     }
 
     pub fn can_transfer_a_page(&mut self, max_data: usize, fs: &OnboardFlash) -> bool {
@@ -1519,7 +1538,11 @@ impl MediumPowerState {
     }
     pub fn part_transferred(&mut self) {
         self.retry_count = 0;
-        self.retry_transfer = false;
+        if self.read_last_part {
+            self.state = TransferState::TransferFinished;
+        } else {
+            self.state = TransferState::PartTransferred;
+        }
         self.file_transfers += 1;
         self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
     }
@@ -1546,6 +1569,8 @@ impl MediumPowerState {
             self.file_offload_offset += file_part.part.len();
 
             // advance index
+            self.state = TransferState::Transferring;
+
             self.read_last_part = file_part.is_last_page_for_file;
             u8_data[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
             u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = 0;
@@ -1584,7 +1609,7 @@ impl MediumPowerState {
     }
 
     pub fn maybe_offload_next(&mut self, fs: &mut OnboardFlash) {
-        if self.read_last_part {
+        if self.state == TransferState::TransferFinished {
             //     info!("Have read last part for file");
 
             // do we have another file to offload because we were slow
@@ -1602,18 +1627,19 @@ impl MediumPowerState {
     }
 
     pub fn start_transfer(&mut self, block_index: u16) {
-        self.transferring = true;
-        self.was_offloading = true;
+        self.state = TransferState::Transferring;
+        self.read_last_part = false;
         self.file_page_index = 1;
         self.file_block_index = block_index;
+        self.file_transfers = 0;
         info!("Starting transfer at {}", block_index);
     }
 
     pub fn have_started_transfer(&self) -> bool {
-        self.transferring && self.file_transfers > 0
+        self.is_transferring() && self.file_transfers > 0
     }
     pub fn should_retry(&self) -> bool {
-        self.retry_count <= MAX_RETRIES && self.retry_transfer
+        self.retry_count <= MAX_RETRIES && self.state == TransferState::TransferFailed
     }
 
     pub fn calculate_crc(&mut self, data: &[u8]) {
