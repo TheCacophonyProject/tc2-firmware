@@ -675,7 +675,6 @@ pub mod dma {
 
             fn is_done(&self) -> bool;
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX);
-            fn abort(self) -> (Self::Channel, Self::RX, Self::TX);
         }
 
         pub struct Config<CH1, RX, TX> {
@@ -706,6 +705,12 @@ pub mod dma {
             tx: TX,
         }
 
+        impl<CHANNEL, RX, TX> Transfer<CHANNEL, RX, TX> {
+            pub fn abort(self) -> (CHANNEL, RX, TX) {
+                (self.ch, self.rx, self.tx)
+            }
+        }
+
         // Implement for PIO DMA transfers (&'static [u32] -> Tx)
         impl TransferExt for Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>> {
             type Channel = Channel<CH0>;
@@ -713,16 +718,11 @@ pub mod dma {
             type TX = Tx<(PIO0, SM0)>;
 
             fn is_done(&self) -> bool {
+                //TODO
                 true
             }
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
-                // Custom logic for PIO transfers
-                // Add any PIO-specific logic here if needed
-                (self.ch, self.rx, self.tx)
-            }
-
-            fn abort(self) -> (Self::Channel, Self::RX, Self::TX) {
                 // Custom logic for PIO transfers
                 // Add any PIO-specific logic here if needed
                 (self.ch, self.rx, self.tx)
@@ -738,15 +738,12 @@ pub mod dma {
             type TX = SpiEnabledPeripheral;
 
             fn is_done(&self) -> bool {
+                //TODO
                 true
             }
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = write_to_rpi(self.rx);
-                (self.ch, self.rx, self.tx)
-            }
-
-            fn abort(self) -> (Self::Channel, Self::RX, Self::TX) {
                 (self.ch, self.rx, self.tx)
             }
         }
@@ -760,15 +757,12 @@ pub mod dma {
             type TX = &'static mut [u8; N];
 
             fn is_done(&self) -> bool {
+                //TODO
                 true
             }
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = read_from_rpi(self.tx);
-                (self.ch, self.rx, self.tx)
-            }
-
-            fn abort(self) -> (Self::Channel, Self::RX, Self::TX) {
                 (self.ch, self.rx, self.tx)
             }
         }
