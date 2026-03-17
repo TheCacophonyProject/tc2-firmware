@@ -426,6 +426,8 @@ pub fn thermal_motion_task(
     let mut cptv_stream: Option<CptvStream> = None;
     let mut motion_detection: Option<MotionTracking> = None;
 
+    let medium_power_mode = config.use_medium_power();
+
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
     #[allow(clippy::large_stack_arrays)]
@@ -596,6 +598,7 @@ pub fn thermal_motion_task(
             if !should_start_new_recording
                 && test_recording.is_some()
                 && !fs.is_nearly_full_for_thermal_recordings()
+                && cptv_stream.is_none()
             {
                 // Take test recording.
                 test_recording_in_progress = test_recording.take();
@@ -737,6 +740,11 @@ pub fn thermal_motion_task(
                 }
                 if is_outside_recording_window && !bk.status_recording.in_progress() {
                     info!("Would end recording, but outside window");
+                }
+
+                if should_start_new_recording && medium_power_mode {
+                    info!("Starting a recording telling pi to wake up");
+                    let _ = i2c.tell_pi_to_wakeup();
                 }
                 ended_recording = cptv_stream.take().is_some();
                 motion_detection = None;
