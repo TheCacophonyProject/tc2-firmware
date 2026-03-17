@@ -528,7 +528,7 @@ pub fn thermal_motion_task(
                     medium_power_state.retry_count
                 );
                 medium_power_state.abort_transfer();
-
+                prev_frame_2.fill(0);
                 None
             }
         } else if medium_power_mode
@@ -920,11 +920,10 @@ pub fn thermal_motion_task(
                 };
 
                 if did_abort_transfer {
-                    //revert these
-                    warn!(
-                        "Transfer aborted for frame #{}, pi must be asleep?",
-                        telemetry.frame_num
-                    );
+                    // warn!(
+                    //     "Transfer aborted for frame #{}, pi must be asleep?",
+                    //     telemetry.frame_num
+                    // );
                 }
                 if medium_power_state.is_transferring() {
                     if did_abort_transfer {
@@ -999,7 +998,7 @@ pub fn thermal_motion_task(
             events.log(Event::StartedRecording, &time, &mut fs);
             sio.fifo.write(Core0Task::FrameProcessingComplete.into());
 
-            if !medium_power_state.is_transferring() {
+            if medium_power_mode && !medium_power_state.is_transferring() {
                 // let it finish transferring then pick up this file
                 medium_power_state.start_transfer(fs.file_start_block_index.unwrap());
             }
