@@ -1547,6 +1547,8 @@ impl MediumPowerState {
         }
     }
 
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn read_page(
         &mut self,
         fs: &mut OnboardFlash,
@@ -1564,7 +1566,8 @@ impl MediumPowerState {
 
             self.read_last_part = file_part.is_last_page_for_file;
             u8_data[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
-            u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = 0;
+            let packet_number = self.file_transfers % 256;
+            u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
 
             // info!(
             //     "Other checks  {}:{} against {}:{} pages away {}",
