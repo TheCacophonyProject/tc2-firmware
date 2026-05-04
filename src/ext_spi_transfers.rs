@@ -340,7 +340,7 @@ impl ExtSpiTransfers {
             time_taken = (self.timer.get_counter() - self.message_start).to_millis();
         }
         if !transfer.is_done() {
-            info!("Aborting took too long {}", time_taken);
+            info!("Aborting took too long");
             let (r_ch0, _r_buf, tx) = transfer.abort();
             self.dma_channel_0 = Some(r_ch0);
             self.pio_tx = Some(tx);
