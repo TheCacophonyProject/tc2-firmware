@@ -38,6 +38,7 @@ pub enum ExtTransferMessage {
     GetMotionDetectionMask = 0x7,
     SendLoggerEvent = 0x8,
     StartupHandshake = 0x9,
+    RecoridngTransfer = 0xA,
 }
 
 type StaticSlot<T> = Mutex<RefCell<Option<T>>>;

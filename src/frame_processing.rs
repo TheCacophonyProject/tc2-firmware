@@ -515,7 +515,7 @@ pub fn thermal_motion_task(
 
                 #[allow(clippy::cast_possible_truncation)]
                 pi_spi.begin_message_pio(
-                    ExtTransferMessage::CameraRawFrameTransfer,
+                    ExtTransferMessage::RecoridngTransfer,
                     &mut u8_data[..medium_power_state.aligned_offset()],
                     &mut dma,
                     medium_power_state.file_offload_offset as u32,
@@ -531,9 +531,7 @@ pub fn thermal_motion_task(
                 prev_frame_2.fill(0);
                 None
             }
-        } else if medium_power_mode
-            && (cptv_stream.is_some() || medium_power_state.is_transferring())
-        {
+        } else if medium_power_mode && medium_power_state.is_transferring() {
             medium_power_state.update_pages_away(&fs);
             // dont do too much after recording has started as it needs a bit more time and since the PI is probably off it wont matter anyway
             if cptv_stream.is_some()
@@ -576,7 +574,7 @@ pub fn thermal_motion_task(
                     medium_power_state.calculate_crc(u8_data);
                     #[allow(clippy::cast_possible_truncation)]
                     pi_spi.begin_message_pio(
-                        ExtTransferMessage::CameraRawFrameTransfer,
+                        ExtTransferMessage::RecoridngTransfer,
                         &mut u8_data[..medium_power_state.aligned_offset()],
                         &mut dma,
                         medium_power_state.file_offload_offset as u32,
@@ -717,7 +715,11 @@ pub fn thermal_motion_task(
                 info!("Would end recording, but outside window");
             }
 
-            if should_start_new_recording && medium_power_mode {
+            if should_start_new_recording
+                && medium_power_mode
+                && !(bk.status_recording == StatusRecordingState::MakingStartup
+                    || bk.status_recording == StatusRecordingState::MakingShutdown)
+            {
                 info!("Starting a recording telling pi to wake up");
                 let _ = i2c.tell_pi_to_wakeup();
             }
@@ -998,8 +1000,10 @@ pub fn thermal_motion_task(
             events.log(Event::StartedRecording, &time, &mut fs);
             sio.fifo.write(Core0Task::FrameProcessingComplete.into());
 
-            if medium_power_mode && !medium_power_state.is_transferring() {
-                // let it finish transferring then pick up this file
+            if medium_power_mode
+                && !medium_power_state.is_transferring()
+                && !(is_shutdown_status || is_startup_status)
+            {
                 medium_power_state.start_transfer(fs.file_start_block_index.unwrap());
             }
         } else {
