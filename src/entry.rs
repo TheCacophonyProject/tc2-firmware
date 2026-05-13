@@ -33,7 +33,7 @@ use fugit::{ExtU32, RateExtU32};
 /// In this instance, `Peripherals.take()` will never fail.
 pub fn real_main() {
     info!("");
-    info!("-----validate------------------");
+    info!("-----------------------");
     info!("Startup tc2-firmware {} dev", FIRMWARE_VERSION);
     // TODO: Check wake_en and sleep_en registers to make sure we're not enabling any clocks we don't need.
     let mut peripherals: Peripherals = Peripherals::take().unwrap();
