@@ -24,7 +24,7 @@ fn high_power_mode_dusk_til_dawn_audio_or_thermal() {
         assert_eq!(9, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(0, num_thermal_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
-            8,
+            9,
             num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
         );
         assert_eq!(
@@ -33,7 +33,7 @@ fn high_power_mode_dusk_til_dawn_audio_or_thermal() {
         );
         assert_ne!(0, state.events_offloaded.len());
         assert_eq!(
-            3,
+            2,
             offloaded_event_count(
                 &state.events_offloaded,
                 LoggerEventKind::StartedSendingFramesToRpi

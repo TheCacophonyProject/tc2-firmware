@@ -295,6 +295,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
     let current_window = config.next_or_current_recording_window(&time.date_time());
     if current_window.is_err() {
+        error!("Current window is invalid {:?}", current_window.err());
         // FIXME: Log invalid window?  Use default window?
         return true;
     }
@@ -564,6 +565,7 @@ pub fn schedule_next_recording(
         let current_window = config.next_or_current_recording_window(&current_time)?;
         alarm_mode = AlarmMode::Thermal;
         wakeup = if config.time_is_in_supplied_recording_window(&current_time, current_window) {
+            info!("TIme is in window setting wkae up to be next rec window");
             // In the window
             config
                 .next_recording_window_start(&(current_time + Duration::hours(24)))
@@ -637,8 +639,7 @@ pub fn schedule_next_recording(
             && let Ok((start, end)) = config.next_or_current_recording_window(&current_time)
             && wakeup >= start
         {
-            info!("I am doing audio and thermal");
-            if start < current_time {
+            if start <= current_time {
                 info!("Audio mode {:?}", audio_mode);
                 if audio_mode == AudioMode::AudioAndThermal {
                     // audio recording inside recording window
