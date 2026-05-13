@@ -305,7 +305,8 @@ pub fn next_or_current_thermal_window(config: &DeviceConfig) -> (DateTime<Utc>, 
     // However, they should get automatically corrected the next time the rPi connects
     // and updates the absolute offset, so it's not really a big deal.
     firmware_config
-        .next_or_current_recording_window(&date)
+        .config()
+        .next_or_current_recording_window_with_seconds(&date)
         .unwrap()
 }
 
