@@ -4,9 +4,8 @@ use std::collections::HashMap;
 // Read camera config file
 use crate::tests::mocks::fake_rpi_detection_mask::DetectionMask;
 use byteorder::{LittleEndian, WriteBytesExt};
-use chrono::{
-    DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
-};
+use chrono::{DateTime, FixedOffset, Local, TimeZone};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use log::{error, info, warn};
 use louvre::triangulate;
 use serde::de::Error;
@@ -790,13 +789,20 @@ impl DeviceConfig {
                 .unwrap();
                 let two_days_sunrise =
                     two_days_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-                (Some(tomorrow_sunset), Some(two_days_sunrise))
+                (
+                    // zero seconds so they compare with the alarms properly ( Alarams only have hours and minutes)
+                    tomorrow_sunset.with_second(0),
+                    two_days_sunrise.with_second(0),
+                )
             } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
             {
-                (Some(today_sunset), Some(tomorrow_sunrise))
+                (today_sunset.with_second(0), tomorrow_sunrise.with_second(0))
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
-                (Some(yesterday_sunset), Some(today_sunrise))
+                (
+                    yesterday_sunset.with_second(0),
+                    today_sunrise.with_second(0),
+                )
             } else {
                 panic!("Unable to calculate relative time window");
             }

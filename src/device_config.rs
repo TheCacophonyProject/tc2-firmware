@@ -3,7 +3,6 @@ use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-
 use embedded_io::Read;
 
 #[derive(PartialEq)]
@@ -218,13 +217,20 @@ impl DeviceConfigInner {
                 )
                 .unwrap();
                 let two_days_sunrise = two_days_sunrise + Duration::seconds(i64::from(end_offset));
-                (Some(tomorrow_sunset), Some(two_days_sunrise))
+                (
+                    // zero seconds so they compare with the alarms properly ( Alarams only have hours and minutes)
+                    tomorrow_sunset.with_second(0),
+                    two_days_sunrise.with_second(0),
+                )
             } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
             {
-                (Some(today_sunset), Some(tomorrow_sunrise))
+                (today_sunset.with_second(0), tomorrow_sunrise.with_second(0))
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
-                (Some(yesterday_sunset), Some(today_sunrise))
+                (
+                    yesterday_sunset.with_second(0),
+                    today_sunrise.with_second(0),
+                )
             } else {
                 return Err("Unable to calculate relative time window");
             }

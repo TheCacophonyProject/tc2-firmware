@@ -637,6 +637,7 @@ pub fn schedule_next_recording(
             && let Ok((start, end)) = config.next_or_current_recording_window(&current_time)
             && wakeup >= start
         {
+            info!("I am doing audio and thermal");
             if start < current_time {
                 info!("Audio mode {:?}", audio_mode);
                 if audio_mode == AudioMode::AudioAndThermal {
