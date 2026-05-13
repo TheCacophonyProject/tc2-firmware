@@ -40,7 +40,7 @@ fn low_power_mode_dusk_til_dawn_audio_and_thermal() {
             thermal_window.1
         ));
         assert_eq!(5, num_thermal_recordings_offloaded(&state.files_offloaded));
-        assert_eq!(31, num_audio_recordings_offloaded(&state.files_offloaded));
+        assert_eq!(30, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
             9,
             num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
