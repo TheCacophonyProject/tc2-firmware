@@ -1,8 +1,6 @@
 use crate::byte_slice_cursor::Cursor;
-use crate::formatted_time::FormattedNZTime;
 use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
-use crate::re_exports::log::{debug, error, info, warn};
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use embedded_io::Read;
@@ -158,12 +156,6 @@ impl DeviceConfigInner {
         //         ends_in_hours, ends_in_mins, window_hours, window_mins
         //     );
         // }
-        // info!(
-        //     "Checking time in window {} {} {}",
-        //     FormattedNZTime(*date_time_utc),
-        //     FormattedNZTime(start_time),
-        //     FormattedNZTime(end_time)
-        // );
         *date_time_utc >= start_time && *date_time_utc <= end_time
     }
 
