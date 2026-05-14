@@ -211,13 +211,7 @@ impl DeviceConfigInner {
             let tomorrow_sunset = tomorrow_sunset + Duration::seconds(i64::from(start_offset));
             let tomorrow_sunrise = tomorrow_sunrise.with_second(0).unwrap();
             let tomorrow_sunset = tomorrow_sunset.with_second(0).unwrap();
-            // info!(
-            //     "Today {} {} tomorrow {} {}",
-            //     FormattedNZTime(today_sunrise),
-            //     FormattedNZTime(today_sunset),
-            //     FormattedNZTime(tomorrow_sunrise),
-            //     FormattedNZTime(tomorrow_sunset)
-            // );
+
             if *now_utc >= today_sunset && *now_utc >= tomorrow_sunrise {
                 let two_days_from_now_utc = *now_utc + Duration::days(2);
                 let (two_days_sunrise, _) = sun_times(
@@ -227,8 +221,6 @@ impl DeviceConfigInner {
                     f64::from(altitude.unwrap_or(0.0)),
                 )
                 .unwrap();
-                // info!("Trying to get 2 day sunrise vs tomorrow");
-
                 let two_days_sunrise = two_days_sunrise + Duration::seconds(i64::from(end_offset));
                 (
                     // zero seconds so they compare with the alarms properly ( Alarams only have hours and minutes)
@@ -238,17 +230,13 @@ impl DeviceConfigInner {
             } else if (*now_utc >= today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc >= today_sunrise)
             {
-                // info!("Trying to get today vs tomorrow");
                 (Some(today_sunset), Some(tomorrow_sunrise))
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
-                // info!("Trying to get yester vs today");
                 (Some(yesterday_sunset), Some(today_sunrise))
             } else {
-                // info!("Cant calc");
                 return Err("Unable to calculate relative time window");
             }
         } else {
-            // info!("NONE NONE");
             (None, None)
         };
         let mut start_time = if is_absolute_start {

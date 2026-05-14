@@ -565,7 +565,6 @@ pub fn schedule_next_recording(
         let current_window = config.next_or_current_recording_window(&current_time)?;
         alarm_mode = AlarmMode::Thermal;
         wakeup = if config.time_is_in_supplied_recording_window(&current_time, current_window) {
-            info!("TIme is in window setting wkae up to be next rec window");
             // In the window
             config
                 .next_recording_window_start(&(current_time + Duration::hours(24)))
