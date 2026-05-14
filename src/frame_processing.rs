@@ -527,8 +527,8 @@ pub fn thermal_motion_task(
                     "Failed to transfer after {} retries",
                     medium_power_state.retry_count
                 );
-                medium_power_state.abort_transfer();
-                prev_frame_2.fill(0);
+                medium_power_state.stop_transfer();
+                // prev_frame_2.fill(0);
                 None
             }
         } else if medium_power_mode && medium_power_state.is_transferring() {
@@ -810,11 +810,9 @@ pub fn thermal_motion_task(
                             &mut fs,
                         );
                         if medium_power_mode && medium_power_state.is_transferring() {
-                            //GP to do could send a message to say it was discarded
-                            // need to check amm transferring this file before aborting
-
-                            medium_power_state.stop_transfer();
-                            medium_power_state.maybe_offload_next(&mut fs);
+                            // if transfering previous dont abort
+                            let arboted = medium_power_state
+                                .maybe_abort_recording_transfer(cptv_start_block_index);
                         }
                     } else {
                         cptv_stream.finalise(&mut fs, &time);
@@ -900,15 +898,13 @@ pub fn thermal_motion_task(
             && medium_power_state.is_transferring()
             && !medium_power_state.have_started_transfer()
         {
-            // might need to abort transfer??
+            // trying to transfer old recording but have not started yet, just abort and start transferring the new one
             if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
                 transfer.abort();
             }
             info!("Missed classification ending all previous transfers");
             events.log(Event::MissedClasification, &time, &mut fs);
-            prev_frame_2.fill(0);
-
-            medium_power_state.abort_transfer();
+            medium_power_state.stop_transfer();
         } else {
             // TIME to await transfer complete to pi: 27ms when not recording, 2ms when recording
             // this needs to be before restore_front_buffer, if needed can be be before strating a new transfer in medium power mode
@@ -932,7 +928,10 @@ pub fn thermal_motion_task(
                         medium_power_state.retry_last_transfer();
                     } else {
                         medium_power_state.part_transferred();
-                        medium_power_state.maybe_offload_next(&mut fs);
+                        // we may have been offloading previous recording
+                        if medium_power_state.state == TransferState::TransferFinished {
+                            medium_power_state.maybe_offload_next(&mut fs);
+                        }
                     }
                 }
                 // sync with PI every X frames until it has received the correct first gzip frame
@@ -995,17 +994,26 @@ pub fn thermal_motion_task(
             // now write the second/current frame
             cptv_streamer.push_frame(&prev_frame_2, &mut prev_frame, &telemetry, &mut fs);
             prev_frame.copy_from_slice(&prev_frame_2);
-            cptv_stream = Some(cptv_streamer);
 
             events.log(Event::StartedRecording, &time, &mut fs);
             sio.fifo.write(Core0Task::FrameProcessingComplete.into());
 
-            if medium_power_mode
-                && !medium_power_state.is_transferring()
-                && !(is_shutdown_status || is_startup_status)
-            {
-                medium_power_state.start_transfer(fs.file_start_block_index.unwrap());
+            if medium_power_mode {
+                medium_power_state.new_recording(
+                    cptv_streamer.starting_block_index,
+                    cptv_streamer.cptv_header.timestamp,
+                );
+
+                if !medium_power_state.is_transferring()
+                    && !(is_shutdown_status || is_startup_status)
+                {
+                    medium_power_state.start_transfer(
+                        cptv_streamer.starting_block_index,
+                        cptv_streamer.cptv_header.timestamp,
+                    );
+                }
             }
+            cptv_stream = Some(cptv_streamer);
         } else {
             // Should not start new recording
             restore_front_buffer(
@@ -1458,6 +1466,7 @@ const MAX_RETRIES: i32 = 270;
 pub struct MediumPowerState {
     pub retry_count: i32,
     pub file_transfers: i32,
+    pub timestamp: i64,
     pub file_page_index: u8,
     pub file_block_index: u16,
     // transferring: bool,
@@ -1469,6 +1478,9 @@ pub struct MediumPowerState {
     pub crc_check: Crc<u16>,
     pub crc: u16,
     pub state: TransferState,
+    pub starting_block: u16,
+    pub latest_timestamp: i64,
+    pub latest_starting_block: u16,
 }
 
 impl MediumPowerState {
@@ -1485,7 +1497,16 @@ impl MediumPowerState {
             crc_check: Crc::<u16>::new(&CRC_16_XMODEM),
             crc: 0,
             state: TransferState::Finished,
+            timestamp: 0,
+            starting_block: 0,
+            latest_timestamp: 0,
+            latest_starting_block: 0,
         }
+    }
+
+    pub fn new_recording(&mut self, block_index: u16, timestamp: i64) {
+        self.latest_timestamp = timestamp;
+        self.latest_starting_block = block_index;
     }
 
     pub fn finished(&mut self) {
@@ -1496,16 +1517,21 @@ impl MediumPowerState {
     pub fn have_data(&self) -> bool {
         self.is_transferring() && self.file_offload_offset > OFFLOAD_HEADERS_LENGTH
     }
+    pub fn maybe_abort_recording_transfer(&mut self, start_block_index: u16) -> bool {
+        if self.starting_block == start_block_index {
+            self.retry_count = 0;
+            self.state = TransferState::WasOffloading;
+            self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
+            return true;
+        }
+        false
+    }
+
     pub fn stop_transfer(&mut self) {
         self.retry_count = 0;
         self.state = TransferState::WasOffloading;
         self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
-    }
-
-    pub fn abort_transfer(&mut self) {
-        self.stop_transfer();
-        self.read_last_part = false;
-        self.state = TransferState::Finished;
+        self.starting_block = 0;
     }
 
     pub fn is_transferring(&self) -> bool {
@@ -1608,16 +1634,11 @@ impl MediumPowerState {
 
     pub fn maybe_offload_next(&mut self, fs: &mut OnboardFlash) {
         if self.state == TransferState::TransferFinished {
-            //     info!("Have read last part for file");
-
-            // do we have another file to offload because we were slow
-            // force it to get next possible block
-            self.file_page_index = 63;
-            self.advance_file_cursor(fs);
-            if self.file_block_index < fs.current_block_index || fs.current_page_index != 0 {
+            if self.latest_starting_block >= self.file_block_index {
                 info!("Need to offload next file");
+                self.file_block_index = self.latest_starting_block;
                 self.file_page_index = 1;
-                self.start_transfer(self.file_block_index);
+                self.start_transfer(self.file_block_index, self.latest_timestamp);
             } else {
                 info!("No longer offloading zeroing prev");
                 self.stop_transfer();
@@ -1625,12 +1646,14 @@ impl MediumPowerState {
         }
     }
 
-    pub fn start_transfer(&mut self, block_index: u16) {
+    pub fn start_transfer(&mut self, block_index: u16, timestamp: i64) {
         self.state = TransferState::Transferring;
         self.read_last_part = false;
         self.file_page_index = 1;
         self.file_block_index = block_index;
+        self.starting_block = block_index;
         self.file_transfers = 0;
+        self.timestamp = timestamp;
         info!("Starting transfer at {}", block_index);
     }
 
