@@ -811,8 +811,8 @@ pub fn thermal_motion_task(
                         );
                         if medium_power_mode && medium_power_state.is_transferring() {
                             // if transfering previous dont abort
-                            let arboted = medium_power_state
-                                .maybe_abort_recording_transfer(cptv_start_block_index);
+                            let arboted =
+                                medium_power_state.latest_recording_aborted(cptv_start_block_index);
                         }
                     } else {
                         cptv_stream.finalise(&mut fs, &time);
@@ -1004,8 +1004,9 @@ pub fn thermal_motion_task(
                     cptv_streamer.cptv_header.timestamp,
                 );
 
-                if !medium_power_state.is_transferring()
-                    && !(is_shutdown_status || is_startup_status)
+                if !(medium_power_state.is_transferring()
+                    || is_shutdown_status
+                    || is_startup_status)
                 {
                     medium_power_state.start_transfer(
                         cptv_streamer.starting_block_index,
@@ -1462,11 +1463,16 @@ pub enum TransferState {
 }
 
 const MAX_RETRIES: i32 = 270;
+
+pub struct RecordingInfo {
+    pub timestamp: i64,
+    pub starting_block: u16,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct MediumPowerState {
     pub retry_count: i32,
     pub file_transfers: i32,
-    pub timestamp: i64,
     pub file_page_index: u8,
     pub file_block_index: u16,
     // transferring: bool,
@@ -1478,9 +1484,8 @@ pub struct MediumPowerState {
     pub crc_check: Crc<u16>,
     pub crc: u16,
     pub state: TransferState,
-    pub starting_block: u16,
-    pub latest_timestamp: i64,
-    pub latest_starting_block: u16,
+    pub current_recording: Option<RecordingInfo>,
+    pub latest_recording: Option<RecordingInfo>,
 }
 
 impl MediumPowerState {
@@ -1497,16 +1502,16 @@ impl MediumPowerState {
             crc_check: Crc::<u16>::new(&CRC_16_XMODEM),
             crc: 0,
             state: TransferState::Finished,
-            timestamp: 0,
-            starting_block: 0,
-            latest_timestamp: 0,
-            latest_starting_block: 0,
+            current_recording: None,
+            latest_recording: None,
         }
     }
 
     pub fn new_recording(&mut self, block_index: u16, timestamp: i64) {
-        self.latest_timestamp = timestamp;
-        self.latest_starting_block = block_index;
+        self.latest_recording = Some(RecordingInfo {
+            timestamp,
+            starting_block: block_index,
+        });
     }
 
     pub fn finished(&mut self) {
@@ -1517,13 +1522,18 @@ impl MediumPowerState {
     pub fn have_data(&self) -> bool {
         self.is_transferring() && self.file_offload_offset > OFFLOAD_HEADERS_LENGTH
     }
-    pub fn maybe_abort_recording_transfer(&mut self, start_block_index: u16) -> bool {
-        if self.starting_block == start_block_index {
+    pub fn latest_recording_aborted(&mut self, start_block_index: u16) -> bool {
+        if self
+            .current_recording
+            .as_ref()
+            .is_some_and(|r| r.starting_block == start_block_index)
+        {
             self.retry_count = 0;
             self.state = TransferState::WasOffloading;
             self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
             return true;
         }
+        self.latest_recording = None;
         false
     }
 
@@ -1531,7 +1541,7 @@ impl MediumPowerState {
         self.retry_count = 0;
         self.state = TransferState::WasOffloading;
         self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
-        self.starting_block = 0;
+        self.current_recording = None;
     }
 
     pub fn is_transferring(&self) -> bool {
@@ -1586,6 +1596,22 @@ impl MediumPowerState {
         events: &mut EventLogger,
         time: &SyncedDateTime,
     ) -> bool {
+        if !self.have_started_transfer() && self.file_offload_offset == OFFLOAD_HEADERS_LENGTH {
+            // put header info
+            let timestamp = self
+                .current_recording
+                .as_ref()
+                .expect("Am transfering so must have a rec")
+                .timestamp;
+            // put some header info in
+            LittleEndian::write_i64(
+                &mut u8_data[self.file_offload_offset..self.file_offload_offset + 8],
+                timestamp,
+            );
+            info!("Adding timestamp to first packet {}", timestamp,);
+
+            self.file_offload_offset += 8;
+        }
         if let Some(file_part) = fs.read_file_part_at(self.file_block_index, self.file_page_index) {
             u8_data[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
                 .copy_from_slice(file_part.part);
@@ -1634,15 +1660,19 @@ impl MediumPowerState {
 
     pub fn maybe_offload_next(&mut self, fs: &mut OnboardFlash) {
         if self.state == TransferState::TransferFinished {
-            if self.latest_starting_block >= self.file_block_index {
+            if let Some(ref rec) = self.latest_recording
+                && rec.starting_block >= self.file_block_index
+            {
                 info!("Need to offload next file");
-                self.file_block_index = self.latest_starting_block;
+                let block = rec.starting_block;
+                let ts = rec.timestamp;
+                self.file_block_index = block;
                 self.file_page_index = 1;
-                self.start_transfer(self.file_block_index, self.latest_timestamp);
-            } else {
-                info!("No longer offloading zeroing prev");
-                self.stop_transfer();
+                self.start_transfer(block, ts);
+                return;
             }
+            info!("No longer offloading zeroing prev");
+            self.stop_transfer();
         }
     }
 
@@ -1651,9 +1681,11 @@ impl MediumPowerState {
         self.read_last_part = false;
         self.file_page_index = 1;
         self.file_block_index = block_index;
-        self.starting_block = block_index;
         self.file_transfers = 0;
-        self.timestamp = timestamp;
+        self.current_recording = Some(RecordingInfo {
+            timestamp,
+            starting_block: block_index,
+        });
         info!("Starting transfer at {}", block_index);
     }
 
