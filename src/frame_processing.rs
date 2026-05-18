@@ -4,6 +4,7 @@
 use crate::attiny_rtc_i2c::{
     CameraState, MainI2C, RecordingMode, RecordingRequestType, RecordingTypeDetail,
 };
+use crate::constants::FIRMWARE_VERSION;
 use crate::cptv_encoder::huffman::{HUFFMAN_TABLE, HuffmanEntry};
 use crate::cptv_encoder::streaming_cptv::{CptvStream, make_crc_table};
 use crate::cptv_encoder::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -559,6 +560,9 @@ pub fn thermal_motion_task(
                 let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
 
                 while medium_power_state.can_transfer_a_page(max_data, &fs) {
+                    if medium_power_state.is_first_page() {
+                        medium_power_state.write_first_packet(u8_data, lepton_serial);
+                    }
                     medium_power_state.read_page(&mut fs, u8_data, &mut events, &time);
                 }
                 if medium_power_state.have_data() {
@@ -1587,33 +1591,48 @@ impl MediumPowerState {
         }
     }
 
+    pub fn is_first_page(&self) -> bool {
+        !self.have_started_transfer() && self.file_offload_offset == OFFLOAD_HEADERS_LENGTH
+    }
+
+    pub fn write_first_packet(&mut self, destination: &mut [u8], lepton_serial: u32) {
+        // put header info
+        let timestamp = self
+            .current_recording
+            .as_ref()
+            .expect("Am transfering so must have a rec")
+            .timestamp;
+        // put some header info in
+        LittleEndian::write_i64(
+            &mut destination[self.file_offload_offset..self.file_offload_offset + 8],
+            timestamp,
+        );
+        self.file_offload_offset += 8;
+
+        LittleEndian::write_u32(
+            &mut destination[self.file_offload_offset..self.file_offload_offset + 4],
+            lepton_serial,
+        );
+        self.file_offload_offset += 4;
+
+        LittleEndian::write_u32(
+            &mut destination[self.file_offload_offset..self.file_offload_offset + 4],
+            FIRMWARE_VERSION,
+        );
+        self.file_offload_offset += 4;
+        info!("Adding timestamp to first packet {} and serial", timestamp,);
+    }
     #[allow(clippy::cast_sign_loss)]
     #[allow(clippy::cast_possible_truncation)]
     pub fn read_page(
         &mut self,
         fs: &mut OnboardFlash,
-        u8_data: &mut [u8],
+        destination: &mut [u8],
         events: &mut EventLogger,
         time: &SyncedDateTime,
     ) -> bool {
-        if !self.have_started_transfer() && self.file_offload_offset == OFFLOAD_HEADERS_LENGTH {
-            // put header info
-            let timestamp = self
-                .current_recording
-                .as_ref()
-                .expect("Am transfering so must have a rec")
-                .timestamp;
-            // put some header info in
-            LittleEndian::write_i64(
-                &mut u8_data[self.file_offload_offset..self.file_offload_offset + 8],
-                timestamp,
-            );
-            info!("Adding timestamp to first packet {}", timestamp,);
-
-            self.file_offload_offset += 8;
-        }
         if let Some(file_part) = fs.read_file_part_at(self.file_block_index, self.file_page_index) {
-            u8_data[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
+            destination[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
                 .copy_from_slice(file_part.part);
             self.file_offload_offset += file_part.part.len();
 
@@ -1621,9 +1640,9 @@ impl MediumPowerState {
             self.state = TransferState::Transferring;
 
             self.read_last_part = file_part.is_last_page_for_file;
-            u8_data[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
+            destination[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
             let packet_number = self.file_transfers % 256;
-            u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
+            destination[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
 
             // info!(
             //     "Other checks  {}:{} against {}:{} pages away {}",
