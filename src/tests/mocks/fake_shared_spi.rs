@@ -164,6 +164,7 @@ pub const CAMERA_BEGIN_AND_END_FILE_TRANSFER: u8 = 0x6;
 pub const CAMERA_GET_MOTION_DETECTION_MASK: u8 = 0x7;
 pub const CAMERA_SEND_LOGGER_EVENT: u8 = 0x8;
 pub const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
+pub const CAMERA_RAW_RECORDING_TRANSFER: u8 = 0xA;
 
 pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 38;
 
@@ -387,7 +388,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         });
         // spi.write(&return_payload_buf).unwrap();
     }
-    if !(CAMERA_CONNECT_INFO..=CAMERA_STARTUP_HANDSHAKE).contains(&transfer_type) {
+    if !(CAMERA_CONNECT_INFO..=CAMERA_RAW_RECORDING_TRANSFER).contains(&transfer_type) {
         // Unknown transfer type
         warn!("rpi received unknown message type");
         TEST_SIM_STATE.with(|s| {
@@ -397,8 +398,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         });
         // spi.write(&return_payload_buf).unwrap();
     }
-
-    if transfer_type != CAMERA_RAW_FRAME_TRANSFER {
+    if transfer_type == CAMERA_RAW_FRAME_TRANSFER {
+        info!("Camera raw transfer");
+    } else if transfer_type == CAMERA_RAW_RECORDING_TRANSFER {
+        info!("Camera rec transfer");
+    } else {
         let chunk = &bytes[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + num_bytes];
         // Write back the crc we calculated.
         let crc = crc_check.checksum(chunk);

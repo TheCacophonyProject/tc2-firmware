@@ -101,6 +101,7 @@ pub fn advance_one_frame() {
     TEST_SIM_STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.current_time += Duration::milliseconds(115);
+        s.update_camera_state();
         let now = s.current_time;
         if s.rtc_alarm_state.is_initialised() {
             if !s.rtc_alarm_state.already_triggered() {

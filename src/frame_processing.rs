@@ -624,7 +624,7 @@ pub fn thermal_motion_task(
         };
 
         if transfer.is_none() && medium_power_state.have_data() {
-            warn!("File transfer failed (probably because of ping) so retrying next frame");
+            warn!("File transfer failed, so retrying next frame");
             medium_power_state.retry_last_transfer();
         }
 

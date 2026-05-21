@@ -19,4 +19,5 @@ mod low_power__default_window__audio_or_thermal;
 mod low_power__fixed_window__audio_and_thermal;
 mod low_power__fixed_window__audio_disabled;
 mod low_power__fixed_window__audio_or_thermal;
+mod medium_power__default_window__audio_disabled;
 mod rpi_spi_offload_errors;

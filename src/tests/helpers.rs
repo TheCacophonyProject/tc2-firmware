@@ -36,6 +36,7 @@ pub fn simulate_camera_with_config(
         if state.used {
             *state = SimState {
                 used: false,
+                powering_on_time: Default::default(),
                 current_time: Default::default(),
                 last_frame: None,
                 frame_num: 0,
@@ -81,6 +82,7 @@ pub fn simulate_camera_with_config(
                 restart_num: 0,
                 offloads_fail_on_restart_iteration: None,
                 audio_recording_fails_on_restart_iteration: None,
+                dma_read_address: 0,
             }
         }
         state.used = true;
@@ -162,6 +164,7 @@ pub struct ConfigBuilder {
     audio_mode: AudioMode,
     location: Option<(f64, f64)>,
     recording_window: Option<(String, String)>,
+    instant_classify: bool,
 }
 
 impl ConfigBuilder {
@@ -171,11 +174,17 @@ impl ConfigBuilder {
             audio_mode: AudioMode::Disabled,
             location: None,
             recording_window: None,
+            instant_classify: false,
         }
     }
 
     pub(crate) fn low_power_mode(mut self) -> Self {
         self.low_power_mode = true;
+        self
+    }
+
+    pub(crate) fn instance_classify(mut self) -> Self {
+        self.instant_classify = true;
         self
     }
 
@@ -233,6 +242,7 @@ impl ConfigBuilder {
         let location = self.location.unwrap_or((-43.5, 172.64));
         let latitude = location.0;
         let longitude = location.1;
+        let instant_classify = self.instant_classify;
         let use_low_power_mode = self.low_power_mode;
         let audio_mode = format!("{:?}", self.audio_mode);
         let recording_window = self
@@ -266,6 +276,7 @@ longitude = {longitude}
 
 [thermal-recorder]
 use-low-power-mode = {use_low_power_mode}
+instant-classify = {instant_classify}
 
 {windows}
 

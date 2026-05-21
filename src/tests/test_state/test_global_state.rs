@@ -16,6 +16,9 @@ use std::time::Instant;
 use std::vec;
 use std::vec::Vec;
 
+const POWER_ON_TIME_SECONDS: u8 = 5;
+const POWER_OFF_TIME_SECONDS: u8 = 1;
+
 pub struct RtcAlarm {
     pub minutes: u8,
     pub(crate) hours: u8,
@@ -40,6 +43,7 @@ impl RtcAlarm {
 
 pub struct SimState {
     pub(crate) used: bool,
+    pub(crate) powering_on_time: DateTime<Utc>,
     pub(crate) current_time: DateTime<Utc>,
     pub(crate) last_frame: Option<CptvFrame>,
     pub(crate) frame_num: u32,
@@ -72,6 +76,26 @@ pub struct SimState {
     pub(crate) restart_num: u32,
     pub(crate) offloads_fail_on_restart_iteration: Option<u32>,
     pub(crate) audio_recording_fails_on_restart_iteration: Option<u32>,
+    pub(crate) dma_read_address: u32,
+}
+
+impl SimState {
+    pub fn update_camera_state(&mut self) {
+        if self.camera_state == CameraState::PoweringOn
+            && self.current_time
+                >= self.powering_on_time + chrono::Duration::seconds(POWER_ON_TIME_SECONDS as i64)
+        {
+            self.camera_state = CameraState::PoweredOn;
+        } else if self.camera_state == CameraState::PoweringOff
+            && self.current_time
+                >= self.powering_on_time + chrono::Duration::seconds(POWER_OFF_TIME_SECONDS as i64)
+        {
+            self.camera_state = CameraState::PoweredOff;
+            self.tc2_agent_state.unset_flag(tc2_agent_state::READY);
+            self.last_frame = None;
+            self.frame_num = 0;
+        }
+    }
 }
 
 pub struct FileOffload {
@@ -135,6 +159,7 @@ impl core::fmt::Debug for EventOffload {
 thread_local! {
     pub static TEST_SIM_STATE: RefCell<SimState> = RefCell::new(SimState {
         used: false,
+        powering_on_time: Default::default(),
         current_time: Default::default(),
         last_frame: None,
         frame_num: 0,
@@ -180,6 +205,7 @@ thread_local! {
         restart_num: 0,
         offloads_fail_on_restart_iteration: None,
         audio_recording_fails_on_restart_iteration: None,
+        dma_read_address: 0,
     });
 
 }
