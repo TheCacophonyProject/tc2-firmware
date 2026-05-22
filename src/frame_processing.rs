@@ -405,7 +405,10 @@ pub fn thermal_motion_task(
                 "Initial status recording state: {:?}",
                 status_recording_state
             );
-            info!("Low power mode");
+            info!(
+                "Low power mode, instant classify? {} ",
+                config.use_medium_power()
+            );
         }
 
         BookkeepingState {

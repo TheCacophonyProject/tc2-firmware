@@ -1,6 +1,6 @@
 extern crate std;
 
-use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState};
+use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState, tc2_agent_state};
 use crate::device_config::DeviceConfig as FirmwareDeviceConfig;
 use crate::ext_spi_transfers::RPI_RETURN_PAYLOAD_LENGTH;
 use crate::formatted_time::FormattedNZTime;
@@ -60,6 +60,7 @@ pub struct SimState {
     pub(crate) file_download: Option<Vec<u8>>,
     pub(crate) file_part_count: usize,
     pub(crate) file_download_start: Instant,
+    pub(crate) medium_power_recording_start: DateTime<Utc>,
     pub(crate) fake_pi_recording_state: RecordingState,
     pub(crate) rosc_drive_iterator: usize,
     pub(crate) files_offloaded: Vec<FileOffload>,
@@ -189,6 +190,7 @@ thread_local! {
         file_download: None,
         file_part_count: 0,
         file_download_start: Instant::now(),
+        medium_power_recording_start: Default::default(),
         fake_pi_recording_state: RecordingState::new(),
         rosc_drive_iterator: 0,
         files_offloaded: vec![],

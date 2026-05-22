@@ -66,6 +66,7 @@ pub fn simulate_camera_with_config(
                 file_download: None,
                 file_part_count: 0,
                 file_download_start: Instant::now(),
+                medium_power_recording_start: Default::default(),
                 fake_pi_recording_state: RecordingState::new(),
                 rosc_drive_iterator: 0,
                 files_offloaded: vec![],
@@ -183,7 +184,7 @@ impl ConfigBuilder {
         self
     }
 
-    pub(crate) fn instance_classify(mut self) -> Self {
+    pub(crate) fn instant_classify(mut self) -> Self {
         self.instant_classify = true;
         self
     }
@@ -475,6 +476,13 @@ fn get_event_at_index(
         );
         if event[0] == 0xff { None } else { Some(event) }
     }
+}
+
+pub fn num_medium_power_recordings_offloaded(files_offloaded: &Vec<FileOffload>) -> usize {
+    files_offloaded
+        .iter()
+        .filter(|file| file.file_type == FileType::MediumPower)
+        .count()
 }
 
 pub fn num_thermal_recordings_offloaded(files_offloaded: &Vec<FileOffload>) -> usize {

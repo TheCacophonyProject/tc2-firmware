@@ -339,6 +339,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
     let crc_from_remote_inv = LittleEndian::read_u16(&header_slice[14..16]);
     let crc_from_remote_inv_dup = LittleEndian::read_u16(&header_slice[16..=17]);
     let transfer_type_check = transfer_type == transfer_type_dup;
+    let header_length = 18;
     let device_config = TEST_SIM_STATE.with(|s| {
         s.borrow()
             .device_config
@@ -399,9 +400,41 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         // spi.write(&return_payload_buf).unwrap();
     }
     if transfer_type == CAMERA_RAW_FRAME_TRANSFER {
-        info!("Camera raw transfer");
     } else if transfer_type == CAMERA_RAW_RECORDING_TRANSFER {
-        info!("Camera rec transfer");
+        num_bytes = (num_bytes + 1) & !1;
+        let is_last_part = bytes[header_length] > 0;
+        let package_num = bytes[header_length + 1];
+        let frame_data: &[u8] = bytemuck::cast_slice(&bytes[header_length + 2..num_bytes]);
+
+        TEST_SIM_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+
+            if state.file_download.is_none() {
+                let timestamp = LittleEndian::read_i64(&frame_data[..8]);
+                let mut file = Vec::with_capacity(50_000_000);
+                file.extend_from_slice(&frame_data[16..]);
+                state.file_download = Some(file);
+                state.medium_power_recording_start =
+                    DateTime::from_timestamp_micros(timestamp).unwrap_or_default();
+            } else if let Some(file) = state.file_download.as_mut() {
+                file.extend_from_slice(frame_data);
+            }
+            state.file_part_count = package_num as usize;
+
+            if is_last_part {
+                if let Some(file) = state.file_download.take() {
+                    let current_time = state.current_time;
+                    let recording_time = state.medium_power_recording_start;
+
+                    state.files_offloaded.push(FileOffload {
+                        size: file.len(),
+                        recording_time,
+                        file_type: FileType::MediumPower,
+                        offloaded_at: current_time,
+                    });
+                }
+            }
+        });
     } else {
         let chunk = &bytes[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + num_bytes];
         // Write back the crc we calculated.
