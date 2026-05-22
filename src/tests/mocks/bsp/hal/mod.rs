@@ -552,7 +552,6 @@ pub mod dma {
     }
 
     pub struct Channel<T>(pub T);
-
     pub mod bidirectional {
         use crate::onboard_flash::{CACHE_READ, FLASH_SPI_HEADER};
         use crate::re_exports::bsp::hal::spi::{Enabled, Spi};
@@ -673,8 +672,38 @@ pub mod dma {
             type RX;
             type TX;
 
+            fn is_done(&self) -> bool;
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX);
         }
+
+        pub trait ReadAddress {
+            fn start_address(&self) -> u32 {
+                0
+            }
+            fn end_address(&self) -> u32 {
+                0
+            }
+        }
+
+        impl ReadAddress for &'static [u32] {
+            fn start_address(&self) -> u32 {
+                self.as_ptr() as u32
+            }
+            fn end_address(&self) -> u32 {
+                self.as_ptr() as u32 + (self.len() * 4) as u32
+            }
+        }
+
+        impl<const N: usize> ReadAddress for &'static mut [u8; N] {
+            fn start_address(&self) -> u32 {
+                self.as_ptr() as u32
+            }
+            fn end_address(&self) -> u32 {
+                self.as_ptr() as u32 + N as u32
+            }
+        }
+
+        impl ReadAddress for SpiEnabledPeripheral {}
 
         pub struct Config<CH1, RX, TX> {
             ch: CH1,
@@ -689,7 +718,14 @@ pub mod dma {
 
             pub fn bswap(&mut self, _enabled: bool) {}
 
-            pub fn start(self) -> Transfer<CH1, RX, TX> {
+            pub fn start(self) -> Transfer<CH1, RX, TX>
+            where
+                RX: ReadAddress,
+            {
+                use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+                TEST_SIM_STATE.with(|s| {
+                    s.borrow_mut().dma_read_address = self.rx.start_address();
+                });
                 Transfer {
                     ch: self.ch,
                     tx: self.tx,
@@ -704,15 +740,29 @@ pub mod dma {
             tx: TX,
         }
 
+        impl<CHANNEL, RX, TX> Transfer<CHANNEL, RX, TX> {
+            pub fn abort(self) -> (CHANNEL, RX, TX) {
+                (self.ch, self.rx, self.tx)
+            }
+        }
+        use crate::re_exports::log::{error, info, warn};
+
         // Implement for PIO DMA transfers (&'static [u32] -> Tx)
         impl TransferExt for Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>> {
             type Channel = Channel<CH0>;
             type RX = &'static [u32];
             type TX = Tx<(PIO0, SM0)>;
 
+            fn is_done(&self) -> bool {
+                //TODO
+                true
+            }
+
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
-                // Custom logic for PIO transfers
-                // Add any PIO-specific logic here if needed
+                use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+                let end = ReadAddress::end_address(&self.rx);
+                TEST_SIM_STATE.with(|s| s.borrow_mut().dma_read_address = end);
+                let _ = write_to_rpi(bytemuck::cast_slice(self.rx));
                 (self.ch, self.rx, self.tx)
             }
         }
@@ -724,6 +774,11 @@ pub mod dma {
             type Channel = Channel<CH0>;
             type RX = &'static mut [u8; N];
             type TX = SpiEnabledPeripheral;
+
+            fn is_done(&self) -> bool {
+                //TODO
+                true
+            }
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = write_to_rpi(self.rx);
@@ -738,6 +793,11 @@ pub mod dma {
             type Channel = Channel<CH0>;
             type RX = SpiEnabledPeripheral;
             type TX = &'static mut [u8; N];
+
+            fn is_done(&self) -> bool {
+                //TODO
+                true
+            }
 
             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
                 let _ = read_from_rpi(self.tx);

@@ -295,6 +295,7 @@ pub fn maybe_offload_files_and_events_on_startup(
     }
     let current_window = config.next_or_current_recording_window(&time.date_time());
     if current_window.is_err() {
+        error!("Current window is invalid {:?}", current_window.err());
         // FIXME: Log invalid window?  Use default window?
         return true;
     }
@@ -637,7 +638,7 @@ pub fn schedule_next_recording(
             && let Ok((start, end)) = config.next_or_current_recording_window(&current_time)
             && wakeup >= start
         {
-            if start < current_time {
+            if start <= current_time {
                 info!("Audio mode {:?}", audio_mode);
                 if audio_mode == AudioMode::AudioAndThermal {
                     // audio recording inside recording window

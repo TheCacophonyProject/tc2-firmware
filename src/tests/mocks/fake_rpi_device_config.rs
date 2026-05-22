@@ -4,9 +4,8 @@ use std::collections::HashMap;
 // Read camera config file
 use crate::tests::mocks::fake_rpi_detection_mask::DetectionMask;
 use byteorder::{LittleEndian, WriteBytesExt};
-use chrono::{
-    DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
-};
+use chrono::{DateTime, FixedOffset, Local, TimeZone};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use log::{error, info, warn};
 use louvre::triangulate;
 use serde::de::Error;
@@ -28,6 +27,10 @@ fn default_constant_recorder() -> bool {
     false
 }
 fn default_low_power_mode() -> bool {
+    false
+}
+
+fn default_instant_classify() -> bool {
     false
 }
 
@@ -544,6 +547,8 @@ struct ThermalRecordingSettings {
     constant_recorder: bool,
     #[serde(rename = "use-low-power-mode", default = "default_low_power_mode")]
     use_low_power_mode: bool,
+    #[serde(rename = "instant-classify", default = "default_instant_classify")]
+    instant_classify: bool,
     #[serde(rename = "min-disk-space-mb", default = "default_min_disk_space_mb")]
     min_disk_space_mb: u32,
     #[serde(
@@ -561,6 +566,7 @@ impl Default for ThermalRecordingSettings {
             constant_recorder: default_constant_recorder(),
             min_disk_space_mb: default_min_disk_space_mb(),
             use_low_power_mode: default_low_power_mode(),
+            instant_classify: default_instant_classify(),
             mask_regions: default_mask_regions(),
         }
     }
@@ -667,6 +673,9 @@ impl DeviceConfig {
         self.recording_settings.use_low_power_mode
     }
 
+    pub fn use_medium_power_mode(&self) -> bool {
+        self.recording_settings.use_low_power_mode && self.recording_settings.instant_classify
+    }
     pub fn use_high_power_mode(&self) -> bool {
         !self.recording_settings.use_low_power_mode
     }
@@ -780,13 +789,20 @@ impl DeviceConfig {
                 .unwrap();
                 let two_days_sunrise =
                     two_days_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
-                (Some(tomorrow_sunset), Some(two_days_sunrise))
+                (
+                    // zero seconds so they compare with the alarms properly ( Alarams only have hours and minutes)
+                    tomorrow_sunset.with_second(0),
+                    two_days_sunrise.with_second(0),
+                )
             } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
                 || (*now_utc < today_sunset && *now_utc > today_sunrise)
             {
-                (Some(today_sunset), Some(tomorrow_sunrise))
+                (today_sunset.with_second(0), tomorrow_sunrise.with_second(0))
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
-                (Some(yesterday_sunset), Some(today_sunrise))
+                (
+                    yesterday_sunset.with_second(0),
+                    today_sunrise.with_second(0),
+                )
             } else {
                 panic!("Unable to calculate relative time window");
             }
@@ -935,6 +951,9 @@ impl DeviceConfig {
         buf.write_u8(device_name_length as u8).unwrap();
         buf.write_all(&device_name[0..device_name_length]).unwrap();
         buf.write_u32::<LittleEndian>(self.audio_info.audio_seed)
+            .unwrap();
+
+        buf.write_u8(if self.use_medium_power_mode() { 1 } else { 0 })
             .unwrap();
 
         buf.write_u8(if prefer_not_to_offload_files_now {

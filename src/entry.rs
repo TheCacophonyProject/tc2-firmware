@@ -161,7 +161,6 @@ pub fn real_main() {
         )
     };
     fs.init(peripherals.SPI1, &mut peripherals.RESETS);
-
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
 
@@ -174,11 +173,6 @@ pub fn real_main() {
     }
     let time = time.unwrap();
     info!("Startup time {}", time);
-
-    // let er = fs.erase_good_blocks();
-    // if let Err(e) = er {
-    //     error!("{}", e);
-    // }
 
     let dc_result = get_device_config(
         &mut fs,

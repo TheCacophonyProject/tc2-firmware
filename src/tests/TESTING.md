@@ -42,6 +42,10 @@ The `tc2-agent` daemon running on the raspberry pi then makes these raw thermal 
 such and onboard realtime AI classification. In this mode battery life is limited, but if the user wants close to
 real-time classification of predators this can be a reasonable tradeoff.
 
+#### Insant classify / Medium Power
+
+In `medium-power` mode the RPI is powered on for every recording that is made, and all recordings are offloaded to the PI as they are being recorded.
+
 #### Low power mode
 
 In `low-power` mode, the raspberry pi is powered off during the thermal recording window, and the thermal frame data is
@@ -68,37 +72,38 @@ to 00:00, or 12:00 to 12:00.
 - `AudioOnly` (only records birdsong audio at various randomized intervals throughout the day)
 - `AudioAndThermal` (records birdsong audio and thermal data, interrupting readiness of thermal recording to make
   scheduled audio recordings)
-- `AudioOrThermal` (records birdsong audio *outside* the configured thermal recording window, otherwise inside
+- `AudioOrThermal` (records birdsong audio _outside_ the configured thermal recording window, otherwise inside
   the window is ready to record thermal recordings)
 - `Disabled` (no audio recording, will just be ready to trigger thermal recordings during the configured thermal
   recording window)
 
 ## Device config testing matrix
 
-| Power mode | Thermal recording window | Audio recording mode | Test file                                                    |
-|------------|--------------------------|----------------------|--------------------------------------------------------------|
-| High power | Relative: Dusk-Dawn      | Disabled             | `./testing/high_power__default_window__audio_disabled.rs`    | 
-| High power | Absolute: 24/7           | Disabled             | `./testing/high_power__always_on__audio_disabled.rs`         | 
-| High power | Absolute: 10am - 10pm    | Disabled             | `./testing/high_power__fixed_window__audio_disabled.rs`      | 
-| High power | Relative: Dusk-Dawn      | AudioOrThermal       | `./testing/high_power__default_window__audio_or_thermal.rs`  | 
-| High power | Absolute: 10am - 10pm    | AudioOrThermal       | `./testing/high_power__fixed_window__audio_or_thermal.rs`    | 
-| High power | Relative: Dusk-Dawn      | AudioAndThermal      | `./testing/high_power__default_window__audio_and_thermal.rs` | 
-| High power | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/high_power__fixed_window__audio_and_thermal.rs`   | 
-| High power | Absolute: 24/7           | AudioAndThermal      | `./testing/high_power__always_on__audio_and_thermal.rs`      |  
-| Low power  | Relative: Dusk-Dawn      | Disabled             | `./testing/low_power__default_window__audio_disabled.rs`     | 
-| Low power  | Absolute: 24/7           | Disabled             | `./testing/low_power__always_on__audio_disabled.rs`          | 
-| Low power  | Absolute: 10am - 10pm    | Disabled             | `./testing/low_power__fixed_window__audio_disabled.rs`       | 
-| Low power  | Relative: Dusk-Dawn      | AudioOrThermal       | `./testing/low_power__default_window__audio_or_thermal.rs`   | 
-| Low power  | Absolute: 10am - 10pm    | AudioOrThermal       | `./testing/low_power__fixed_window__audio_or_thermal.rs`     | 
-| Low power  | Relative: Dusk-Dawn      | AudioAndThermal      | `./testing/low_power__default_window__audio_and_thermal.rs`  | 
-| Low power  | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/low_power__fixed_window__audio_and_thermal.rs`    | 
-| Low power  | Absolute: 24/7           | AudioAndThermal      | `./testing/low_power__always_on__audio_and_thermal.rs`       | 
-| Low power  | N/A                      | AudioOnly            | `./testing/low_power__audio_only.rs`                         |
+| Power mode   | Thermal recording window | Audio recording mode | Test file                                                    |
+| ------------ | ------------------------ | -------------------- | ------------------------------------------------------------ |
+| High power   | Relative: Dusk-Dawn      | Disabled             | `./testing/high_power__default_window__audio_disabled.rs`    |
+| High power   | Absolute: 24/7           | Disabled             | `./testing/high_power__always_on__audio_disabled.rs`         |
+| High power   | Absolute: 10am - 10pm    | Disabled             | `./testing/high_power__fixed_window__audio_disabled.rs`      |
+| High power   | Relative: Dusk-Dawn      | AudioOrThermal       | `./testing/high_power__default_window__audio_or_thermal.rs`  |
+| High power   | Absolute: 10am - 10pm    | AudioOrThermal       | `./testing/high_power__fixed_window__audio_or_thermal.rs`    |
+| High power   | Relative: Dusk-Dawn      | AudioAndThermal      | `./testing/high_power__default_window__audio_and_thermal.rs` |
+| High power   | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/high_power__fixed_window__audio_and_thermal.rs`   |
+| High power   | Absolute: 24/7           | AudioAndThermal      | `./testing/high_power__always_on__audio_and_thermal.rs`      |
+| Low power    | Relative: Dusk-Dawn      | Disabled             | `./testing/low_power__default_window__audio_disabled.rs`     |
+| Low power    | Absolute: 24/7           | Disabled             | `./testing/low_power__always_on__audio_disabled.rs`          |
+| Low power    | Absolute: 10am - 10pm    | Disabled             | `./testing/low_power__fixed_window__audio_disabled.rs`       |
+| Low power    | Relative: Dusk-Dawn      | AudioOrThermal       | `./testing/low_power__default_window__audio_or_thermal.rs`   |
+| Low power    | Absolute: 10am - 10pm    | AudioOrThermal       | `./testing/low_power__fixed_window__audio_or_thermal.rs`     |
+| Low power    | Relative: Dusk-Dawn      | AudioAndThermal      | `./testing/low_power__default_window__audio_and_thermal.rs`  |
+| Low power    | Absolute: 10am - 10pm    | AudioAndThermal      | `./testing/low_power__fixed_window__audio_and_thermal.rs`    |
+| Low power    | Absolute: 24/7           | AudioAndThermal      | `./testing/low_power__always_on__audio_and_thermal.rs`       |
+| Low power    | N/A                      | AudioOnly            | `./testing/low_power__audio_only.rs`                         |
+| Medium power | Relative: Dusk-Dawn      | Disabled             | `./testing/medium_power__default_window__audio_disabled.rs`  |
 
 ## Additional tests
 
 | Purpose                                                               | Test file                             |
-|-----------------------------------------------------------------------|---------------------------------------|
+| --------------------------------------------------------------------- | ------------------------------------- |
 | Make sure offload failures to rPi immediately restart and retry       | `./testing/rpi_spi_offload_errors.rs` |
 | When reads from microphone can't keep up, ensure we restart and retry | `./testing/audio_cant_keep_up.rs`     |
 | Make sure we gracefully work around bad flash blocks (TODO)           | `./testing/bad_flash_blocks.rs`       |

@@ -309,6 +309,16 @@ pub struct FilePartReturn<'a> {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
+pub struct FilePartAt<'a> {
+    pub part: &'a [u8],
+    pub crc16: u16,
+    pub block: BlockIndex,
+    pub page: PageIndex,
+    pub is_last_page_for_file: bool,
+    pub metadata: FileType,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
 pub type SpiEnabledPeripheral = Spi<
     Enabled,
     SPI1,
@@ -1062,6 +1072,39 @@ impl OnboardFlash {
             None
         }
     }
+
+    pub fn read_file_part_at(
+        &mut self,
+        block_index: u16,
+        page_index: u8,
+    ) -> Option<FilePartAt<'_>> {
+        if let Ok(()) = self.read_page(block_index, page_index) {
+            self.read_page_from_cache(block_index);
+            if self.current_page.page_is_used() {
+                let length = self.current_page.page_bytes_used();
+                let crc16 = self.current_page.page_crc();
+                let is_last_page_for_file = self.current_page.is_last_page_for_file();
+
+                let timestamp = self.current_page.file_written_time();
+                let metadata = self.current_page.file_type();
+
+                // let spi: SPI1 = self.free_spi().unwrap();
+                Some(FilePartAt {
+                    part: &self.current_page.user_data()[0..length],
+                    crc16,
+                    block: block_index,
+                    page: page_index,
+                    is_last_page_for_file,
+                    metadata,
+                    timestamp,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
     pub fn get_file_part(
         &mut self,
         events: &mut EventLogger,
@@ -1501,7 +1544,6 @@ impl OnboardFlash {
         }
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
-
         self.write_enable();
         assert!(self.write_enabled());
         // Bytes will always be a full page + metadata + command info at the start

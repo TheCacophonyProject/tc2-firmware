@@ -21,7 +21,9 @@ impl DMA {
     }
 
     pub fn ch_read_addr(&self) -> KHZ_STUB {
-        KHZ_STUB
+        KHZ_STUB {
+            bits: TEST_SIM_STATE.with(|s| s.borrow().dma_read_address),
+        }
     }
 
     pub fn ch_ctrl_trig(&self) -> RW_STUB {
@@ -75,7 +77,9 @@ pub struct CLOCKS;
 #[allow(non_camel_case_types)]
 pub struct RW_STUB;
 #[allow(non_camel_case_types)]
-pub struct KHZ_STUB;
+pub struct KHZ_STUB {
+    bits: u32,
+}
 #[allow(non_camel_case_types)]
 pub struct BITS_STUB;
 impl KHZ_STUB {
@@ -83,24 +87,24 @@ impl KHZ_STUB {
     where
         F: FnOnce(&mut KHZ_STUB) -> (),
     {
-        f(&mut KHZ_STUB)
+        f(&mut KHZ_STUB { bits: self.bits })
     }
 
     pub fn read(&self) -> KHZ_STUB {
-        KHZ_STUB
+        KHZ_STUB { bits: self.bits }
     }
     pub fn done(&self) -> CLOCKS {
         CLOCKS
     }
 
     pub fn bits(&self) -> u32 {
-        125_000
+        self.bits
     }
     pub fn running(&self) -> CLOCKS {
         CLOCKS
     }
     pub fn khz(&self) -> KHZ_STUB {
-        KHZ_STUB
+        KHZ_STUB { bits: 125_000 }
     }
 }
 impl BITS_STUB {
@@ -198,10 +202,10 @@ impl CLOCKS {
     }
 
     pub fn khz(&self) -> KHZ_STUB {
-        KHZ_STUB
+        KHZ_STUB { bits: 125_000 }
     }
     pub fn read(&self) -> KHZ_STUB {
-        KHZ_STUB
+        KHZ_STUB { bits: 125_000 }
     }
     pub fn running(&self) -> Self {
         CLOCKS

@@ -21,6 +21,7 @@ use crate::utils::extend_lifetime;
 use byteorder::{ByteOrder, LittleEndian};
 use core::cell::RefCell;
 use core::ops::Not;
+use embedded_hal::delay::DelayNs;
 use fugit::MicrosDurationU32;
 
 #[repr(u8)]
@@ -37,6 +38,7 @@ pub enum ExtTransferMessage {
     GetMotionDetectionMask = 0x7,
     SendLoggerEvent = 0x8,
     StartupHandshake = 0x9,
+    RecoridngTransfer = 0xA,
 }
 
 type StaticSlot<T> = Mutex<RefCell<Option<T>>>;
@@ -115,6 +117,7 @@ pub struct ExtSpiTransfers {
     state_machine_0_running: Option<RunningPioStateMachine<PIO0, SM0>>,
     pio_tx: Option<Tx<(PIO0, SM0)>>,
     timer: Timer,
+    message_start: fugit::Instant<u64, 1, 1_000_000>,
 }
 const DMA_CHANNEL_NUM: usize = 0;
 
@@ -158,6 +161,7 @@ impl ExtSpiTransfers {
             state_machine_0_running: None,
             pio_tx: None,
             timer,
+            message_start: fugit::Instant::<u64, 1, 1_000_000>::from_ticks(0),
         }
     }
 
@@ -253,28 +257,28 @@ impl ExtSpiTransfers {
         &mut self,
         message_type: ExtTransferMessage,
         payload: &mut [u8],
-        is_recording: bool,
         dma_peripheral: &mut DMA,
+        length: u32,
+        crc: u16,
     ) -> Option<(PioDmaTransfer, u32, u32)> {
         if self.pio_tx.is_some() {
+            self.message_start = self.timer.get_counter();
             // The transfer header contains the transfer type (2x)
             // the number of bytes to read for the payload (2x)
             // the 16 bit crc of the payload (twice)
 
             // It is followed by the payload itself
             #[allow(clippy::cast_possible_truncation)]
-            let length = payload.len() as u32;
-            let is_recording = u16::from(is_recording);
-
+            let actual_payload = payload.len() as u32;
             let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
             LittleEndian::write_u32(&mut transfer_header[2..6], length);
             LittleEndian::write_u32(&mut transfer_header[6..10], length);
-            LittleEndian::write_u16(&mut transfer_header[10..12], is_recording);
-            LittleEndian::write_u16(&mut transfer_header[12..14], is_recording);
-            LittleEndian::write_u16(&mut transfer_header[14..16], is_recording.not());
-            LittleEndian::write_u16(&mut transfer_header[16..=17], is_recording.not());
+            LittleEndian::write_u16(&mut transfer_header[10..12], crc);
+            LittleEndian::write_u16(&mut transfer_header[12..14], crc);
+            LittleEndian::write_u16(&mut transfer_header[14..16], crc.not());
+            LittleEndian::write_u16(&mut transfer_header[16..=17], crc.not());
             payload[..transfer_header.len()].copy_from_slice(&transfer_header);
 
             loop {
@@ -290,10 +294,11 @@ impl ExtSpiTransfers {
             }
             let mut timer = self.timer;
             if self.ping(&mut timer, None) {
+                let from = bytemuck::cast_slice(unsafe { extend_lifetime(&payload[..]) });
                 let mut config = single_buffer::Config::new(
                     self.dma_channel_0.take().unwrap(),
                     // Does this need to be aligned?  Maybe not.
-                    bytemuck::cast_slice(unsafe { extend_lifetime(&payload[..]) }),
+                    from,
                     self.pio_tx.take().unwrap(),
                 );
                 config.bswap(true); // DMA peripheral does our swizzling for us.
@@ -304,13 +309,54 @@ impl ExtSpiTransfers {
                     .read()
                     .bits();
 
-                Some((transfer, start_read_address + length, start_read_address))
+                Some((
+                    transfer,
+                    start_read_address + actual_payload,
+                    start_read_address,
+                ))
             } else {
                 None
             }
         } else {
             None
         }
+    }
+
+    pub fn end_message_timed(
+        &mut self,
+        dma_peripheral: &DMA,
+        transfer_end_address: u32,
+        transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
+        max_time_ms: u64,
+    ) -> bool {
+        #[cfg(feature = "std")]
+        use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
+        // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
+        // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
+        let mut time_taken: u64 = (self.timer.get_counter() - self.message_start).to_millis();
+
+        while time_taken < max_time_ms && !transfer.is_done() {
+            self.timer.delay_ms(1);
+            time_taken = (self.timer.get_counter() - self.message_start).to_millis();
+        }
+        if !transfer.is_done() {
+            info!("Aborting took too long");
+            let (r_ch0, _r_buf, tx) = transfer.abort();
+            self.dma_channel_0 = Some(r_ch0);
+            self.pio_tx = Some(tx);
+            return true;
+        }
+        // Wait for the DMA transfer to finish
+        let (r_ch0, _r_buf, tx) = transfer.wait();
+        let end_read_addr = dma_peripheral
+            .ch(DMA_CHANNEL_NUM)
+            .ch_read_addr()
+            .read()
+            .bits();
+        let did_abort = end_read_addr + 20 < transfer_end_address;
+        self.dma_channel_0 = Some(r_ch0);
+        self.pio_tx = Some(tx);
+        did_abort
     }
 
     pub fn end_message(
@@ -324,12 +370,14 @@ impl ExtSpiTransfers {
         use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
         // NOTE: Only needed if we thought the pi was awake, but then it goes to sleep
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
+
         maybe_abort_dma_transfer(
             dma_peripheral,
             transfer_end_address,
             transfer_start_address,
             0,
         );
+
         // Wait for the DMA transfer to finish
         let (r_ch0, _r_buf, tx) = transfer.wait();
         let end_read_addr = dma_peripheral

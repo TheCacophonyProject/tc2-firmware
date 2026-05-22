@@ -821,7 +821,7 @@ impl MainI2C {
         self.set_wakeup_alarm_days_hours_mins(wake_day, wake_hour, wake_min, now, mode)
     }
 
-    pub fn set_wakeup_alarm_days_hours_mins(
+    fn set_wakeup_alarm_days_hours_mins(
         &mut self,
         wake_day: u8,
         wake_hour: u8,

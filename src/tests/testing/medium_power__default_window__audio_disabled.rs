@@ -1,22 +1,22 @@
-use crate::re_exports::log::info;
 use crate::tests::helpers::{
     ConfigBuilder, last_shutdown_recording_is_within_4_mins_of,
     last_startup_recording_is_within_2_mins_of, next_or_current_thermal_window,
     num_audio_recordings_offloaded, num_audio_recordings_stored_in_flash,
-    num_thermal_recordings_offloaded, num_thermal_recordings_stored_in_flash,
+    num_medium_power_recordings_offloaded, num_thermal_recordings_offloaded,
     simulate_camera_with_config, startup_and_shutdown_recordings_made, test_start_and_end_time,
 };
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 use test_log::test;
 #[test]
-fn low_power_mode_dusk_til_dawn_audio_or_thermal() {
+fn medium_power_mode_dusk_til_dawn_audio_disabled() {
     // Trigger thermal videos at 10, 150, 270 minutes into a thermal window.
     let thermal_trigger_offsets = Some(vec![5, 150, 270]);
     // Cptv files to loop through for testing.
     let cptv_files = Some(vec![String::from("./test-fixtures/cat-trigger.cptv")]);
     let config = ConfigBuilder::new()
         .low_power_mode()
-        .audio_or_thermal()
+        .instant_classify()
+        .audio_disabled()
         .default_recording_window()
         .build();
     let (start_time, end_time) = test_start_and_end_time(&config);
@@ -39,15 +39,16 @@ fn low_power_mode_dusk_til_dawn_audio_or_thermal() {
             &state.files_offloaded,
             thermal_window.1
         ));
-        assert_eq!(5, num_thermal_recordings_offloaded(&state.files_offloaded));
-        assert_eq!(9, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
-            9,
-            num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
+            3,
+            num_medium_power_recordings_offloaded(&state.files_offloaded)
         );
+        assert_eq!(5, num_thermal_recordings_offloaded(&state.files_offloaded));
+
+        assert_eq!(0, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
             0,
-            num_thermal_recordings_stored_in_flash(&state.flash_backing_storage)
+            num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
         );
     });
 }
