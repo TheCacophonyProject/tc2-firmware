@@ -84,6 +84,9 @@ disable-intrinsics = ["rp2040-hal/disable-intrinsics"]
 # This enables ROM functions for f64 math that were not present in the earliest RP2040s
 rom-v2-intrinsics = ["rp2040-hal/rom-v2-intrinsics"]
 
+# Set this feature with `--features erase-flash` to build the version that will just clear the flash.
+erase-flash = []
+
 no-std = [
     "cortex-m",
     "boot2",

@@ -162,6 +162,12 @@ pub fn real_main() {
     };
     fs.init(peripherals.SPI1, &mut peripherals.RESETS);
 
+    #[cfg(feature = "erase-flash")]
+    {
+        fs.erase_good_blocks();
+        return;
+    }
+
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
 
