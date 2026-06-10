@@ -78,7 +78,7 @@ pub enum FileType {
     AudioUserRequested = 1 << 5,
     AudioStartup = 1 << 6,
     AudioShutdown = 1 << 7,
-    MediumPower = 0b0000_0011,
+    CptvMediumPower = 0b0000_0011,
 }
 
 impl From<u8> for FileType {
@@ -92,7 +92,7 @@ impl From<u8> for FileType {
             0b0010_0000 => FileType::AudioUserRequested,
             0b0100_0000 => FileType::AudioStartup,
             0b1000_0000 => FileType::AudioShutdown,
-            0b0000_0011 => FileType::MediumPower,
+            0b0000_0011 => FileType::CptvMediumPower,
 
             _ => FileType::Unknown,
         }

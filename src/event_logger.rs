@@ -172,7 +172,7 @@ pub enum Event {
     RtcVoltageLowError,
     Rp2040GotNewConfig(NewConfigInfo),
     UnrecoverableDataCorruption((u16, u16)),
-    MissedClasification,
+    MissedClassification,
     CouldNotTransfer,
 }
 
@@ -224,7 +224,7 @@ impl From<Event> for u16 {
             SetThermalAlarm(_) => 34,
             Rp2040GotNewConfig(_) => 35,
             UnrecoverableDataCorruption(_) => 36,
-            MissedClasification => 37,
+            MissedClassification => 37,
             CouldNotTransfer => 38,
         }
     }
@@ -298,6 +298,8 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
                 LittleEndian::read_u16(&payload[0..=1]),
                 LittleEndian::read_u16(&payload[2..=3]),
             ))),
+            37 => Ok(MissedClassification),
+            38 => Ok(CouldNotTransfer),
             _ => Err(()),
         }?;
         Ok(LoggerEvent { timestamp, kind })

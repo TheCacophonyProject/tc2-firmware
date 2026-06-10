@@ -438,9 +438,6 @@ pub fn thermal_motion_task(
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame_2: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
-    // #[allow(clippy::large_stack_arrays)]
-    // let mut prev_frame_3: [u8; FLASH_USER_PAGE_SIZE * 2 + RPI_TRANSFER_HEADER_LENGTH + 4] =
-    //     [0u8; FLASH_USER_PAGE_SIZE * 2 + RPI_TRANSFER_HEADER_LENGTH + 4];
 
     let mut prev_telemetry: Option<Telemetry> = None;
     let mut stable_telemetry_tracker = ([0u8, 0u8], -1);
@@ -519,7 +516,7 @@ pub fn thermal_motion_task(
 
                 #[allow(clippy::cast_possible_truncation)]
                 pi_spi.begin_message_pio(
-                    ExtTransferMessage::RecoridngTransfer,
+                    ExtTransferMessage::RecordingTransfer,
                     &mut u8_data[..medium_power_state.aligned_offset()],
                     &mut dma,
                     medium_power_state.file_offload_offset as u32,
@@ -537,10 +534,11 @@ pub fn thermal_motion_task(
             }
         } else if medium_power_mode && medium_power_state.is_transferring() {
             medium_power_state.update_pages_away(&fs);
-            // dont do too much after recording has started as it needs a bit more time and since the PI is probably off it wont matter anyway
+            // Don't start sending straight after starting a new recording. CPTVStream needs to write 2 frames in a single cycle at the start of a recording so it needs a bit more time until we have fully caught up with the incoming lepton frames allowing us closer to 1/9th of a second per loop. Also since the PI is probably off it wont matter anyway
+            // This will ensure we don't drop lepton frames
             if cptv_stream.is_some()
                 && medium_power_state.pages_away < 20
-                && medium_power_state.file_transfers == 0
+                && medium_power_state.packet_transfers == 0
             {
                 info!(
                     "Not transferring as too close {}:{} {}:{} pages away {}",
@@ -552,9 +550,9 @@ pub fn thermal_motion_task(
                 );
                 None
             } else {
-                // will need to see what works best here
+                // Seems 5 pages is about the right amount of data to not slow down our frame processing too much
+                // It may be that it can be higher. If set too high we may start dropping lepton frames as these come in at a rate of 1/9th of a second
                 let max_data: usize = if cptv_stream.is_some() {
-                    // less while recording may not be nesseasry
                     2048 * 5
                 } else {
                     prev_frame_2.len()
@@ -568,7 +566,7 @@ pub fn thermal_motion_task(
                     }
                     medium_power_state.read_page(&mut fs, u8_data, &mut events, &time);
                 }
-                if medium_power_state.have_data() {
+                if medium_power_state.has_data() {
                     info!(
                         "Read data up to {}:{} fs current is {}:{} state: {:?} read last {}",
                         medium_power_state.file_block_index,
@@ -581,7 +579,7 @@ pub fn thermal_motion_task(
                     medium_power_state.calculate_crc(u8_data);
                     #[allow(clippy::cast_possible_truncation)]
                     pi_spi.begin_message_pio(
-                        ExtTransferMessage::RecoridngTransfer,
+                        ExtTransferMessage::RecordingTransfer,
                         &mut u8_data[..medium_power_state.aligned_offset()],
                         &mut dma,
                         medium_power_state.file_offload_offset as u32,
@@ -626,7 +624,7 @@ pub fn thermal_motion_task(
             }
         };
 
-        if transfer.is_none() && medium_power_state.have_data() {
+        if transfer.is_none() && medium_power_state.has_data() {
             warn!("File transfer failed, so retrying next frame");
             medium_power_state.retry_last_transfer();
         }
@@ -696,11 +694,7 @@ pub fn thermal_motion_task(
             let is_inside_recording_window = config
                 .time_is_in_supplied_recording_window(&time.date_time(), current_recording_window);
             let is_outside_recording_window = !is_inside_recording_window;
-            // if transferring_previous && file_transfers > 0 {
-            //     // should be able to do multiple just need to make sure prev_frame_2 is zeros for the start
-            //     should_start_new_recording = false;
-            //     info!("Not starting a new recording")
-            // } else {
+
             should_start_new_recording = fs.can_begin_new_cptv_recordings()
                 && this_frame_motion_detection.got_new_trigger()
                 && cptv_stream.is_none();
@@ -735,7 +729,6 @@ pub fn thermal_motion_task(
                 && test_recording.is_some()
                 && !fs.is_nearly_full_for_thermal_recordings()
                 && cptv_stream.is_none()
-            //add this to main branch
             {
                 // Take test recording.
                 test_recording_in_progress = test_recording.take();
@@ -817,9 +810,8 @@ pub fn thermal_motion_task(
                             &mut fs,
                         );
                         if medium_power_mode && medium_power_state.is_transferring() {
-                            // if transfering previous dont abort
-                            let arboted =
-                                medium_power_state.latest_recording_aborted(cptv_start_block_index);
+                            // if transferring previous don't abort
+                            medium_power_state.latest_recording_aborted(cptv_start_block_index);
                         }
                     } else {
                         cptv_stream.finalise(&mut fs, &time);
@@ -862,7 +854,8 @@ pub fn thermal_motion_task(
                         // will do after offload
                         prev_frame_2.fill(0);
                     }
-                    if test_recording_in_progress.is_some() && medium_power_state.is_transferring()
+                    if test_recording_in_progress.is_some()
+                        && (!medium_power_mode || !medium_power_state.is_transferring())
                     {
                         test_recording_in_progress.take();
                         // Finished requested test recording, restart now.
@@ -902,8 +895,9 @@ pub fn thermal_motion_task(
             prev_frame.copy_from_slice(current_raw_frame);
         }
         if should_start_new_recording
+            && medium_power_mode
             && medium_power_state.is_transferring()
-            && !medium_power_state.have_started_transfer()
+            && !medium_power_state.has_started_transfer()
         {
             // trying to transfer old recording but have not started yet, just abort and start transferring the new one
             if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
@@ -914,12 +908,12 @@ pub fn thermal_motion_task(
             medium_power_state.stop_transfer();
         } else {
             // TIME to await transfer complete to pi: 27ms when not recording, 2ms when recording
-            // this needs to be before restore_front_buffer, if needed can be be before strating a new transfer in medium power mode
+            // this needs to be before restore_front_buffer, if needed can be be before starting a new transfer in medium power mode
             if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
                 let did_abort_transfer = if medium_power_mode
                     && medium_power_state.is_transferring()
                 {
-                    pi_spi.end_message_timed(&dma, transfer_end_address, transfer, 65)
+                    pi_spi.end_message_timed(&dma, transfer_end_address, transfer)
                 } else {
                     pi_spi.end_message(&dma, transfer_end_address, transfer_start_address, transfer)
                 };
@@ -930,14 +924,14 @@ pub fn thermal_motion_task(
                     //     telemetry.frame_num
                     // );
                 }
-                if medium_power_state.is_transferring() {
+                if medium_power_mode && medium_power_state.is_transferring() {
                     if did_abort_transfer {
                         medium_power_state.retry_last_transfer();
                     } else {
                         medium_power_state.part_transferred();
                         // we may have been offloading previous recording
                         if medium_power_state.state == TransferState::TransferFinished {
-                            medium_power_state.maybe_offload_next(&mut fs);
+                            medium_power_state.maybe_offload_next();
                         }
                     }
                 }
@@ -946,7 +940,7 @@ pub fn thermal_motion_task(
         }
 
         if should_start_new_recording {
-            if medium_power_state.is_transferring() {
+            if medium_power_mode && medium_power_state.is_transferring() {
                 // if we are still transferring previous file we have to zero
                 prev_frame_2.fill(0);
             }
@@ -1479,12 +1473,9 @@ pub struct RecordingInfo {
 #[allow(clippy::struct_excessive_bools)]
 pub struct MediumPowerState {
     pub retry_count: i32,
-    pub file_transfers: i32,
+    pub packet_transfers: i32,
     pub file_page_index: u8,
     pub file_block_index: u16,
-    // transferring: bool,
-    // was_offloading: bool,
-    // pub retry_transfer: bool,
     pub pages_away: u8,
     pub file_offload_offset: usize,
     pub read_last_part: bool,
@@ -1499,10 +1490,9 @@ impl MediumPowerState {
     pub fn new() -> MediumPowerState {
         MediumPowerState {
             retry_count: 0,
-            file_transfers: 0,
+            packet_transfers: 0,
             file_page_index: 0,
             file_block_index: 0,
-            // retry_transfer: false,
             pages_away: 0,
             file_offload_offset: OFFLOAD_HEADERS_LENGTH,
             read_last_part: false,
@@ -1526,7 +1516,7 @@ impl MediumPowerState {
         self.read_last_part = false;
     }
 
-    pub fn have_data(&self) -> bool {
+    pub fn has_data(&self) -> bool {
         self.is_transferring() && self.file_offload_offset > OFFLOAD_HEADERS_LENGTH
     }
     pub fn latest_recording_aborted(&mut self, start_block_index: u16) -> bool {
@@ -1555,6 +1545,7 @@ impl MediumPowerState {
         self.state < TransferState::TransferFinished
     }
 
+    // calculate how many pages away from the current block & page of fs we are
     pub fn update_pages_away(&mut self, fs: &OnboardFlash) {
         self.pages_away = if self.file_block_index == fs.current_block_index {
             fs.current_page_index - self.file_page_index
@@ -1581,21 +1572,22 @@ impl MediumPowerState {
         } else {
             self.state = TransferState::PartTransferred;
         }
-        self.file_transfers += 1;
+        self.packet_transfers += 1;
         self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
     }
 
     pub fn aligned_offset(&self) -> usize {
-        // tc2-agent always reads atleast 2066 so ensure we have more than that
+        // tc2-agent always reads at least 2066 so ensure we have more than that
         if self.file_offload_offset < 2066 {
             2068
         } else {
+            //we are sending data as u32 so need to ensure we send a number of bytes divisible by 4
             (self.file_offload_offset + 3) & !3
         }
     }
 
     pub fn is_first_page(&self) -> bool {
-        !self.have_started_transfer() && self.file_offload_offset == OFFLOAD_HEADERS_LENGTH
+        !self.has_started_transfer() && self.file_offload_offset == OFFLOAD_HEADERS_LENGTH
     }
 
     pub fn write_first_packet(&mut self, destination: &mut [u8], lepton_serial: u32) {
@@ -1603,7 +1595,7 @@ impl MediumPowerState {
         let timestamp = self
             .current_recording
             .as_ref()
-            .expect("Am transfering so must have a rec")
+            .expect("Am transferring so must have a rec")
             .timestamp;
         // put some header info in
         LittleEndian::write_i64(
@@ -1644,19 +1636,9 @@ impl MediumPowerState {
 
             self.read_last_part = file_part.is_last_page_for_file;
             destination[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
-            let packet_number = self.file_transfers % 256;
+            let packet_number = self.packet_transfers % 256;
             destination[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
-
-            // info!(
-            //     "Other checks  {}:{} against {}:{} pages away {}",
-            //     file_block_index,
-            //     file_page_index,
-            //     fs.current_block_index,
-            //     fs.current_page_index,
-            //     pages_away
-            // );
             self.advance_file_cursor(fs);
-
             true
         } else {
             //probably should error here
@@ -1680,7 +1662,7 @@ impl MediumPowerState {
         }
     }
 
-    pub fn maybe_offload_next(&mut self, fs: &mut OnboardFlash) {
+    pub fn maybe_offload_next(&mut self) {
         if self.state == TransferState::TransferFinished {
             if let Some(ref rec) = self.latest_recording
                 && rec.starting_block >= self.file_block_index
@@ -1703,7 +1685,7 @@ impl MediumPowerState {
         self.read_last_part = false;
         self.file_page_index = 1;
         self.file_block_index = block_index;
-        self.file_transfers = 0;
+        self.packet_transfers = 0;
         self.current_recording = Some(RecordingInfo {
             timestamp,
             starting_block: block_index,
@@ -1711,8 +1693,8 @@ impl MediumPowerState {
         info!("Starting transfer at {}", block_index);
     }
 
-    pub fn have_started_transfer(&self) -> bool {
-        self.is_transferring() && self.file_transfers > 0
+    pub fn has_started_transfer(&self) -> bool {
+        self.is_transferring() && self.packet_transfers > 0
     }
     pub fn should_retry(&self) -> bool {
         self.retry_count <= MAX_RETRIES && self.state == TransferState::TransferFailed
@@ -1724,7 +1706,7 @@ impl MediumPowerState {
             .checksum(&data[RPI_TRANSFER_HEADER_LENGTH..self.file_offload_offset]);
     }
 
-    fn advance_file_cursor(&mut self, fs: &mut OnboardFlash) {
+    fn advance_file_cursor(&mut self, fs: &OnboardFlash) {
         if self.file_page_index < 63 {
             self.file_page_index += 1;
         } else {

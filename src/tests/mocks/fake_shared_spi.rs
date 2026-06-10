@@ -401,9 +401,11 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
     }
     if transfer_type == CAMERA_RAW_FRAME_TRANSFER {
     } else if transfer_type == CAMERA_RAW_RECORDING_TRANSFER {
+        //make sure num bytes is even, this is more for on tc2-agent side where we are reading u16 values which requires an even number of bytes
+        //the last package can be an uneven number of bytes so just pad with 0s
         num_bytes = (num_bytes + 1) & !1;
         let is_last_part = bytes[header_length] > 0;
-        let package_num = bytes[header_length + 1];
+        let packet_num = bytes[header_length + 1];
         let frame_data: &[u8] = bytemuck::cast_slice(&bytes[header_length + 2..num_bytes]);
 
         TEST_SIM_STATE.with(|state| {
@@ -419,7 +421,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
             } else if let Some(file) = state.file_download.as_mut() {
                 file.extend_from_slice(frame_data);
             }
-            state.file_part_count = package_num as usize;
+            state.file_part_count = packet_num as usize;
 
             if is_last_part {
                 if let Some(file) = state.file_download.take() {
@@ -429,7 +431,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                     state.files_offloaded.push(FileOffload {
                         size: file.len(),
                         recording_time,
-                        file_type: FileType::MediumPower,
+                        file_type: FileType::CptvMediumPower,
                         offloaded_at: current_time,
                     });
                 }

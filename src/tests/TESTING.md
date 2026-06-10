@@ -42,7 +42,7 @@ The `tc2-agent` daemon running on the raspberry pi then makes these raw thermal 
 such and onboard realtime AI classification. In this mode battery life is limited, but if the user wants close to
 real-time classification of predators this can be a reasonable tradeoff.
 
-#### Insant classify / Medium Power
+#### Instant classify / Medium Power
 
 In `medium-power` mode the RPI is powered on for every recording that is made, and all recordings are offloaded to the PI as they are being recorded.
 

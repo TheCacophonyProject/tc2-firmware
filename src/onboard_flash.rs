@@ -1088,7 +1088,6 @@ impl OnboardFlash {
                 let timestamp = self.current_page.file_written_time();
                 let metadata = self.current_page.file_type();
 
-                // let spi: SPI1 = self.free_spi().unwrap();
                 Some(FilePartAt {
                     part: &self.current_page.user_data()[0..length],
                     crc16,

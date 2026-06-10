@@ -481,7 +481,7 @@ fn get_event_at_index(
 pub fn num_medium_power_recordings_offloaded(files_offloaded: &Vec<FileOffload>) -> usize {
     files_offloaded
         .iter()
-        .filter(|file| file.file_type == FileType::MediumPower)
+        .filter(|file| file.file_type == FileType::CptvMediumPower)
         .count()
 }
 

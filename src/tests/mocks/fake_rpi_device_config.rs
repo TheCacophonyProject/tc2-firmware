@@ -790,7 +790,7 @@ impl DeviceConfig {
                 let two_days_sunrise =
                     two_days_sunrise.naive_utc() + Duration::seconds(end_offset as i64);
                 (
-                    // zero seconds so they compare with the alarms properly ( Alarams only have hours and minutes)
+                    // zero seconds so they compare with the alarms properly ( Alarms only have hours and minutes)
                     tomorrow_sunset.with_second(0),
                     two_days_sunrise.with_second(0),
                 )

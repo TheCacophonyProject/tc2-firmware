@@ -776,7 +776,7 @@ pub mod dma {
             type TX = SpiEnabledPeripheral;
 
             fn is_done(&self) -> bool {
-                //TODO
+                //TODO could have some logic about if it hasn't completed
                 true
             }
 
@@ -795,7 +795,7 @@ pub mod dma {
             type TX = &'static mut [u8; N];
 
             fn is_done(&self) -> bool {
-                //TODO
+                //TODO could have some logic about if it hasn't completed
                 true
             }
 

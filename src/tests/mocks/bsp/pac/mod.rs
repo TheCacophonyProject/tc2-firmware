@@ -2,6 +2,8 @@ use crate::re_exports::bsp::hal::dma::{CH0, CH1, CH2, CH3, CH4, Channel, Channel
 use crate::re_exports::bsp::hal::pio::PIOExt;
 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
 
+const CLOCK_SPEED: u32 = 125_000;
+
 #[allow(non_camel_case_types)]
 pub struct DMA;
 
@@ -104,7 +106,7 @@ impl KHZ_STUB {
         CLOCKS
     }
     pub fn khz(&self) -> KHZ_STUB {
-        KHZ_STUB { bits: 125_000 }
+        KHZ_STUB { bits: CLOCK_SPEED }
     }
 }
 impl BITS_STUB {
@@ -202,10 +204,10 @@ impl CLOCKS {
     }
 
     pub fn khz(&self) -> KHZ_STUB {
-        KHZ_STUB { bits: 125_000 }
+        KHZ_STUB { bits: CLOCK_SPEED }
     }
     pub fn read(&self) -> KHZ_STUB {
-        KHZ_STUB { bits: 125_000 }
+        KHZ_STUB { bits: CLOCK_SPEED }
     }
     pub fn running(&self) -> Self {
         CLOCKS

@@ -38,7 +38,7 @@ pub enum ExtTransferMessage {
     GetMotionDetectionMask = 0x7,
     SendLoggerEvent = 0x8,
     StartupHandshake = 0x9,
-    RecoridngTransfer = 0xA,
+    RecordingTransfer = 0xA,
 }
 
 type StaticSlot<T> = Mutex<RefCell<Option<T>>>;
@@ -75,7 +75,7 @@ fn TIMER_IRQ_0() {
         alarm.clear_interrupt();
     });
 }
-
+const TIMED_MESSAGE_TIMEOUT: u8 = 65;
 const MESSAGE_TYPE_U8: usize = 1;
 const PAYLOAD_LENGTH_LE_U32: usize = 4;
 const CRC_OR_PROGRESS_LE_U16: usize = 2;
@@ -269,7 +269,11 @@ impl ExtSpiTransfers {
 
             // It is followed by the payload itself
             #[allow(clippy::cast_possible_truncation)]
-            let actual_payload = payload.len() as u32;
+            let actual_payload_length = payload.len() as u32;
+
+            //the payload is aligned to 32 bits, so the payload may contain some redundant bits. length refers to the actual byte length of payload.
+            //while actual_payload_length is the aligned size that is being sent
+
             let mut transfer_header = [0u8; RPI_TRANSFER_HEADER_LENGTH];
             transfer_header[0] = message_type as u8;
             transfer_header[1] = message_type as u8;
@@ -311,7 +315,7 @@ impl ExtSpiTransfers {
 
                 Some((
                     transfer,
-                    start_read_address + actual_payload,
+                    start_read_address + actual_payload_length,
                     start_read_address,
                 ))
             } else {
@@ -327,7 +331,6 @@ impl ExtSpiTransfers {
         dma_peripheral: &DMA,
         transfer_end_address: u32,
         transfer: Transfer<Channel<CH0>, &'static [u32], Tx<(PIO0, SM0)>>,
-        max_time_ms: u64,
     ) -> bool {
         #[cfg(feature = "std")]
         use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
@@ -335,7 +338,7 @@ impl ExtSpiTransfers {
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
         let mut time_taken: u64 = (self.timer.get_counter() - self.message_start).to_millis();
 
-        while time_taken < max_time_ms && !transfer.is_done() {
+        while time_taken < TIMED_MESSAGE_TIMEOUT as u64 && !transfer.is_done() {
             self.timer.delay_ms(1);
             time_taken = (self.timer.get_counter() - self.message_start).to_millis();
         }
