@@ -511,7 +511,8 @@ pub fn thermal_motion_task(
             if medium_power_state.should_retry() {
                 medium_power_state.retry_count += 1;
 
-                // tc2-agent always reads atleast 2066 so ensure we have more than that
+                // prev_frame_2 is used for starting a new recording as well, so we must make sure we aren't trying to use it at the same time
+                // as a new recording and that it is zero'd once we have finished
                 let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
 
                 #[allow(clippy::cast_possible_truncation)]

@@ -288,9 +288,9 @@ impl<A, B> I2C<I2C1, (A, B)> {
                         BigEndian::write_u16(&mut payload[1..=2], crc);
                     }
 
-                    //TODO move this logic else where and base it of current time have done this for thermal recording time but i think will
-                    // only work if advance_one_frame is called (seems to be where the current_time is updated)
-                    // Maybe advance the simulation?
+                    //TODO move this logic else where and base it of TEST_SIM_STATE current time have done this for thermal recording time but i think will
+                    // only work if advance_one_frame is called (seems to be where TEST_SIM_STATE current_time is updated)
+                    // Need to advance the simulation in the audio test process
                     {
                         TEST_SIM_STATE.with(|s| {
                             let mut s = s.borrow_mut();

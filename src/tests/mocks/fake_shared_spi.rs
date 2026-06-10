@@ -404,7 +404,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         //make sure num bytes is even, this is more for on tc2-agent side where we are reading u16 values which requires an even number of bytes
         //the last package can be an uneven number of bytes so just pad with 0s
         num_bytes = (num_bytes + 1) & !1;
-        let is_last_part = bytes[header_length] > 0;
+        let is_last_part = bytes[header_length] == 1;
         let packet_num = bytes[header_length + 1];
         let frame_data: &[u8] = bytemuck::cast_slice(&bytes[header_length + 2..num_bytes]);
 
