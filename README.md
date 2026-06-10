@@ -59,6 +59,7 @@ If you aren't using a debugger (or want to use cargo-embed/probe-rs-debugger), c
     <li><a href="#installation-of-development-dependencies">Installation of development dependencies</a></li>
     <li><a href="#running">Running</a></li>
     <li><a href="#alternative-runners">Alternative runners</a></li>
+    <li><a href="#medium-power-mode">Medium Power Mode</a></li>
   </ol>
 </details>
 
@@ -264,16 +265,18 @@ Some of the options for your `runner` are listed below:
 
 </details>
 
-### Medium Power Mode
+<!-- Medium Power Mode -->
+<details open="open">
+  <summary><h2 style="display: inline-block" id="medium-power-mode">Medium Power Mode</h2></summary>
 
 In low power mode the PI will be woken up as soon as a non status recording is made.
 
-Once PI is awake, the RP2040 will begin offloading the currently recording CPTV File.
+Once the PI is awake, the RP2040 will begin offloading the currently recording CPTV File.
 
-- Frames will be read from the onboard flash and will be sent over the PIO SPI.
+- Frames will be read from the onboard flash and will be sent over the PIO SPI to the PI.
 - As to not slow down the processing & writing of the lepton frames, the frames wont start being
-  sent until after 20 frames have been written.
-- At most 5 flash pages of data will be sent each cycle. Again to not slow down the processing of lepton frames.
+  sent until after 20 frames have been written on the RP2040 flash.
+- At most 5 flash pages of data will be sent each transfer. Again to not slow down the processing of lepton frames.
 
 Since we have to wait for the PI to turn on, sometimes the RP2040 has finished the current recording and a new recording has started. The following rules apply
 
@@ -284,8 +287,10 @@ Since we have to wait for the PI to turn on, sometimes the RP2040 has finished t
 
 2. Once a recording occurs the PI will stay on for 5 minutes in case of new recordings.
 
-3. If the RP2040 fails to send a frame after 270 retries ~30 seconds, the offload will be aborted a CouldNotTransfer event will be logged
+3. If the RP2040 fails to send a frame after 270 retries ~30 seconds, the offload will be aborted and a CouldNotTransfer event will be logged
 
 Note: The PIO SPI is the same interface that is used to send
 the current frame to the PI, so while a recording is being made the management interface
 preview will not work.
+
+</details>
