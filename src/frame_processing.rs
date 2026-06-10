@@ -511,8 +511,11 @@ pub fn thermal_motion_task(
             if medium_power_state.should_retry() {
                 medium_power_state.retry_count += 1;
 
-                // prev_frame_2 is used for starting a new recording as well, so we must make sure we aren't trying to use it at the same time
-                // as a new recording and that it is zero'd once we have finished
+                // prev_frame_2 is used for starting a new recording as well, so we must make sure we aren't trying to use it at the same time as a new recording and that it is zeroed once we have finished.
+                // The following conditions need to be true
+                // we are never writing a new recordings (accessing prev_frame_2) before the pi_spi message has been sent / aborted.
+                // nothing needs to be persisted in prev_frame_2 after the pi_spi message is completed/aborted
+                // if we retry recordings we are trying to use persisted data.
                 let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
 
                 #[allow(clippy::cast_possible_truncation)]
@@ -905,7 +908,7 @@ pub fn thermal_motion_task(
                 transfer.abort();
             }
             info!("Missed classification ending all previous transfers");
-            events.log(Event::MissedClasification, &time, &mut fs);
+            events.log(Event::MissedClassification, &time, &mut fs);
             medium_power_state.stop_transfer();
         } else {
             // TIME to await transfer complete to pi: 27ms when not recording, 2ms when recording
