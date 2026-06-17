@@ -16,7 +16,7 @@ use crate::lepton::{FFCStatus, LeptonPins};
 use crate::lepton_task::lepton_core1_task;
 use crate::lepton_telemetry::Telemetry;
 use crate::motion_detector::{MotionTracking, track_motion};
-use crate::onboard_flash::{FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
+use crate::onboard_flash::{FLASH_USER_PAGE_SIZE, FileType, NUM_RECORDING_BLOCKS, OnboardFlash};
 use crate::re_exports::bsp;
 use crate::re_exports::bsp::hal::multicore::{Multicore, Stack};
 use crate::re_exports::bsp::hal::rosc::RingOscillator;
@@ -43,6 +43,7 @@ const FRAME_BUFFER_LENGTH: usize =
     RPI_TRANSFER_HEADER_LENGTH + LEPTON_RAW_FRAME_PAYLOAD_LENGTH + FRAME_BUFFER_ALIGNMENT_PADDING;
 
 const OFFLOAD_HEADERS_LENGTH: usize = RPI_TRANSFER_HEADER_LENGTH + 2;
+const OFFLOAD_BUFFER_LENGTH: usize = FLASH_USER_PAGE_SIZE * 5 + OFFLOAD_HEADERS_LENGTH + 16;
 pub(crate) const THERMAL_DEV_MODE: bool = false;
 #[repr(C, align(32))]
 pub struct FrameBuffer([u8; FRAME_BUFFER_LENGTH]);
@@ -433,7 +434,6 @@ pub fn thermal_motion_task(
 
     let medium_power_mode = config.use_medium_power();
     let mut medium_power_state = MediumPowerState::new();
-
     #[allow(clippy::large_stack_arrays)]
     let mut prev_frame: [u16; FRAME_WIDTH * FRAME_HEIGHT] = [0u16; FRAME_WIDTH * FRAME_HEIGHT];
     #[allow(clippy::large_stack_arrays)]
@@ -511,21 +511,18 @@ pub fn thermal_motion_task(
             if medium_power_state.should_retry() {
                 medium_power_state.retry_count += 1;
 
-                // prev_frame_2 is used for starting a new recording as well, so we must make sure we aren't trying to use it at the same time as a new recording and that it is zeroed once we have finished.
-                // The following conditions need to be true
-                // we are never writing a new recordings (accessing prev_frame_2) before the pi_spi message has been sent / aborted.
-                // nothing needs to be persisted in prev_frame_2 after the pi_spi message is completed/aborted
-                // if we retry recordings we are trying to use persisted data.
-                let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
-
                 #[allow(clippy::cast_possible_truncation)]
-                pi_spi.begin_message_pio(
-                    ExtTransferMessage::RecordingTransfer,
-                    &mut u8_data[..medium_power_state.aligned_offset()],
-                    &mut dma,
-                    medium_power_state.file_offload_offset as u32,
-                    medium_power_state.crc,
-                )
+                {
+                    let file_offload_offset = medium_power_state.file_offload_offset as u32;
+                    let crc = medium_power_state.crc;
+                    pi_spi.begin_message_pio(
+                        ExtTransferMessage::RecordingTransfer,
+                        medium_power_state.aligned_data(),
+                        &mut dma,
+                        file_offload_offset,
+                        crc,
+                    )
+                }
             } else {
                 events.log(Event::CouldNotTransfer, &time, &mut fs);
                 info!(
@@ -533,7 +530,6 @@ pub fn thermal_motion_task(
                     medium_power_state.retry_count
                 );
                 medium_power_state.stop_transfer();
-                // prev_frame_2.fill(0);
                 None
             }
         } else if medium_power_mode && medium_power_state.is_transferring() {
@@ -554,21 +550,11 @@ pub fn thermal_motion_task(
                 );
                 None
             } else {
-                // Seems 5 pages is about the right amount of data to not slow down our frame processing too much
-                // It may be that it can be higher. If set too high we may start dropping lepton frames as these come in at a rate of 1/9th of a second
-                let max_data: usize = if cptv_stream.is_some() {
-                    2048 * 5
-                } else {
-                    prev_frame_2.len()
-                };
-
-                let u8_data: &mut [u8] = bytemuck::cast_slice_mut(&mut prev_frame_2);
-
-                while medium_power_state.can_transfer_a_page(max_data, &fs) {
+                while medium_power_state.can_transfer_a_page(&fs) {
                     if medium_power_state.is_first_page() {
-                        medium_power_state.write_first_packet(u8_data, lepton_serial);
+                        medium_power_state.write_first_packet(lepton_serial);
                     }
-                    medium_power_state.read_page(&mut fs, u8_data, &mut events, &time);
+                    medium_power_state.read_page(&mut fs, &mut events, &time);
                 }
                 if medium_power_state.has_data() {
                     info!(
@@ -580,15 +566,19 @@ pub fn thermal_motion_task(
                         medium_power_state.state,
                         medium_power_state.read_last_part,
                     );
-                    medium_power_state.calculate_crc(u8_data);
+                    medium_power_state.calculate_crc();
                     #[allow(clippy::cast_possible_truncation)]
-                    pi_spi.begin_message_pio(
-                        ExtTransferMessage::RecordingTransfer,
-                        &mut u8_data[..medium_power_state.aligned_offset()],
-                        &mut dma,
-                        medium_power_state.file_offload_offset as u32,
-                        medium_power_state.crc,
-                    )
+                    {
+                        let file_offload_offset = medium_power_state.file_offload_offset as u32;
+                        let crc = medium_power_state.crc;
+                        pi_spi.begin_message_pio(
+                            ExtTransferMessage::RecordingTransfer,
+                            medium_power_state.aligned_data(),
+                            &mut dma,
+                            file_offload_offset,
+                            crc,
+                        )
+                    }
                 } else {
                     None
                 }
@@ -607,7 +597,6 @@ pub fn thermal_motion_task(
                     timer.delay_ms(100);
                     return;
                 }
-                prev_frame_2.fill(0);
                 medium_power_state.finished();
             }
 
@@ -854,10 +843,7 @@ pub fn thermal_motion_task(
                     }
 
                     // Clear out prev frame before starting a new recording stream.
-                    if !medium_power_mode {
-                        // will do after offload
-                        prev_frame_2.fill(0);
-                    }
+                    prev_frame_2.fill(0);
                     if test_recording_in_progress.is_some()
                         && (!medium_power_mode || !medium_power_state.is_transferring())
                     {
@@ -944,10 +930,6 @@ pub fn thermal_motion_task(
         }
 
         if should_start_new_recording {
-            if medium_power_mode && medium_power_state.is_transferring() {
-                // if we are still transferring previous file we have to zero
-                prev_frame_2.fill(0);
-            }
             // Since we write 2 frames every new recording, this can take too long
             // to write out to flash memory within our time budget, so we end up
             // dropping a frame. Cache the current frame and tell core1 to keep getting
@@ -1488,6 +1470,9 @@ pub struct MediumPowerState {
     pub state: TransferState,
     pub current_recording: Option<RecordingInfo>,
     pub latest_recording: Option<RecordingInfo>,
+    // Seems 5 pages is about the right amount of data to not slow down our frame processing too much
+    // It may be that it can be higher. If set too high we may start dropping lepton frames as these come in at a rate of 1/9th of a second
+    pub u8_data: [u8; OFFLOAD_BUFFER_LENGTH],
 }
 
 impl MediumPowerState {
@@ -1505,6 +1490,7 @@ impl MediumPowerState {
             state: TransferState::Finished,
             current_recording: None,
             latest_recording: None,
+            u8_data: [0u8; OFFLOAD_BUFFER_LENGTH],
         }
     }
 
@@ -1562,9 +1548,10 @@ impl MediumPowerState {
         self.state = TransferState::TransferFailed;
     }
 
-    pub fn can_transfer_a_page(&mut self, max_data: usize, fs: &OnboardFlash) -> bool {
+    pub fn can_transfer_a_page(&mut self, fs: &OnboardFlash) -> bool {
         !self.read_last_part
-            && self.file_offload_offset <= (max_data + OFFLOAD_HEADERS_LENGTH)
+            && self.file_offload_offset + FLASH_USER_PAGE_SIZE
+                <= (OFFLOAD_BUFFER_LENGTH + OFFLOAD_HEADERS_LENGTH)
             && self.pages_away > 0
             && (self.file_block_index != fs.current_block_index
                 || self.file_page_index < fs.current_page_index)
@@ -1590,32 +1577,35 @@ impl MediumPowerState {
         }
     }
 
+    pub fn aligned_data(&mut self) -> &mut [u8] {
+        let offset = self.aligned_offset();
+        &mut self.u8_data[..offset]
+    }
+
     pub fn is_first_page(&self) -> bool {
         !self.has_started_transfer() && self.file_offload_offset == OFFLOAD_HEADERS_LENGTH
     }
 
-    pub fn write_first_packet(&mut self, destination: &mut [u8], lepton_serial: u32) {
-        // put header info
+    pub fn write_first_packet(&mut self, lepton_serial: u32) {
         let timestamp = self
             .current_recording
             .as_ref()
             .expect("Am transferring so must have a rec")
             .timestamp;
-        // put some header info in
         LittleEndian::write_i64(
-            &mut destination[self.file_offload_offset..self.file_offload_offset + 8],
+            &mut self.u8_data[self.file_offload_offset..self.file_offload_offset + 8],
             timestamp,
         );
         self.file_offload_offset += 8;
 
         LittleEndian::write_u32(
-            &mut destination[self.file_offload_offset..self.file_offload_offset + 4],
+            &mut self.u8_data[self.file_offload_offset..self.file_offload_offset + 4],
             lepton_serial,
         );
         self.file_offload_offset += 4;
 
         LittleEndian::write_u32(
-            &mut destination[self.file_offload_offset..self.file_offload_offset + 4],
+            &mut self.u8_data[self.file_offload_offset..self.file_offload_offset + 4],
             FIRMWARE_VERSION,
         );
         self.file_offload_offset += 4;
@@ -1626,22 +1616,20 @@ impl MediumPowerState {
     pub fn read_page(
         &mut self,
         fs: &mut OnboardFlash,
-        destination: &mut [u8],
         events: &mut EventLogger,
         time: &SyncedDateTime,
     ) -> bool {
         if let Some(file_part) = fs.read_file_part_at(self.file_block_index, self.file_page_index) {
-            destination[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
+            self.u8_data[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
                 .copy_from_slice(file_part.part);
             self.file_offload_offset += file_part.part.len();
 
-            // advance index
             self.state = TransferState::Transferring;
 
             self.read_last_part = file_part.is_last_page_for_file;
-            destination[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
+            self.u8_data[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
             let packet_number = self.packet_transfers % 256;
-            destination[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
+            self.u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
             self.advance_file_cursor(fs);
             true
         } else {
@@ -1704,10 +1692,10 @@ impl MediumPowerState {
         self.retry_count <= MAX_RETRIES && self.state == TransferState::TransferFailed
     }
 
-    pub fn calculate_crc(&mut self, data: &[u8]) {
+    pub fn calculate_crc(&mut self) {
         self.crc = self
             .crc_check
-            .checksum(&data[RPI_TRANSFER_HEADER_LENGTH..self.file_offload_offset]);
+            .checksum(&self.u8_data[RPI_TRANSFER_HEADER_LENGTH..self.file_offload_offset]);
     }
 
     fn advance_file_cursor(&mut self, fs: &OnboardFlash) {

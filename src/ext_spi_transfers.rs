@@ -338,7 +338,7 @@ impl ExtSpiTransfers {
         // TODO: We need to timeout here?  What happens when tc2-agent goes away, then comes back?
         let mut time_taken: u64 = (self.timer.get_counter() - self.message_start).to_millis();
 
-        while time_taken < TIMED_MESSAGE_TIMEOUT as u64 && !transfer.is_done() {
+        while time_taken < u64::from(TIMED_MESSAGE_TIMEOUT)23 && !transfer.is_done() {
             self.timer.delay_ms(1);
             time_taken = (self.timer.get_counter() - self.message_start).to_millis();
         }
