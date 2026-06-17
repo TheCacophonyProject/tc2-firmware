@@ -1472,6 +1472,7 @@ pub struct MediumPowerState {
     pub latest_recording: Option<RecordingInfo>,
     // Seems 5 pages is about the right amount of data to not slow down our frame processing too much
     // It may be that it can be higher. If set too high we may start dropping lepton frames as these come in at a rate of 1/9th of a second
+    // If we need to save some memory use, we can use prev_frame_2 for the buffer instead.
     pub u8_data: [u8; OFFLOAD_BUFFER_LENGTH],
 }
 
