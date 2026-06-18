@@ -74,7 +74,7 @@ pub fn real_main() {
             peripherals.I2C1,
             pins.gpio6.reconfigure(),
             pins.gpio7.reconfigure(),
-            400.kHz(),
+            100.kHz(),
             &mut peripherals.RESETS,
             clocks.system_clock.freq(),
         ),
