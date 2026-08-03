@@ -5,7 +5,7 @@
 // Update the version in src/tests/mocks/fake_shared_spi.rs so the tests will pass
 
 #[cfg(not(feature = "erase-flash"))]
-pub const FIRMWARE_VERSION: u32 = 38;
+pub const FIRMWARE_VERSION: u32 = 39;
 // For the erase flash version we set it to zero so when tc2-agent starts it will re-program the the RP2040
 #[cfg(feature = "erase-flash")]
 pub const FIRMWARE_VERSION: u32 = 0;
