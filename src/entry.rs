@@ -74,7 +74,7 @@ pub fn real_main() {
             peripherals.I2C1,
             pins.gpio6.reconfigure(),
             pins.gpio7.reconfigure(),
-            400.kHz(),
+            100.kHz(),
             &mut peripherals.RESETS,
             clocks.system_clock.freq(),
         ),
@@ -161,6 +161,13 @@ pub fn real_main() {
         )
     };
     fs.init(peripherals.SPI1, &mut peripherals.RESETS);
+
+    #[cfg(feature = "erase-flash")]
+    {
+        fs.erase_good_blocks();
+        return;
+    }
+
     watchdog.pause_on_debug(true);
     watchdog.start(8_388_607.micros());
 

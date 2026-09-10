@@ -166,7 +166,7 @@ pub const CAMERA_SEND_LOGGER_EVENT: u8 = 0x8;
 pub const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
 pub const CAMERA_RAW_RECORDING_TRANSFER: u8 = 0xA;
 
-pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 38;
+pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 39;
 
 impl SpiEnabledPeripheral {
     pub fn reset(&mut self) {
