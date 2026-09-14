@@ -509,7 +509,7 @@ impl MainI2C {
                 return Err("weekday enabled");
             }
             info!(
-                "Loading alarm from {} {} {}",
+                "Loading alarm from year: {} month: {} day: {}",
                 now.date_time().year(),
                 now.date_time().month(),
                 day
