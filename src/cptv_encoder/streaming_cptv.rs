@@ -270,7 +270,7 @@ const STATIC_LZ77_DYNAMIC_BLOCK_HEADER: [u8; 46] = [
 ];
 
 pub struct CptvStream<'a> {
-    cptv_header: Cptv2Header,
+    pub cptv_header: Cptv2Header,
     pub cursor: BitCursor,
     crc_table: &'a [u32; 256],
     huffman_table: &'a [HuffmanEntry; 257],

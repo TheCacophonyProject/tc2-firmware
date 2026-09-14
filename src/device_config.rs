@@ -3,7 +3,6 @@ use crate::motion_detector::DetectionMask;
 use crate::onboard_flash::OnboardFlash;
 use crate::sun_times::sun_times;
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
-
 use embedded_io::Read;
 
 #[derive(PartialEq)]
@@ -89,6 +88,8 @@ pub struct DeviceConfigInner {
     end_recording_time: (bool, i32),
     pub is_continuous_recorder: bool,
     pub use_low_power_mode: bool,
+    pub instant_classify: bool,
+
     pub audio_mode: AudioMode,
     pub audio_seed: u32,
     pub crc: u16,
@@ -195,6 +196,9 @@ impl DeviceConfigInner {
             .unwrap();
             let today_sunrise = today_sunrise + Duration::seconds(i64::from(end_offset));
             let today_sunset = today_sunset + Duration::seconds(i64::from(start_offset));
+            let today_sunset = today_sunset.with_second(0).unwrap();
+            let today_sunrise = today_sunrise.with_second(0).unwrap();
+
             let tomorrow_utc = *now_utc + Duration::days(1);
             let (tomorrow_sunrise, tomorrow_sunset) = sun_times(
                 tomorrow_utc,
@@ -205,8 +209,10 @@ impl DeviceConfigInner {
             .unwrap();
             let tomorrow_sunrise = tomorrow_sunrise + Duration::seconds(i64::from(end_offset));
             let tomorrow_sunset = tomorrow_sunset + Duration::seconds(i64::from(start_offset));
+            let tomorrow_sunrise = tomorrow_sunrise.with_second(0).unwrap();
+            let tomorrow_sunset = tomorrow_sunset.with_second(0).unwrap();
 
-            if *now_utc > today_sunset && *now_utc > tomorrow_sunrise {
+            if *now_utc >= today_sunset && *now_utc >= tomorrow_sunrise {
                 let two_days_from_now_utc = *now_utc + Duration::days(2);
                 let (two_days_sunrise, _) = sun_times(
                     two_days_from_now_utc,
@@ -216,9 +222,13 @@ impl DeviceConfigInner {
                 )
                 .unwrap();
                 let two_days_sunrise = two_days_sunrise + Duration::seconds(i64::from(end_offset));
-                (Some(tomorrow_sunset), Some(two_days_sunrise))
-            } else if (*now_utc > today_sunset && *now_utc < tomorrow_sunrise)
-                || (*now_utc < today_sunset && *now_utc > today_sunrise)
+                (
+                    // zero seconds so they compare with the alarms properly ( Alarams only have hours and minutes)
+                    Some(tomorrow_sunset),
+                    two_days_sunrise.with_second(0),
+                )
+            } else if (*now_utc >= today_sunset && *now_utc < tomorrow_sunrise)
+                || (*now_utc < today_sunset && *now_utc >= today_sunrise)
             {
                 (Some(today_sunset), Some(tomorrow_sunrise))
             } else if *now_utc < tomorrow_sunset && *now_utc < today_sunrise {
@@ -347,6 +357,7 @@ impl Default for DeviceConfig {
                 end_recording_time: (false, 0),
                 is_continuous_recorder: false,
                 use_low_power_mode: false,
+                instant_classify: false,
                 audio_mode: AudioMode::Disabled,
                 audio_seed: 0,
                 crc: 0,
@@ -413,6 +424,7 @@ impl DeviceConfig {
         };
         let device_name = SmallString::new(device_name);
         let audio_seed = cursor.read_u32();
+        let instant_classify = cursor.read_bool();
 
         Some((
             DeviceConfigInner {
@@ -426,6 +438,7 @@ impl DeviceConfig {
                 end_recording_time,
                 is_continuous_recorder,
                 use_low_power_mode,
+                instant_classify,
                 audio_mode,
                 audio_seed,
                 crc,
@@ -510,6 +523,12 @@ impl DeviceConfig {
         } else {
             Err(())
         }
+    }
+
+    pub fn use_medium_power(&self) -> bool {
+        self.config_inner.use_low_power_mode
+            && self.config_inner.audio_mode != AudioMode::AudioOnly
+            && self.config_inner.instant_classify
     }
 
     pub fn use_low_power_mode(&self) -> bool {

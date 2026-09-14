@@ -508,12 +508,21 @@ impl MainI2C {
             if data[3] & 0b1000_0000 == 0 {
                 return Err("weekday enabled");
             }
-            let mut naive_date = NaiveDate::from_ymd_opt(
+            info!(
+                "Loading alarm from year: {} month: {} day: {}",
+                now.date_time().year(),
+                now.date_time().month(),
+                day
+            );
+            let naive_date = NaiveDate::from_ymd_opt(
                 now.date_time().year(),
                 now.date_time().month(),
                 u32::from(day),
-            )
-            .unwrap();
+            );
+            if naive_date.is_none() {
+                return Err("Couldnt load date");
+            }
+            let mut naive_date = naive_date.unwrap();
             let naive_time =
                 NaiveTime::from_hms_opt(u32::from(hours), u32::from(minutes), 0).unwrap();
             if alarm_active_but_already_triggered {
@@ -821,7 +830,7 @@ impl MainI2C {
         self.set_wakeup_alarm_days_hours_mins(wake_day, wake_hour, wake_min, now, mode)
     }
 
-    pub fn set_wakeup_alarm_days_hours_mins(
+    fn set_wakeup_alarm_days_hours_mins(
         &mut self,
         wake_day: u8,
         wake_hour: u8,
