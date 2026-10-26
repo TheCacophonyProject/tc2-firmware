@@ -508,25 +508,27 @@ impl MainI2C {
             if data[3] & 0b1000_0000 == 0 {
                 return Err("weekday enabled");
             }
-            let mut naive_date = NaiveDate::from_ymd_opt(
-                now.date_time().year(),
-                now.date_time().month(),
-                u32::from(day),
-            )
-            .unwrap();
+            // The alarm has no month, so work out which month it's in before setting the day:
+            // the alarm day may not exist in the current month (e.g. the 31st read on 1 April).
+            let mut alarm_month =
+                NaiveDate::from_ymd_opt(now.date_time().year(), now.date_time().month(), 1)
+                    .unwrap();
             let naive_time =
                 NaiveTime::from_hms_opt(u32::from(hours), u32::from(minutes), 0).unwrap();
             if alarm_active_but_already_triggered {
-                // Time is in the past, make sure we get the month correct
+                // Alarm has fired, so it's in the past: if its day is after today, it was last month
                 if now.date_time().day() < u32::from(day) {
-                    naive_date = naive_date.checked_sub_months(Months::new(1)).unwrap();
+                    alarm_month = alarm_month.checked_sub_months(Months::new(1)).unwrap();
                 }
             } else {
                 // Time is in the future, check if day < current day, and if so, increment month
                 if u32::from(day) < now.date_time().day() {
-                    naive_date = naive_date.checked_add_months(Months::new(1)).unwrap();
+                    alarm_month = alarm_month.checked_add_months(Months::new(1)).unwrap();
                 }
             }
+            let naive_date = alarm_month
+                .with_day(u32::from(day))
+                .ok_or("alarm day not in month")?;
             let utc_datetime = NaiveDateTime::new(naive_date, naive_time).and_utc();
             Ok(ScheduledAlarmTime {
                 time: utc_datetime,
