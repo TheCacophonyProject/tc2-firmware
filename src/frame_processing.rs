@@ -599,7 +599,8 @@ pub fn thermal_motion_task(
         } else {
             // if was offloading previous need zero the frame here
             if medium_power_state.state == TransferState::WasOffloading {
-                if test_recording_in_progress.is_some() {
+                // We may have finished transferring an earlier file while still recording
+                if test_recording_in_progress.is_some() && cptv_stream.is_none() {
                     test_recording_in_progress.take();
                     // Finished requested test recording, restart now.
                     if let Err(e) = i2c.tc2_agent_clear_mode_flags() {
@@ -1005,13 +1006,14 @@ pub fn thermal_motion_task(
             // they are left on flash to be offloaded normally.
             let should_stream_recording =
                 test_recording_in_progress.is_none() && bk.status_recording.is_not_in_progress();
-            if medium_power_mode && should_stream_recording {
+            if medium_power_mode {
                 medium_power_state.new_recording(
                     cptv_streamer.starting_block_index,
                     cptv_streamer.cptv_header.timestamp,
+                    should_stream_recording,
                 );
 
-                if !medium_power_state.is_transferring() {
+                if should_stream_recording && !medium_power_state.is_transferring() {
                     medium_power_state.start_transfer(
                         cptv_streamer.starting_block_index,
                         cptv_streamer.cptv_header.timestamp,
@@ -1467,10 +1469,15 @@ pub enum TransferState {
 }
 
 const MAX_RETRIES: i32 = 270;
+// A page failing its crc check gets read a second time, to tell a bad read from bad data on flash
+const PAGE_READ_ATTEMPTS: u8 = 2;
 
 pub struct RecordingInfo {
     pub timestamp: i64,
     pub starting_block: u16,
+    // Test and status recordings are tracked, so we know where the previous file ends, but they
+    // aren't streamed to the pi.
+    pub should_stream: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1512,10 +1519,11 @@ impl MediumPowerState {
         }
     }
 
-    pub fn new_recording(&mut self, block_index: u16, timestamp: i64) {
+    pub fn new_recording(&mut self, block_index: u16, timestamp: i64, should_stream: bool) {
         self.latest_recording = Some(RecordingInfo {
             timestamp,
             starting_block: block_index,
+            should_stream,
         });
     }
 
@@ -1676,38 +1684,55 @@ impl MediumPowerState {
         events: &mut EventLogger,
         time: &SyncedDateTime,
     ) -> bool {
-        if let Some(file_part) =
-            fs.read_file_part_at(self.file_block_index, self.file_page_index, events, time)
-        {
-            self.u8_data[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
-                .copy_from_slice(file_part.part);
-            self.file_offload_offset += file_part.part.len();
+        let (block, page) = (self.file_block_index, self.file_page_index);
+        for attempt in 1..=PAGE_READ_ATTEMPTS {
+            let Some(file_part) = fs.read_file_part_at(block, page, events, time) else {
+                break;
+            };
+            // The stored crc was calculated before writing to flash, so a mismatch that goes away
+            // on a re-read was a bad read, and one that doesn't means the data on flash is wrong.
+            // If this is slowing down the RP2040 too much it will have to be removed
+            if self.crc_check.checksum(file_part.part) == file_part.crc16 {
+                if attempt > 1 {
+                    warn!("Page {}:{} read correctly after crc mismatch", block, page);
+                }
+                self.u8_data
+                    [self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
+                    .copy_from_slice(file_part.part);
+                self.file_offload_offset += file_part.part.len();
 
-            self.state = TransferState::Transferring;
+                self.state = TransferState::Transferring;
 
-            self.read_last_part = file_part.is_last_page_for_file;
-            self.u8_data[RPI_TRANSFER_HEADER_LENGTH] = u8::from(file_part.is_last_page_for_file);
-            let packet_number = self.packet_transfers % 256;
-            self.u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
-            self.advance_file_cursor(fs);
-            true
-        } else {
-            //probably should error here
-            //possibly nothing got written as that failed too though
-            info!(
-                "Could not read data at {}:{} advancing cursor",
-                self.file_block_index, self.file_page_index
-            );
-
-            self.advance_file_cursor(fs);
-
-            false
+                self.read_last_part = file_part.is_last_page_for_file;
+                self.u8_data[RPI_TRANSFER_HEADER_LENGTH] =
+                    u8::from(file_part.is_last_page_for_file);
+                let packet_number = self.packet_transfers % 256;
+                self.u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = packet_number as u8;
+                self.advance_file_cursor(fs);
+                return true;
+            }
+            warn!("Crc mismatch at {}:{}, attempt {}", block, page, attempt);
+            if attempt == PAGE_READ_ATTEMPTS {
+                events.log(
+                    Event::UnrecoverableDataCorruption((block, u16::from(page))),
+                    time,
+                    fs,
+                );
+            }
         }
+        //probably should error here
+        //possibly nothing got written as that failed too though
+        info!("Could not read data at {}:{} advancing cursor", block, page);
+
+        self.advance_file_cursor(fs);
+
+        false
     }
 
     pub fn maybe_offload_next(&mut self) {
         if self.state == TransferState::TransferFinished {
             if let Some(ref rec) = self.latest_recording
+                && rec.should_stream
                 && rec.starting_block >= self.file_block_index
                 // latest is still the file we just sent if nothing newer has been recorded
                 && self
@@ -1737,6 +1762,7 @@ impl MediumPowerState {
         self.current_recording = Some(RecordingInfo {
             timestamp,
             starting_block: block_index,
+            should_stream: true,
         });
         info!("Starting transfer at {}", block_index);
     }
