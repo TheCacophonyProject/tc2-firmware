@@ -383,7 +383,7 @@ pub fn maybe_offload_files_and_events_on_startup(
             offload_wake_reason = WakeReason::AudioTooFull;
         }
     }
-    if events.is_nearly_full() {
+    if events.is_nearly_full(fs) {
         should_offload = true;
         offload_wake_reason = WakeReason::EventsTooFull;
     }
@@ -483,7 +483,7 @@ pub fn maybe_offload_files_and_events_on_startup(
             }
         } else if prioritise_frame_preview {
             // Just offload the bare minimum of files to free up space, and all events if needed.
-            if events.is_nearly_full() {
+            if events.is_nearly_full(fs) {
                 maybe_offload_events(pi_spi, resets, dma, events, fs, time, watchdog);
             }
             let mut is_too_full = is_too_full_to_record_in_current_mode;

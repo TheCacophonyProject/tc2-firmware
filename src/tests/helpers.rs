@@ -447,15 +447,14 @@ fn get_bad_blocks(flash_storage: &Vec<StorageBlock>) -> Vec<u16> {
 fn address_for_event_index(
     event_index: EventIndex,
     flash_storage: &Vec<StorageBlock>,
-) -> (BlockIndex, PageIndex) {
+) -> Option<(BlockIndex, PageIndex)> {
     let bad_blocks = get_bad_blocks(flash_storage);
-    let mut block =
-        crate::event_logger::FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
-    while bad_blocks.contains(&block) {
-        block += 1;
-    }
+    let block = (crate::event_logger::FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX
+        ..crate::event_logger::FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX)
+        .filter(|block| !bad_blocks.contains(block))
+        .nth(usize::from(event_index / 256))?;
     let page = ((event_index % 256) / 4) as PageIndex;
-    (block, page)
+    Some((block, page))
 }
 
 fn get_event_at_index(
@@ -463,19 +462,15 @@ fn get_event_at_index(
     event_index: EventIndex,
 ) -> Option<[u8; crate::event_logger::EVENT_LENGTH]> {
     // 4 partial writes per page, 64 pages per block.
-    let (block, page) = address_for_event_index(event_index, flash_storage);
+    let (block, page) = address_for_event_index(event_index, flash_storage)?;
     // Events need to start at each of the User Main data 0..=3 blocks, otherwise ECC breaks.
     let page_offset = ((event_index % 4) * 512) as usize;
-    if block >= crate::event_logger::FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
-        None
-    } else {
-        let mut event = [0u8; NUM_EVENT_BYTES];
-        event.copy_from_slice(
-            &flash_storage[block as usize].inner[page as usize].inner
-                [page_offset..page_offset + NUM_EVENT_BYTES],
-        );
-        if event[0] == 0xff { None } else { Some(event) }
-    }
+    let mut event = [0u8; NUM_EVENT_BYTES];
+    event.copy_from_slice(
+        &flash_storage[block as usize].inner[page as usize].inner
+            [page_offset..page_offset + NUM_EVENT_BYTES],
+    );
+    if event[0] == 0xff { None } else { Some(event) }
 }
 
 pub fn num_medium_power_recordings_offloaded(files_offloaded: &Vec<FileOffload>) -> usize {
