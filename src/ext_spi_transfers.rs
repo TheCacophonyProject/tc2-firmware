@@ -326,6 +326,26 @@ impl ExtSpiTransfers {
         }
     }
 
+    /// Abort a transfer, keeping hold of the DMA channel and PIO tx so that we can send again.
+    pub fn abort_message(&mut self, transfer: PioDmaTransfer) {
+        #[cfg(feature = "std")]
+        use crate::re_exports::bsp::hal::dma::single_buffer::TransferExt;
+        let (r_ch0, _r_buf, tx) = transfer.abort();
+        self.dma_channel_0 = Some(r_ch0);
+        self.pio_tx = Some(tx);
+        self.clear_pio_output();
+    }
+
+    // Stops leftover words from an aborted transfer going out ahead of the next message.
+    // Needs to be called after the DMA is stopped, otherwise it will just refill the FIFO.
+    fn clear_pio_output(&mut self) {
+        if let Some((sm, _rx)) = self.state_machine_0_running.as_mut() {
+            sm.clear_fifos();
+            // Clearing the FIFO doesn't touch a word already in the output shift register
+            sm.restart();
+        }
+    }
+
     pub fn end_message_timed(
         &mut self,
         dma_peripheral: &DMA,
@@ -347,6 +367,7 @@ impl ExtSpiTransfers {
             let (r_ch0, _r_buf, tx) = transfer.abort();
             self.dma_channel_0 = Some(r_ch0);
             self.pio_tx = Some(tx);
+            self.clear_pio_output();
             return true;
         }
         // Wait for the DMA transfer to finish

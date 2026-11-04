@@ -919,6 +919,10 @@ pub mod pio {
     pub struct StateMachine<A, B>(A, B);
 
     impl<A> StateMachine<A, Running> {
+        pub fn clear_fifos(&mut self) {}
+
+        pub fn restart(&mut self) {}
+
         pub fn uninit(
             self,
             _rx: Rx<A>,

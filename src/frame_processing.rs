@@ -907,8 +907,8 @@ pub fn thermal_motion_task(
             && !medium_power_state.has_started_transfer()
         {
             // trying to transfer old recording but have not started yet, just abort and start transferring the new one
-            if let Some((transfer, transfer_end_address, transfer_start_address)) = transfer {
-                transfer.abort();
+            if let Some((transfer, _, _)) = transfer {
+                pi_spi.abort_message(transfer);
             }
             info!("Missed classification ending all previous transfers");
             events.log(Event::MissedClassification, &time, &mut fs);
