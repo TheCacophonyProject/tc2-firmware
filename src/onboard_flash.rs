@@ -672,12 +672,14 @@ impl OnboardFlash {
 
             // Factory set bad block markers are on the first page of each block:
             let mut part_of_bad_block = false;
+            let mut page_0_is_used = false;
             if self.read_page(block_index, 0).is_ok() {
                 self.read_page_metadata(block_index);
                 self.wait_for_all_ready();
                 if self.current_page.is_part_of_bad_block() {
                     part_of_bad_block = true;
                 }
+                page_0_is_used = self.current_page.page_is_used();
             } else {
                 // If we failed to read the first page of the block, it's probably a bad block.
                 part_of_bad_block = true;
@@ -697,6 +699,15 @@ impl OnboardFlash {
                 if self.read_page(block_index, 1).is_ok() {
                     self.read_page_metadata(block_index);
                     self.wait_for_all_ready();
+                    // A file can end on page 0 of a block, leaving page 1 blank. That block is
+                    // still in use, and needs to be erased along with the file.
+                    if page_0_is_used
+                        && !self.current_page.page_is_used()
+                        && self.read_page(block_index, 0).is_ok()
+                    {
+                        self.read_page_metadata(block_index);
+                        self.wait_for_all_ready();
+                    }
                     if block_index < NUM_RECORDING_BLOCKS {
                         last_good_block = Some(block_index);
 
@@ -1077,6 +1088,8 @@ impl OnboardFlash {
         &mut self,
         block_index: u16,
         page_index: u8,
+        events: &mut EventLogger,
+        time: &SyncedDateTime,
     ) -> Option<FilePartAt<'_>> {
         if let Ok(()) = self.read_page(block_index, page_index) {
             self.read_page_from_cache(block_index);
@@ -1098,9 +1111,15 @@ impl OnboardFlash {
                     timestamp,
                 })
             } else {
+                // Page is blank, which isn't corruption
                 None
             }
         } else {
+            events.log(
+                Event::UnrecoverableDataCorruption((block_index, u16::from(page_index))),
+                time,
+                self,
+            );
             None
         }
     }

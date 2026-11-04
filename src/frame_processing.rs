@@ -556,6 +556,19 @@ pub fn thermal_motion_task(
                     }
                     medium_power_state.read_page(&mut fs, &mut events, &time);
                 }
+                // If we've reached the start of the next recording, or the end of the flash data
+                // with nothing more being written, without reading the last page of this file,
+                // that page must have failed to read.
+                if !medium_power_state.read_last_part
+                    && (medium_power_state.has_reached_next_recording()
+                        || (cptv_stream.is_none() && medium_power_state.has_reached_writer(&fs)))
+                {
+                    warn!(
+                        "Never read last page of file, ending transfer at {}:{}",
+                        medium_power_state.file_block_index, medium_power_state.file_page_index,
+                    );
+                    medium_power_state.end_incomplete_file();
+                }
                 if medium_power_state.has_data() {
                     info!(
                         "Read data up to {}:{} fs current is {}:{} state: {:?} read last {}",
@@ -1512,7 +1525,9 @@ impl MediumPowerState {
     }
 
     pub fn has_data(&self) -> bool {
-        self.is_transferring() && self.file_offload_offset > OFFLOAD_HEADERS_LENGTH
+        // The last part can be empty if the end of the file couldn't be read
+        self.is_transferring()
+            && (self.file_offload_offset > OFFLOAD_HEADERS_LENGTH || self.read_last_part)
     }
     pub fn latest_recording_aborted(&mut self, start_block_index: u16) -> bool {
         if self
@@ -1543,7 +1558,8 @@ impl MediumPowerState {
     // calculate how many pages away from the current block & page of fs we are
     pub fn update_pages_away(&mut self, fs: &OnboardFlash) {
         self.pages_away = if self.file_block_index == fs.current_block_index {
-            fs.current_page_index - self.file_page_index
+            // We can be ahead of fs if the file we're reading was erased
+            fs.current_page_index.saturating_sub(self.file_page_index)
         } else {
             64 - self.file_page_index + fs.current_page_index
         }
@@ -1558,8 +1574,44 @@ impl MediumPowerState {
             && self.file_offload_offset + FLASH_USER_PAGE_SIZE
                 <= (OFFLOAD_BUFFER_LENGTH + OFFLOAD_HEADERS_LENGTH)
             && self.pages_away > 0
-            && (self.file_block_index != fs.current_block_index
-                || self.file_page_index < fs.current_page_index)
+            && !self.has_reached_writer(fs)
+            && !self.has_reached_next_recording()
+    }
+
+    // True if our read cursor has run past the end of the file being transferred, into the
+    // recording made after it. Recordings always start on a new block.
+    pub fn has_reached_next_recording(&self) -> bool {
+        if let Some(current) = &self.current_recording
+            && let Some(latest) = &self.latest_recording
+        {
+            latest.starting_block != current.starting_block
+                && self.file_block_index >= latest.starting_block
+        } else {
+            false
+        }
+    }
+
+    // True if our read cursor is at, or ahead of, the next location fs will write to
+    pub fn has_reached_writer(&self, fs: &OnboardFlash) -> bool {
+        (self.file_block_index, self.file_page_index)
+            >= (fs.current_block_index, fs.current_page_index)
+    }
+
+    // Tell the pi this file is over when we couldn't read its last page
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn end_incomplete_file(&mut self) {
+        // tc2-agent expects a first packet to contain file data, so with nothing to send skip this
+        // file and move on to the next recording if there is one
+        if !self.has_started_transfer() && self.file_offload_offset <= OFFLOAD_HEADERS_LENGTH + 16 {
+            self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
+            self.state = TransferState::TransferFinished;
+            self.maybe_offload_next();
+            return;
+        }
+        self.read_last_part = true;
+        self.u8_data[RPI_TRANSFER_HEADER_LENGTH] = 1;
+        self.u8_data[RPI_TRANSFER_HEADER_LENGTH + 1] = (self.packet_transfers % 256) as u8;
     }
     pub fn part_transferred(&mut self) {
         self.retry_count = 0;
@@ -1624,7 +1676,9 @@ impl MediumPowerState {
         events: &mut EventLogger,
         time: &SyncedDateTime,
     ) -> bool {
-        if let Some(file_part) = fs.read_file_part_at(self.file_block_index, self.file_page_index) {
+        if let Some(file_part) =
+            fs.read_file_part_at(self.file_block_index, self.file_page_index, events, time)
+        {
             self.u8_data[self.file_offload_offset..self.file_offload_offset + file_part.part.len()]
                 .copy_from_slice(file_part.part);
             self.file_offload_offset += file_part.part.len();
@@ -1644,14 +1698,6 @@ impl MediumPowerState {
                 "Could not read data at {}:{} advancing cursor",
                 self.file_block_index, self.file_page_index
             );
-            events.log(
-                Event::UnrecoverableDataCorruption((
-                    self.file_block_index,
-                    u16::from(self.file_page_index),
-                )),
-                time,
-                fs,
-            );
 
             self.advance_file_cursor(fs);
 
@@ -1663,6 +1709,11 @@ impl MediumPowerState {
         if self.state == TransferState::TransferFinished {
             if let Some(ref rec) = self.latest_recording
                 && rec.starting_block >= self.file_block_index
+                // latest is still the file we just sent if nothing newer has been recorded
+                && self
+                    .current_recording
+                    .as_ref()
+                    .is_none_or(|current| current.starting_block != rec.starting_block)
             {
                 info!("Need to offload next file");
                 let block = rec.starting_block;
