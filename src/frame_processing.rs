@@ -886,6 +886,9 @@ pub fn thermal_motion_task(
         }
         if should_start_new_recording
             && medium_power_mode
+            // test and status recordings aren't streamed, so don't abort a pending transfer for them
+            && test_recording_in_progress.is_none()
+            && bk.status_recording.is_not_in_progress()
             && medium_power_state.is_transferring()
             && !medium_power_state.has_started_transfer()
         {
@@ -985,16 +988,17 @@ pub fn thermal_motion_task(
             events.log(Event::StartedRecording, &time, &mut fs);
             sio.fifo.write(Core0Task::FrameProcessingComplete.into());
 
-            if medium_power_mode {
+            // Test recordings and startup/shutdown status recordings are never streamed to the pi,
+            // they are left on flash to be offloaded normally.
+            let should_stream_recording =
+                test_recording_in_progress.is_none() && bk.status_recording.is_not_in_progress();
+            if medium_power_mode && should_stream_recording {
                 medium_power_state.new_recording(
                     cptv_streamer.starting_block_index,
                     cptv_streamer.cptv_header.timestamp,
                 );
 
-                if !(medium_power_state.is_transferring()
-                    || is_shutdown_status
-                    || is_startup_status)
-                {
+                if !medium_power_state.is_transferring() {
                     medium_power_state.start_transfer(
                         cptv_streamer.starting_block_index,
                         cptv_streamer.cptv_header.timestamp,
