@@ -36,6 +36,20 @@ pub struct StoragePage {
 }
 
 impl StoragePage {
+    /// NAND programming can only clear bits, and only an erase can set them again. Programming
+    /// a byte that's already been programmed leaves a mix of the two, and breaks the page's ECC.
+    pub fn program(&mut self, offset: usize, bytes: &[u8], location: (BlockIndex, PageIndex)) {
+        let destination = &mut self.inner[offset..offset + bytes.len()];
+        for (position, (old, new)) in destination.iter_mut().zip(bytes).enumerate() {
+            assert!(
+                *old == 0xff || *new == 0xff,
+                "Double programmed {location:?} at byte {}",
+                offset + position
+            );
+            *old &= *new;
+        }
+    }
+
     fn cache_data(&self) -> &[u8] {
         &self.inner[..]
     }
@@ -164,8 +178,9 @@ pub const CAMERA_BEGIN_AND_END_FILE_TRANSFER: u8 = 0x6;
 pub const CAMERA_GET_MOTION_DETECTION_MASK: u8 = 0x7;
 pub const CAMERA_SEND_LOGGER_EVENT: u8 = 0x8;
 pub const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
+pub const CAMERA_RAW_RECORDING_TRANSFER: u8 = 0xA;
 
-pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 40;
+pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 41;
 
 impl SpiEnabledPeripheral {
     pub fn reset(&mut self) {
@@ -218,8 +233,11 @@ impl SpiEnabledPeripheral {
                 TEST_SIM_STATE.with(|s| {
                     s.borrow_mut().flash_backing_storage[block_index as usize].inner
                         [page_index as usize]
-                        .inner[self.last_page_offset..self.last_page_offset + self.buffer.len()]
-                        .copy_from_slice(&self.buffer);
+                        .program(
+                            self.last_page_offset,
+                            &self.buffer,
+                            (block_index, page_index),
+                        );
                 });
             }
             PAGE_READ => {
@@ -338,6 +356,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
     let crc_from_remote_inv = LittleEndian::read_u16(&header_slice[14..16]);
     let crc_from_remote_inv_dup = LittleEndian::read_u16(&header_slice[16..=17]);
     let transfer_type_check = transfer_type == transfer_type_dup;
+    let header_length = 18;
     let device_config = TEST_SIM_STATE.with(|s| {
         s.borrow()
             .device_config
@@ -387,7 +406,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         });
         // spi.write(&return_payload_buf).unwrap();
     }
-    if !(CAMERA_CONNECT_INFO..=CAMERA_STARTUP_HANDSHAKE).contains(&transfer_type) {
+    if !(CAMERA_CONNECT_INFO..=CAMERA_RAW_RECORDING_TRANSFER).contains(&transfer_type) {
         // Unknown transfer type
         warn!("rpi received unknown message type");
         TEST_SIM_STATE.with(|s| {
@@ -397,8 +416,45 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
         });
         // spi.write(&return_payload_buf).unwrap();
     }
+    if transfer_type == CAMERA_RAW_FRAME_TRANSFER {
+    } else if transfer_type == CAMERA_RAW_RECORDING_TRANSFER {
+        // make sure num bytes is even, this is more for on tc2-agent side where we are reading u16 values which requires an even number of bytes
+        // the last package can be an uneven number of bytes so just pad with 0s
+        num_bytes = (num_bytes + 1) & !1;
+        let is_last_part = bytes[header_length] == 1;
+        let packet_num = bytes[header_length + 1];
+        let frame_data: &[u8] = bytemuck::cast_slice(&bytes[header_length + 2..num_bytes]);
 
-    if transfer_type != CAMERA_RAW_FRAME_TRANSFER {
+        TEST_SIM_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+
+            if state.file_download.is_none() {
+                let timestamp = LittleEndian::read_i64(&frame_data[..8]);
+                let mut file = Vec::with_capacity(50_000_000);
+                file.extend_from_slice(&frame_data[16..]);
+                state.file_download = Some(file);
+                state.medium_power_recording_start =
+                    DateTime::from_timestamp_micros(timestamp).unwrap_or_default();
+            } else if let Some(file) = state.file_download.as_mut() {
+                file.extend_from_slice(frame_data);
+            }
+            state.file_part_count = packet_num as usize;
+
+            if is_last_part {
+                if let Some(file) = state.file_download.take() {
+                    let current_time = state.current_time;
+                    let recording_time = state.medium_power_recording_start;
+
+                    state.files_offloaded.push(FileOffload {
+                        size: file.len(),
+                        recording_time,
+                        file_type: FileType::CptvMediumPower,
+                        offloaded_at: current_time,
+                    });
+                }
+            }
+        });
+    } else {
         let chunk = &bytes[RPI_TRANSFER_HEADER_LENGTH..RPI_TRANSFER_HEADER_LENGTH + num_bytes];
         // Write back the crc we calculated.
         let crc = crc_check.checksum(chunk);

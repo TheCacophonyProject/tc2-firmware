@@ -309,6 +309,16 @@ pub struct FilePartReturn<'a> {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
+pub struct FilePartAt<'a> {
+    pub part: &'a [u8],
+    pub crc16: u16,
+    pub block: BlockIndex,
+    pub page: PageIndex,
+    pub is_last_page_for_file: bool,
+    pub metadata: FileType,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
 pub type SpiEnabledPeripheral = Spi<
     Enabled,
     SPI1,
@@ -662,12 +672,14 @@ impl OnboardFlash {
 
             // Factory set bad block markers are on the first page of each block:
             let mut part_of_bad_block = false;
+            let mut page_0_is_used = false;
             if self.read_page(block_index, 0).is_ok() {
                 self.read_page_metadata(block_index);
                 self.wait_for_all_ready();
                 if self.current_page.is_part_of_bad_block() {
                     part_of_bad_block = true;
                 }
+                page_0_is_used = self.current_page.page_is_used();
             } else {
                 // If we failed to read the first page of the block, it's probably a bad block.
                 part_of_bad_block = true;
@@ -687,6 +699,15 @@ impl OnboardFlash {
                 if self.read_page(block_index, 1).is_ok() {
                     self.read_page_metadata(block_index);
                     self.wait_for_all_ready();
+                    // A file can end on page 0 of a block, leaving page 1 blank. That block is
+                    // still in use, and needs to be erased along with the file.
+                    if page_0_is_used
+                        && !self.current_page.page_is_used()
+                        && self.read_page(block_index, 0).is_ok()
+                    {
+                        self.read_page_metadata(block_index);
+                        self.wait_for_all_ready();
+                    }
                     if block_index < NUM_RECORDING_BLOCKS {
                         last_good_block = Some(block_index);
 
@@ -1059,6 +1080,46 @@ impl OnboardFlash {
 
             Some(spi)
         } else {
+            None
+        }
+    }
+
+    pub fn read_file_part_at(
+        &mut self,
+        block_index: u16,
+        page_index: u8,
+        events: &mut EventLogger,
+        time: &SyncedDateTime,
+    ) -> Option<FilePartAt<'_>> {
+        if let Ok(()) = self.read_page(block_index, page_index) {
+            self.read_page_from_cache(block_index);
+            if self.current_page.page_is_used() {
+                let length = self.current_page.page_bytes_used();
+                let crc16 = self.current_page.page_crc();
+                let is_last_page_for_file = self.current_page.is_last_page_for_file();
+
+                let timestamp = self.current_page.file_written_time();
+                let metadata = self.current_page.file_type();
+
+                Some(FilePartAt {
+                    part: &self.current_page.user_data()[0..length],
+                    crc16,
+                    block: block_index,
+                    page: page_index,
+                    is_last_page_for_file,
+                    metadata,
+                    timestamp,
+                })
+            } else {
+                // Page is blank, which isn't corruption
+                None
+            }
+        } else {
+            events.log(
+                Event::UnrecoverableDataCorruption((block_index, u16::from(page_index))),
+                time,
+                self,
+            );
             None
         }
     }
@@ -1501,7 +1562,6 @@ impl OnboardFlash {
         }
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
-
         self.write_enable();
         assert!(self.write_enabled());
         // Bytes will always be a full page + metadata + command info at the start

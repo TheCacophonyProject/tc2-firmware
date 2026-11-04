@@ -36,6 +36,7 @@ pub fn simulate_camera_with_config(
         if state.used {
             *state = SimState {
                 used: false,
+                powering_on_time: Default::default(),
                 current_time: Default::default(),
                 last_frame: None,
                 frame_num: 0,
@@ -65,6 +66,7 @@ pub fn simulate_camera_with_config(
                 file_download: None,
                 file_part_count: 0,
                 file_download_start: Instant::now(),
+                medium_power_recording_start: Default::default(),
                 fake_pi_recording_state: RecordingState::new(),
                 rosc_drive_iterator: 0,
                 files_offloaded: vec![],
@@ -81,6 +83,7 @@ pub fn simulate_camera_with_config(
                 restart_num: 0,
                 offloads_fail_on_restart_iteration: None,
                 audio_recording_fails_on_restart_iteration: None,
+                dma_read_address: 0,
             }
         }
         state.used = true;
@@ -162,6 +165,7 @@ pub struct ConfigBuilder {
     audio_mode: AudioMode,
     location: Option<(f64, f64)>,
     recording_window: Option<(String, String)>,
+    instant_classify: bool,
 }
 
 impl ConfigBuilder {
@@ -171,11 +175,17 @@ impl ConfigBuilder {
             audio_mode: AudioMode::Disabled,
             location: None,
             recording_window: None,
+            instant_classify: false,
         }
     }
 
     pub(crate) fn low_power_mode(mut self) -> Self {
         self.low_power_mode = true;
+        self
+    }
+
+    pub(crate) fn instant_classify(mut self) -> Self {
+        self.instant_classify = true;
         self
     }
 
@@ -233,6 +243,7 @@ impl ConfigBuilder {
         let location = self.location.unwrap_or((-43.5, 172.64));
         let latitude = location.0;
         let longitude = location.1;
+        let instant_classify = self.instant_classify;
         let use_low_power_mode = self.low_power_mode;
         let audio_mode = format!("{:?}", self.audio_mode);
         let recording_window = self
@@ -266,6 +277,7 @@ longitude = {longitude}
 
 [thermal-recorder]
 use-low-power-mode = {use_low_power_mode}
+instant-classify = {instant_classify}
 
 {windows}
 
@@ -435,15 +447,14 @@ fn get_bad_blocks(flash_storage: &Vec<StorageBlock>) -> Vec<u16> {
 fn address_for_event_index(
     event_index: EventIndex,
     flash_storage: &Vec<StorageBlock>,
-) -> (BlockIndex, PageIndex) {
+) -> Option<(BlockIndex, PageIndex)> {
     let bad_blocks = get_bad_blocks(flash_storage);
-    let mut block =
-        crate::event_logger::FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
-    while bad_blocks.contains(&block) {
-        block += 1;
-    }
+    let block = (crate::event_logger::FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX
+        ..crate::event_logger::FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX)
+        .filter(|block| !bad_blocks.contains(block))
+        .nth(usize::from(event_index / 256))?;
     let page = ((event_index % 256) / 4) as PageIndex;
-    (block, page)
+    Some((block, page))
 }
 
 fn get_event_at_index(
@@ -451,19 +462,22 @@ fn get_event_at_index(
     event_index: EventIndex,
 ) -> Option<[u8; crate::event_logger::EVENT_LENGTH]> {
     // 4 partial writes per page, 64 pages per block.
-    let (block, page) = address_for_event_index(event_index, flash_storage);
+    let (block, page) = address_for_event_index(event_index, flash_storage)?;
     // Events need to start at each of the User Main data 0..=3 blocks, otherwise ECC breaks.
     let page_offset = ((event_index % 4) * 512) as usize;
-    if block >= crate::event_logger::FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
-        None
-    } else {
-        let mut event = [0u8; NUM_EVENT_BYTES];
-        event.copy_from_slice(
-            &flash_storage[block as usize].inner[page as usize].inner
-                [page_offset..page_offset + NUM_EVENT_BYTES],
-        );
-        if event[0] == 0xff { None } else { Some(event) }
-    }
+    let mut event = [0u8; NUM_EVENT_BYTES];
+    event.copy_from_slice(
+        &flash_storage[block as usize].inner[page as usize].inner
+            [page_offset..page_offset + NUM_EVENT_BYTES],
+    );
+    if event[0] == 0xff { None } else { Some(event) }
+}
+
+pub fn num_medium_power_recordings_offloaded(files_offloaded: &Vec<FileOffload>) -> usize {
+    files_offloaded
+        .iter()
+        .filter(|file| file.file_type == FileType::CptvMediumPower)
+        .count()
 }
 
 pub fn num_thermal_recordings_offloaded(files_offloaded: &Vec<FileOffload>) -> usize {

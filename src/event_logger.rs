@@ -172,6 +172,8 @@ pub enum Event {
     RtcVoltageLowError,
     Rp2040GotNewConfig(NewConfigInfo),
     UnrecoverableDataCorruption((u16, u16)),
+    MissedClassification,
+    CouldNotTransfer,
 }
 
 #[cfg(feature = "std")]
@@ -222,6 +224,8 @@ impl From<Event> for u16 {
             SetThermalAlarm(_) => 34,
             Rp2040GotNewConfig(_) => 35,
             UnrecoverableDataCorruption(_) => 36,
+            MissedClassification => 37,
+            CouldNotTransfer => 38,
         }
     }
 }
@@ -294,6 +298,8 @@ impl TryFrom<&[u8; EVENT_LENGTH]> for LoggerEvent {
                 LittleEndian::read_u16(&payload[0..=1]),
                 LittleEndian::read_u16(&payload[2..=3]),
             ))),
+            37 => Ok(MissedClassification),
+            38 => Ok(CouldNotTransfer),
             _ => Err(()),
         }?;
         Ok(LoggerEvent { timestamp, kind })
@@ -376,6 +382,7 @@ impl LoggerEvent {
     }
 }
 pub const MAX_EVENTS_IN_LOGGER: u16 = 1280;
+const EVENTS_PER_BLOCK: u16 = 256;
 const EVENT_CODE_LENGTH: usize = 2;
 const EVENT_TIMESTAMP_LENGTH: usize = 8;
 const EVENT_PAYLOAD_LENGTH: usize = 8;
@@ -469,12 +476,10 @@ impl EventLogger {
         fs: &mut OnboardFlash,
     ) -> Option<[u8; EVENT_LENGTH]> {
         // 4 partial writes per page, 64 pages per block.
-        let (block, page) = Self::address_for_event_index(event_index, fs);
+        let (block, page) = Self::address_for_event_index(event_index, fs)?;
         // Originally events started 64 bytes apart in the first page, but that broke ECC
         let page_offset = (event_index % 4) * 64;
-        if block >= FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
-            None
-        } else if fs.read_page(block, page).is_ok() {
+        if fs.read_page(block, page).is_ok() {
             let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
             if event[0] == 0xff { None } else { Some(event) }
         } else {
@@ -488,12 +493,10 @@ impl EventLogger {
         fs: &mut OnboardFlash,
     ) -> Option<[u8; EVENT_LENGTH]> {
         // 4 partial writes per page, 64 pages per block.
-        let (block, page) = Self::address_for_event_index(event_index, fs);
+        let (block, page) = Self::address_for_event_index(event_index, fs)?;
         // Events need to start at each of the User Main data 0..=3 blocks, otherwise ECC breaks.
         let page_offset = (event_index % 4) * 512;
-        if block >= FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX {
-            None
-        } else if fs.read_page(block, page).is_ok() {
+        if fs.read_page(block, page).is_ok() {
             let event = fs.read_event_from_cache_at_column_offset_spi(block, page_offset);
             if event[0] == 0xff {
                 // TODO: Temporary migration code, take out in version 21
@@ -605,8 +608,10 @@ impl EventLogger {
             })
     }
 
-    pub fn is_nearly_full(&self) -> bool {
-        self.count() >= (MAX_EVENTS_IN_LOGGER - 3)
+    pub fn is_nearly_full(&self, fs: &OnboardFlash) -> bool {
+        // Bad blocks in the event log reduce how many events we can actually store
+        let capacity = Self::good_event_blocks(fs).count() as u16 * EVENTS_PER_BLOCK;
+        capacity > 0 && self.count() >= capacity - 3
     }
 
     pub fn log(&mut self, kind: Event, time: &SyncedDateTime, fs: &mut OnboardFlash) {
@@ -617,16 +622,19 @@ impl EventLogger {
         self.log_event_if_not_dupe(LoggerEvent::new(kind, time), fs);
     }
 
+    fn good_event_blocks(fs: &OnboardFlash) -> impl Iterator<Item = BlockIndex> + '_ {
+        (FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX..FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX)
+            .filter(|block| !fs.bad_blocks.contains(block))
+    }
+
+    // Returns None if there aren't enough good blocks to store this event index
     pub fn address_for_event_index(
         event_index: EventIndex,
         fs: &OnboardFlash,
-    ) -> (BlockIndex, PageIndex) {
-        let mut block = FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX + (event_index / 256);
-        while fs.bad_blocks.contains(&block) {
-            block += 1;
-        }
-        let page = ((event_index % 256) / 4) as PageIndex;
-        (block, page)
+    ) -> Option<(BlockIndex, PageIndex)> {
+        let block = Self::good_event_blocks(fs).nth(usize::from(event_index / EVENTS_PER_BLOCK))?;
+        let page = ((event_index % EVENTS_PER_BLOCK) / 4) as PageIndex;
+        Some((block, page))
     }
 
     pub fn log_event(&mut self, event: LoggerEvent, fs: &mut OnboardFlash) {
@@ -638,10 +646,13 @@ impl EventLogger {
                 // We reserve 4 blocks at the end of the flash memory for events, so 1024 events, which should be plenty.
                 let event_data = event.as_bytes();
                 let event_index = *next_event_index;
-                let (block, page) = Self::address_for_event_index(event_index, fs);
-                let page_offset = (event_index % 4) * 512;
-                fs.write_event(&event_data, block, page, page_offset);
-                *next_event_index += 1;
+                if let Some((block, page)) = Self::address_for_event_index(event_index, fs) {
+                    let page_offset = (event_index % 4) * 512;
+                    fs.write_event(&event_data, block, page, page_offset);
+                    *next_event_index += 1;
+                } else {
+                    warn!("Event log full, no good blocks left");
+                }
             }
         } else {
             warn!("Event log full");
