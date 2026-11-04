@@ -36,6 +36,20 @@ pub struct StoragePage {
 }
 
 impl StoragePage {
+    /// NAND programming can only clear bits, and only an erase can set them again. Programming
+    /// a byte that's already been programmed leaves a mix of the two, and breaks the page's ECC.
+    pub fn program(&mut self, offset: usize, bytes: &[u8], location: (BlockIndex, PageIndex)) {
+        let destination = &mut self.inner[offset..offset + bytes.len()];
+        for (position, (old, new)) in destination.iter_mut().zip(bytes).enumerate() {
+            assert!(
+                *old == 0xff || *new == 0xff,
+                "Double programmed {location:?} at byte {}",
+                offset + position
+            );
+            *old &= *new;
+        }
+    }
+
     fn cache_data(&self) -> &[u8] {
         &self.inner[..]
     }
@@ -219,8 +233,11 @@ impl SpiEnabledPeripheral {
                 TEST_SIM_STATE.with(|s| {
                     s.borrow_mut().flash_backing_storage[block_index as usize].inner
                         [page_index as usize]
-                        .inner[self.last_page_offset..self.last_page_offset + self.buffer.len()]
-                        .copy_from_slice(&self.buffer);
+                        .program(
+                            self.last_page_offset,
+                            &self.buffer,
+                            (block_index, page_index),
+                        );
                 });
             }
             PAGE_READ => {
