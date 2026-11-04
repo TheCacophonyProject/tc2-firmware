@@ -777,7 +777,7 @@ pub fn work_out_recording_mode(
         } else if records_thermal && tc2_agent_state.test_thermal_recording_requested() {
             let recording_request_type = if tc2_agent_state.short_test_thermal_recording_requested()
             {
-                RecordingRequestType::test_recording(10)
+                RecordingRequestType::test_recording(2)
             } else {
                 RecordingRequestType::test_recording(60)
             };
