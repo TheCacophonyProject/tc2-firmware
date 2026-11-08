@@ -397,7 +397,7 @@ pub fn maybe_offload_files_and_events_on_startup(
         offload_wake_reason = WakeReason::OpportunisticOffload;
         should_offload = true;
     }
-    if !should_offload && has_events_to_offload && force_offload_now {
+    if !should_offload && (has_events_to_offload || has_files_to_offload) && force_offload_now {
         should_offload = true;
         offload_wake_reason = WakeReason::OffloadOnUserDemand;
     }
