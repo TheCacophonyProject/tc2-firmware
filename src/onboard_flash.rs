@@ -1054,7 +1054,10 @@ impl OnboardFlash {
                 info!("Block {} is factory marked as bad", block_index);
                 continue;
             }
-            warn!("Block {} isn't factory marked as bad, erasing it", block_index);
+            warn!(
+                "Block {} isn't factory marked as bad, erasing it",
+                block_index
+            );
             if self.erase_block_unchecked(block_index).is_ok()
                 && self.read_page(block_index, 0).is_ok()
             {

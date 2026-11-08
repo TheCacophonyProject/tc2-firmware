@@ -58,7 +58,10 @@ fn simulate_low_power_camera() {
 
 fn num_preloaded_events_offloaded() -> usize {
     TEST_SIM_STATE.with(|s| {
-        offloaded_event_count(&s.borrow().events_offloaded, LoggerEventKind::GotPowerOnTimeout)
+        offloaded_event_count(
+            &s.borrow().events_offloaded,
+            LoggerEventKind::GotPowerOnTimeout,
+        )
     })
 }
 
@@ -127,8 +130,8 @@ fn write_recording_page(page: &mut StoragePage, data: &[u8], is_last: bool) {
 /// truncated recording is fine.
 fn store_recording_ending_on_page_0() {
     let recording = std::fs::read("./test-fixtures/cat-trigger.cptv").unwrap();
-    let parts = recording[..NUM_PAGES_ENDING_ON_PAGE_0 * FLASH_USER_PAGE_SIZE]
-        .chunks(FLASH_USER_PAGE_SIZE);
+    let parts =
+        recording[..NUM_PAGES_ENDING_ON_PAGE_0 * FLASH_USER_PAGE_SIZE].chunks(FLASH_USER_PAGE_SIZE);
     TEST_SIM_STATE.with(|s| {
         let storage = &mut s.borrow_mut().flash_backing_storage;
         for (index, part) in parts.enumerate() {
@@ -151,7 +154,11 @@ fn recording_ending_on_page_0_of_a_block_is_erased() {
         let expected_size = NUM_PAGES_ENDING_ON_PAGE_0 * FLASH_USER_PAGE_SIZE;
         assert_eq!(
             1,
-            state.files_offloaded.iter().filter(|file| file.size == expected_size).count(),
+            state
+                .files_offloaded
+                .iter()
+                .filter(|file| file.size == expected_size)
+                .count(),
             "The recording ending on page 0 should be offloaded in full"
         );
         assert!(

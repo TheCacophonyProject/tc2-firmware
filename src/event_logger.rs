@@ -623,7 +623,8 @@ impl EventLogger {
     }
 
     fn good_event_blocks(fs: &OnboardFlash) -> impl Iterator<Item = BlockIndex> + '_ {
-        (FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX..FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX)
+        (FLASH_STORAGE_EVENT_LOG_START_BLOCK_INDEX
+            ..FLASH_STORAGE_EVENT_LOG_ONE_PAST_END_BLOCK_INDEX)
             .filter(|block| !fs.bad_blocks.contains(block))
     }
 
