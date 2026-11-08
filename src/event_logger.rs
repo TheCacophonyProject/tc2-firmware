@@ -610,7 +610,9 @@ impl EventLogger {
 
     pub fn is_nearly_full(&self, fs: &OnboardFlash) -> bool {
         // Bad blocks in the event log reduce how many events we can actually store
-        let capacity = Self::good_event_blocks(fs).count() as u16 * EVENTS_PER_BLOCK;
+        // At most 5 blocks, so this always fits
+        let good_blocks = u16::try_from(Self::good_event_blocks(fs).count()).unwrap_or(0);
+        let capacity = good_blocks * EVENTS_PER_BLOCK;
         capacity > 0 && self.count() >= capacity - 3
     }
 
