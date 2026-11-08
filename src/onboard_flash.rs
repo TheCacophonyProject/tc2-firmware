@@ -689,6 +689,13 @@ impl OnboardFlash {
                     // Add the bad block to our runtime table.
                     warn!("BAD BLOCK added {}", block_index);
                     *slot = block_index;
+                } else {
+                    // This block will be treated as good and may be written to.
+                    error!(
+                        "Bad block table full ({} entries), can't add bad block {}",
+                        bad_blocks.len(),
+                        block_index
+                    );
                 }
                 if self.current_block_index == block_index {
                     info!("Current block is bad block so incrementing");
@@ -1001,6 +1008,10 @@ impl OnboardFlash {
         if self.bad_blocks.contains(&block_index) {
             return Err("Can't erase bad block");
         }
+        self.erase_block_unchecked(block_index)
+    }
+
+    fn erase_block_unchecked(&mut self, block_index: BlockIndex) -> Result<(), &str> {
         self.write_enable();
         let address = OnboardFlash::get_address(block_index, 0);
         self.spi_write(&[BLOCK_ERASE, address[0], address[1], address[2]]);
@@ -1013,13 +1024,44 @@ impl OnboardFlash {
     }
 
     pub fn erase_good_blocks(&mut self) {
+        self.recover_blocks_without_factory_marker();
         let bad_blocks = self.bad_blocks;
         for block_index in 0..TOTAL_FLASH_BLOCKS {
             if !&bad_blocks.contains(&block_index)
                 && let Err(e) = self.erase_block(block_index)
             {
+                // Keep going, so one bad block doesn't stop the rest of the flash being erased
                 error!("Failed to erase block {}: {}", block_index, e);
-                break;
+            }
+        }
+    }
+
+    // Older firmware could double program page 0 of a block, which fails ECC, so scan marks the
+    // block as bad. Erasing it fixes this, but we must not erase factory bad blocks, as that can
+    // remove their bad block marker.
+    fn recover_blocks_without_factory_marker(&mut self) {
+        for slot in 0..self.bad_blocks.len() {
+            let block_index = self.bad_blocks[slot];
+            if block_index == u16::MAX {
+                continue;
+            }
+            // Even if the read fails ECC the page is still loaded into the cache, and the bad
+            // block marker isn't covered by ECC, so we can still check it.
+            let _ = self.read_page(block_index, 0);
+            self.read_page_metadata(block_index);
+            self.wait_for_all_ready();
+            if self.current_page.is_part_of_bad_block() {
+                info!("Block {} is factory marked as bad", block_index);
+                continue;
+            }
+            warn!("Block {} isn't factory marked as bad, erasing it", block_index);
+            if self.erase_block_unchecked(block_index).is_ok()
+                && self.read_page(block_index, 0).is_ok()
+            {
+                info!("Recovered block {}", block_index);
+                self.bad_blocks[slot] = u16::MAX;
+            } else {
+                error!("Block {} is still bad after erasing", block_index);
             }
         }
     }
