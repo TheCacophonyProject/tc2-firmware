@@ -1313,48 +1313,16 @@ impl OnboardFlash {
                 }
             }
 
-            // old file system, should only happen once
-            self.current_block_index = self.find_start(last_block_index);
-            self.current_page_index = 0;
-            self.file_start_block_index = Some(self.current_block_index);
-            debug!(
-                "Searched for file start found {:?}:{:?}",
-                self.current_block_index, self.last_used_block_index
+            // Every page written since firmware 13 (tc2-agent 0.3.10) records the block its file
+            // started at, so if we don't know where the file starts the block is corrupt or
+            // orphaned and there's nothing we can offload. We also end up here if none of the
+            // file's pages could be read.
+            warn!(
+                "No readable file start for last used block {}, nothing to offload",
+                last_block_index
             );
-            return true;
         }
         false
-    }
-
-    pub fn find_start(&mut self, file_block_index: BlockIndex) -> BlockIndex {
-        if file_block_index == 0 {
-            return 0;
-        }
-        // find previous file end
-        for block_index in (1..file_block_index).rev() {
-            if self.last_dirty_page(block_index).is_some()
-                && self.current_page.is_last_page_for_file()
-            {
-                return block_index + 1;
-            }
-        }
-        0
-    }
-
-    fn last_dirty_page(&mut self, block_index: BlockIndex) -> Option<PageIndex> {
-        for page in (0..NUM_PAGES_PER_BLOCK).rev() {
-            info!("Looking for dirty page at {}:{}", block_index, page);
-            if self.read_page(block_index, page).is_ok() {
-                self.read_page_metadata(block_index);
-                self.wait_for_all_ready();
-                if self.current_page.page_is_used() {
-                    return Some(page);
-                }
-            } else {
-                error!("Failed to read page at {}:{}", block_index, page);
-            }
-        }
-        None
     }
 
     #[allow(clippy::cast_possible_truncation)]
