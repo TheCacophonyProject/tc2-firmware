@@ -708,18 +708,30 @@ impl OnboardFlash {
                     self.wait_for_all_ready();
                     // A file can end on page 0 of a block, leaving page 1 blank. That block is
                     // still in use, and needs to be erased along with the file.
+                    // metadata_page is the page current_page holds. Reading page 0 for file times
+                    // below only needs page 1 restoring afterwards if that's what we started with.
+                    let mut metadata_page = 1;
                     if page_0_is_used
                         && !self.current_page.page_is_used()
                         && self.read_page(block_index, 0).is_ok()
                     {
                         self.read_page_metadata(block_index);
                         self.wait_for_all_ready();
+                        metadata_page = 0;
                     }
                     if block_index < NUM_RECORDING_BLOCKS {
                         last_good_block = Some(block_index);
 
                         let page_is_used = self.current_page.page_is_used();
+                        // Only count files before the first blank block. last_used_block_index
+                        // is set there, and offloading never reads past it, so counting files
+                        // after it would report files to the Pi that never get offloaded.
+                        // TODO: Used blocks after a blank block are never offloaded or erased.
+                        //  If that can happen (e.g. a write that failed part way, or blocks left
+                        //  over from an interrupted erase), they'll sit there until the flash
+                        //  wraps or is erased.
                         if page_is_used
+                            && self.last_used_block_index.is_none()
                             && let Some(file_start_block_index) =
                                 self.current_page.file_start_block_index()
                             && last_file_block_index != file_start_block_index
@@ -728,15 +740,18 @@ impl OnboardFlash {
                             num_files += 1;
 
                             if self.oldest_recording_time.is_none() {
-                                if self.read_page(block_index, 0).is_ok() {
-                                    self.read_page_metadata(block_index);
-                                    self.wait_for_all_ready();
+                                // current_page already holds page 0 if metadata_page is 0.
+                                if metadata_page == 0 || self.read_page(block_index, 0).is_ok() {
+                                    if metadata_page == 1 {
+                                        self.read_page_metadata(block_index);
+                                        self.wait_for_all_ready();
+                                    }
                                     if self.current_page.file_written_time().is_some() {
                                         self.oldest_recording_time =
                                             self.current_page.file_written_time();
                                     }
                                 }
-                                if self.read_page(block_index, 1).is_ok() {
+                                if metadata_page == 1 && self.read_page(block_index, 1).is_ok() {
                                     self.read_page_metadata(block_index);
                                     self.wait_for_all_ready();
                                 }
@@ -744,10 +759,14 @@ impl OnboardFlash {
 
                             if self.current_page.is_cptv_recording() {
                                 if self.current_page.is_startup_status_recording() {
-                                    // For the file time, we need to go back and read the first page.
-                                    if self.read_page(block_index, 0).is_ok() {
-                                        self.read_page_metadata(block_index);
-                                        self.wait_for_all_ready();
+                                    // For the file time, we need to go back and read the first page,
+                                    // unless current_page already holds it.
+                                    if metadata_page == 0 || self.read_page(block_index, 0).is_ok()
+                                    {
+                                        if metadata_page == 1 {
+                                            self.read_page_metadata(block_index);
+                                            self.wait_for_all_ready();
+                                        }
 
                                         self.file_types_found.add_type(FileType::CptvStartup);
                                         if self.current_page.file_written_time().is_some() {
@@ -755,7 +774,8 @@ impl OnboardFlash {
                                                 self.current_page.file_written_time();
                                         }
                                     }
-                                    if self.read_page(block_index, 1).is_ok() {
+                                    if metadata_page == 1 && self.read_page(block_index, 1).is_ok()
+                                    {
                                         self.read_page_metadata(block_index);
                                         self.wait_for_all_ready();
                                     }
@@ -1317,6 +1337,11 @@ impl OnboardFlash {
             // started at, so if we don't know where the file starts the block is corrupt or
             // orphaned and there's nothing we can offload. We also end up here if none of the
             // file's pages could be read.
+            // TODO: Nothing is erased here, so any valid files before this block are stuck. If
+            //  the last used block has no file start (e.g. a page that was only partly written),
+            //  every offload ends here, and the older files are never offloaded or erased. Fixing
+            //  this would mean walking back from last_block_index, erasing blocks until one has a
+            //  valid file start, and offloading from that file.
             warn!(
                 "No readable file start for last used block {}, nothing to offload",
                 last_block_index
