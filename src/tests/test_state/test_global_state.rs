@@ -65,6 +65,8 @@ pub struct SimState {
     pub(crate) rosc_drive_iterator: usize,
     pub(crate) files_offloaded: Vec<FileOffload>,
     pub(crate) events_offloaded: Vec<EventOffload>,
+    // The number of files the rp2040 reported in each startup handshake, in order.
+    pub(crate) handshake_file_counts: Vec<u16>,
     pub(crate) device_config: Option<DeviceConfig>,
     pub(crate) firmware_device_config: Option<FirmwareDeviceConfig>,
     pub(crate) thermal_trigger_offsets_mins: Option<Vec<u32>>,
@@ -195,6 +197,7 @@ thread_local! {
         rosc_drive_iterator: 0,
         files_offloaded: vec![],
         events_offloaded: vec![],
+        handshake_file_counts: vec![],
         device_config: None,
         firmware_device_config: None,
         thermal_trigger_offsets_mins: None,

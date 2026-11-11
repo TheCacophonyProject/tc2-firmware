@@ -71,6 +71,7 @@ pub fn simulate_camera_with_config(
                 rosc_drive_iterator: 0,
                 files_offloaded: vec![],
                 events_offloaded: vec![],
+                handshake_file_counts: vec![],
                 device_config: None,
                 firmware_device_config: None,
                 thermal_trigger_offsets_mins: None,

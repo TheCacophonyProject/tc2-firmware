@@ -110,7 +110,7 @@ const PAGES_PER_BLOCK: usize = 64;
 // All of block 0, and just page 0 of block 1.
 const NUM_PAGES_ENDING_ON_PAGE_0: usize = PAGES_PER_BLOCK + 1;
 
-fn write_recording_page(page: &mut StoragePage, data: &[u8], is_last: bool) {
+fn write_recording_page(page: &mut StoragePage, data: &[u8], is_last: bool, file_start: u16) {
     page.inner[..data.len()].copy_from_slice(data);
     let crc = Crc::<u16>::new(&CRC_16_XMODEM).checksum(data);
     let metadata = &mut page.inner[USER_METADATA_OFFSET..];
@@ -122,7 +122,7 @@ fn write_recording_page(page: &mut StoragePage, data: &[u8], is_last: bool) {
     LittleEndian::write_u16(&mut metadata[6..=7], data.len() as u16);
     LittleEndian::write_u16(&mut metadata[8..=9], crc);
     LittleEndian::write_u16(&mut metadata[10..=11], crc);
-    LittleEndian::write_u16(&mut metadata[12..=13], 0); // File starts at block 0
+    LittleEndian::write_u16(&mut metadata[12..=13], file_start);
 }
 
 /// Stores a recording that starts at block 0 and whose last page is page 0 of block 1, so that
@@ -137,7 +137,7 @@ fn store_recording_ending_on_page_0() {
         for (index, part) in parts.enumerate() {
             let is_last = index == NUM_PAGES_ENDING_ON_PAGE_0 - 1;
             let page = &mut storage[index / PAGES_PER_BLOCK].inner[index % PAGES_PER_BLOCK];
-            write_recording_page(page, part, is_last);
+            write_recording_page(page, part, is_last, 0);
         }
     });
 }
@@ -166,4 +166,66 @@ fn recording_ending_on_page_0_of_a_block_is_erased() {
             "New recordings should have been made after it"
         );
     });
+}
+
+const ORPHANED_PAGE_BYTE: u8 = 0xab;
+
+/// Writes a single page recording to `page` of `block`, filled with `ORPHANED_PAGE_BYTE`.
+fn store_single_page(block: BlockIndex, page: usize, file_start: u16) {
+    let data = [ORPHANED_PAGE_BYTE; FLASH_USER_PAGE_SIZE];
+    TEST_SIM_STATE.with(|s| {
+        let storage = &mut s.borrow_mut().flash_backing_storage;
+        write_recording_page(
+            &mut storage[usize::from(block)].inner[page],
+            &data,
+            true,
+            file_start,
+        );
+    });
+}
+
+fn page_still_holds_orphaned_data(block: BlockIndex, page: usize) -> bool {
+    TEST_SIM_STATE.with(|s| {
+        s.borrow().flash_backing_storage[usize::from(block)].inner[page].inner
+            [..FLASH_USER_PAGE_SIZE]
+            .iter()
+            .all(|byte| *byte == ORPHANED_PAGE_BYTE)
+    })
+}
+
+fn first_handshake_file_count() -> u16 {
+    TEST_SIM_STATE.with(|s| s.borrow().handshake_file_counts[0])
+}
+
+/// The end of a file left behind on page 0 of a block, with page 1 blank and the rest of the
+/// file already erased. Reading page 0's file time in the scan used to switch back to the blank
+/// page 1, losing the file start, so the offload had nowhere to start and the block was never
+/// erased.
+#[test]
+fn orphaned_page_0_of_a_block_is_erased() {
+    store_single_page(100, 0, 50);
+    simulate_low_power_camera();
+    assert_eq!(1, first_handshake_file_count());
+    assert!(
+        !page_still_holds_orphaned_data(100, 0),
+        "The orphaned page should have been erased"
+    );
+}
+
+/// Offloading stops at the first blank block, so files after it can't be offloaded and
+/// shouldn't be reported to the Pi.
+#[test]
+fn files_after_a_blank_block_are_not_counted() {
+    store_recording_ending_on_page_0();
+    store_single_page(300, 1, 300);
+    simulate_low_power_camera();
+    assert_eq!(1, first_handshake_file_count());
+}
+
+/// A used page with no file start isn't a file that can be offloaded, so it isn't counted.
+#[test]
+fn used_page_without_a_file_start_is_not_counted() {
+    store_single_page(100, 1, u16::MAX);
+    simulate_low_power_camera();
+    assert_eq!(0, first_handshake_file_count());
 }

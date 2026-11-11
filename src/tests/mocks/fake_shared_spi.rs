@@ -529,6 +529,9 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                     config_crc_from_rp2040 = LittleEndian::read_u16(&chunk[10..12]);
 
                     TEST_SIM_STATE.with(|s| {
+                        s.borrow_mut()
+                            .handshake_file_counts
+                            .push(num_files_to_offload);
                         s.borrow_mut().fake_pi_recording_state.set_offload_totals(
                             num_files_to_offload,
                             num_blocks_to_offload,
