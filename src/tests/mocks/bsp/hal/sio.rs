@@ -246,6 +246,18 @@ pub fn copy_last_frame(frame_buffer: &mut Option<&'static mut FrameBuffer>) {
 
                 header[640..][0..(FRAME_WIDTH * FRAME_HEIGHT) * 2]
                     .copy_from_slice(frame.image_data.as_slice());
+                if s.invalid_frame_every
+                    .is_some_and(|n| frame_num % n == n / 2)
+                {
+                    // A misaligned frame: the telemetry revision doesn't match the earlier frames,
+                    // and the pixels are garbage.
+                    LittleEndian::write_u16(&mut header[0..2], 13);
+                    for px in header[640..][0..(FRAME_WIDTH * FRAME_HEIGHT) * 2].chunks_exact_mut(2)
+                    {
+                        let value = LittleEndian::read_u16(px).saturating_add(1000);
+                        LittleEndian::write_u16(px, value);
+                    }
+                }
                 frame_num += 1;
             }
             s.frame_num = frame_num;

@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 mod audio_cant_keep_up;
 mod bad_flash_blocks;
+mod cptv_pixel_range;
 mod flash_ecc_errors;
 mod high_power__always_on__audio_and_thermal;
 mod high_power__always_on__audio_disabled;

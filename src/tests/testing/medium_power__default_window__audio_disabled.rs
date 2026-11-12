@@ -43,7 +43,9 @@ fn medium_power_mode_dusk_til_dawn_audio_disabled() {
             3,
             num_medium_power_recordings_offloaded(&state.files_offloaded)
         );
-        assert_eq!(5, num_thermal_recordings_offloaded(&state.files_offloaded));
+        // Just the startup and shutdown status recordings. The scheduled recordings were all
+        // streamed, so the pi tells the rp2040 to erase them rather than offload them again.
+        assert_eq!(2, num_thermal_recordings_offloaded(&state.files_offloaded));
 
         assert_eq!(0, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(

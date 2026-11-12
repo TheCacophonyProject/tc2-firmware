@@ -67,6 +67,15 @@ pub struct SimState {
     pub(crate) events_offloaded: Vec<EventOffload>,
     // The number of files the rp2040 reported in each startup handshake, in order.
     pub(crate) handshake_file_counts: Vec<u16>,
+    // Recording start timestamps of files the fake pi got in full from medium power streaming.
+    pub(crate) medium_power_offloaded_timestamps: Vec<u64>,
+    // When set, every nth lepton frame is sent with a misaligned telemetry header and garbage
+    // pixels, which the firmware should skip.
+    pub(crate) invalid_frame_every: Option<u32>,
+    // Offloaded CPTV files whose decoded pixels were checked against the header min and max,
+    // and a description of each one where they didn't match.
+    pub(crate) cptv_files_pixel_checked: usize,
+    pub(crate) cptv_pixel_range_mismatches: Vec<String>,
     pub(crate) device_config: Option<DeviceConfig>,
     pub(crate) firmware_device_config: Option<FirmwareDeviceConfig>,
     pub(crate) thermal_trigger_offsets_mins: Option<Vec<u32>>,
@@ -198,6 +207,10 @@ thread_local! {
         files_offloaded: vec![],
         events_offloaded: vec![],
         handshake_file_counts: vec![],
+        medium_power_offloaded_timestamps: vec![],
+        invalid_frame_every: None,
+        cptv_files_pixel_checked: 0,
+        cptv_pixel_range_mismatches: vec![],
         device_config: None,
         firmware_device_config: None,
         thermal_trigger_offsets_mins: None,

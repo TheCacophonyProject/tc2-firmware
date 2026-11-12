@@ -81,6 +81,10 @@ const PAYLOAD_LENGTH_LE_U32: usize = 4;
 const CRC_OR_PROGRESS_LE_U16: usize = 2;
 pub const RPI_PAYLOAD_LENGTH: usize = FLASH_USER_PAGE_SIZE;
 pub const RPI_RETURN_PAYLOAD_LENGTH: usize = 32 + 104;
+/// Sent back by the pi in reply to the first part of a file, followed by its inverse, when it
+/// already has the file from medium power streaming, so the file can be erased without sending
+/// the rest of it.
+pub const PI_ALREADY_HAS_FILE: u8 = 0xa5;
 // The number of bytes in the header sent for any transfers via `ExtSpiTransfers`
 pub const RPI_TRANSFER_HEADER_LENGTH: usize =
     (MESSAGE_TYPE_U8 * 2) + (PAYLOAD_LENGTH_LE_U32 * 2) + (CRC_OR_PROGRESS_LE_U16 * 4);
@@ -163,6 +167,17 @@ impl ExtSpiTransfers {
             timer,
             message_start: fugit::Instant::<u64, 1, 1_000_000>::from_ticks(0),
         }
+    }
+
+    /// Whether the pi replied to the first part of a file saying it already has the file.
+    /// Only meaningful straight after a successful `BeginFileTransfer` or
+    /// `BeginAndEndFileTransfer`.
+    pub fn pi_already_has_file(&self) -> bool {
+        self.return_payload().is_some_and(|payload| {
+            payload.len() >= 2
+                && payload[0] == PI_ALREADY_HAS_FILE
+                && payload[1] == !PI_ALREADY_HAS_FILE
+        })
     }
 
     pub fn return_payload(&self) -> Option<&'static [u8]> {
@@ -572,6 +587,9 @@ impl ExtSpiTransfers {
                                         self.return_payload_offset = Some(start + 4);
                                     } else if message_type
                                         == ExtTransferMessage::GetMotionDetectionMask
+                                        || message_type == ExtTransferMessage::BeginFileTransfer
+                                        || message_type
+                                            == ExtTransferMessage::BeginAndEndFileTransfer
                                     {
                                         self.return_payload_offset = Some(start + 8);
                                     }

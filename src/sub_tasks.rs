@@ -149,6 +149,8 @@ fn offload_recordings_and_events(
 
     // do some offloading.
     let mut file_count = 0;
+    // Files the pi already had from medium power streaming, erased without being sent.
+    let mut already_offloaded_count = 0;
     let mut success_transferring_parts_to_rpi: bool = true;
     let mut interrupted_by_user = false;
     'offload_all_files: while has_file {
@@ -286,10 +288,20 @@ fn offload_recordings_and_events(
                     }
                 }
 
+                // The pi replies to the first part of a file saying whether it already has it,
+                // from medium power streaming.
+                let pi_already_has_file = success_transferring_parts_to_rpi
+                    && (transfer_type == ExtTransferMessage::BeginFileTransfer
+                        || transfer_type == ExtTransferMessage::BeginAndEndFileTransfer)
+                    && pi_spi.pi_already_has_file();
+
                 // Give spi peripheral back to flash storage.
                 if let Some(spi) = pi_spi.disable() {
                     fs.take_spi(spi, resets);
-                    if is_last_page_for_file && success_transferring_parts_to_rpi {
+                    if is_last_page_for_file
+                        && success_transferring_parts_to_rpi
+                        && !pi_already_has_file
+                    {
                         if let Some(file_type) = current_file_metadata {
                             events.log(Event::OffloadedRecording(file_type), time, fs);
                         } else {
@@ -300,6 +312,18 @@ fn offload_recordings_and_events(
 
                 if !success_transferring_parts_to_rpi {
                     break 'offload_all_files;
+                }
+
+                if pi_already_has_file {
+                    already_offloaded_count += 1;
+                    info!(
+                        "Pi already has file starting at {}:{}, erasing without sending",
+                        block, page
+                    );
+                    watchdog.feed();
+                    let _ = fs.erase_latest_file();
+                    file_ended = true;
+                    break 'offload_file;
                 }
 
                 part_count += 1;
@@ -352,12 +376,16 @@ fn offload_recordings_and_events(
     }
     if success_transferring_parts_to_rpi {
         info!(
-            "Completed file offload, transferred {:?} files start {:?} previous is {:?}",
-            file_count, fs.file_start_block_index, fs.previous_file_start_block_index
+            "Completed file offload, transferred {:?} files, erased {:?} the pi already had, \
+             start {:?} previous is {:?}",
+            file_count,
+            already_offloaded_count,
+            fs.file_start_block_index,
+            fs.previous_file_start_block_index
         );
         // Always rescan to update what kinds of files we have
         fs.scan();
-        file_count != 0
+        file_count + already_offloaded_count != 0
     } else {
         if !interrupted_by_user {
             events.log_if_not_dupe(Event::FileOffloadFailed, time, fs);

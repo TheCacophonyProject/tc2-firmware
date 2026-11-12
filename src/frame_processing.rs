@@ -43,7 +43,12 @@ const FRAME_BUFFER_LENGTH: usize =
     RPI_TRANSFER_HEADER_LENGTH + LEPTON_RAW_FRAME_PAYLOAD_LENGTH + FRAME_BUFFER_ALIGNMENT_PADDING;
 
 const OFFLOAD_HEADERS_LENGTH: usize = RPI_TRANSFER_HEADER_LENGTH + 2;
-const OFFLOAD_BUFFER_LENGTH: usize = FLASH_USER_PAGE_SIZE * 5 + OFFLOAD_HEADERS_LENGTH + 16;
+/// Bytes at the start of the first packet of a medium power file, before the file data:
+/// timestamp (i64), lepton serial (u32), firmware version (u32), file start block (u16).
+pub(crate) const FIRST_PACKET_HEADER_LENGTH: usize = 8 + 4 + 4 + 2;
+// Rounded up to a multiple of 4, as aligned_data() sends the data as u32s.
+const OFFLOAD_BUFFER_LENGTH: usize =
+    (FLASH_USER_PAGE_SIZE * 5 + OFFLOAD_HEADERS_LENGTH + FIRST_PACKET_HEADER_LENGTH + 3) & !3;
 pub(crate) const THERMAL_DEV_MODE: bool = false;
 #[repr(C, align(32))]
 pub struct FrameBuffer([u8; FRAME_BUFFER_LENGTH]);
@@ -663,6 +668,8 @@ pub fn thermal_motion_task(
         }
         let mut ended_recording = false;
         let mut should_start_new_recording = false;
+        // Whether this frame was written to the recording in progress.
+        let mut wrote_frame = false;
         if !past_ffc_event && motion_detection.is_some() && cptv_stream.is_none() {
             warn!(
                 "Resetting motion detection due to FFC event {:?}",
@@ -890,11 +897,15 @@ pub fn thermal_motion_task(
             } else if let Some(cptv_stream) = &mut cptv_stream {
                 // Continue recording in progress (~37ms)
                 cptv_stream.push_frame(current_raw_frame, &mut prev_frame, &telemetry, &mut fs);
+                wrote_frame = true;
             }
         }
 
         // if starting a new recording will handle this differently below
-        if !should_start_new_recording {
+        // While recording, prev_frame must stay the last frame written, as each frame is stored as
+        // deltas from it. A frame that wasn't written (e.g. an invalid frame) mustn't replace it,
+        // or every frame after it decodes wrong.
+        if !should_start_new_recording && (cptv_stream.is_none() || wrote_frame) {
             // TIME: 2ms
             prev_frame.copy_from_slice(current_raw_frame);
         }
@@ -1611,7 +1622,9 @@ impl MediumPowerState {
     pub fn end_incomplete_file(&mut self) {
         // tc2-agent expects a first packet to contain file data, so with nothing to send skip this
         // file and move on to the next recording if there is one
-        if !self.has_started_transfer() && self.file_offload_offset <= OFFLOAD_HEADERS_LENGTH + 16 {
+        if !self.has_started_transfer()
+            && self.file_offload_offset <= OFFLOAD_HEADERS_LENGTH + FIRST_PACKET_HEADER_LENGTH
+        {
             self.file_offload_offset = OFFLOAD_HEADERS_LENGTH;
             self.state = TransferState::TransferFinished;
             self.maybe_offload_next();
@@ -1652,11 +1665,12 @@ impl MediumPowerState {
     }
 
     pub fn write_first_packet(&mut self, lepton_serial: u32) {
-        let timestamp = self
+        let recording = self
             .current_recording
             .as_ref()
-            .expect("Am transferring so must have a rec")
-            .timestamp;
+            .expect("Am transferring so must have a rec");
+        let timestamp = recording.timestamp;
+        let starting_block = recording.starting_block;
         LittleEndian::write_i64(
             &mut self.u8_data[self.file_offload_offset..self.file_offload_offset + 8],
             timestamp,
@@ -1674,7 +1688,16 @@ impl MediumPowerState {
             FIRMWARE_VERSION,
         );
         self.file_offload_offset += 4;
-        info!("Adding timestamp to first packet {} and serial", timestamp,);
+
+        LittleEndian::write_u16(
+            &mut self.u8_data[self.file_offload_offset..self.file_offload_offset + 2],
+            starting_block,
+        );
+        self.file_offload_offset += 2;
+        info!(
+            "Adding timestamp {}, serial and file start block {} to first packet",
+            timestamp, starting_block
+        );
     }
     #[allow(clippy::cast_sign_loss)]
     #[allow(clippy::cast_possible_truncation)]

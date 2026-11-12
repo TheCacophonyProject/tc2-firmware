@@ -1,6 +1,9 @@
 extern crate std;
 use crate::byte_slice_cursor::Cursor;
-use crate::ext_spi_transfers::{RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH};
+use crate::ext_spi_transfers::{
+    PI_ALREADY_HAS_FILE, RPI_RETURN_PAYLOAD_LENGTH, RPI_TRANSFER_HEADER_LENGTH,
+};
+use crate::frame_processing::FIRST_PACKET_HEADER_LENGTH;
 use crate::onboard_flash::{
     BLOCK_ERASE, BlockIndex, CACHE_READ, FEATURE_STATUS, FLASH_SPI_HEADER, FLASH_SPI_HEADER_SMALL,
     FLASH_USER_PAGE_SIZE, FlashSpiFullPayload, GET_FEATURES, OnboardFlash, PAGE_READ,
@@ -10,7 +13,9 @@ use crate::tests::mocks::fake_rpi_event_logger::{
     DiscardedRecordingInfo, FileType, LoggerEvent, LoggerEventKind, NewConfigInfo, WakeReason,
 };
 use crate::tests::mocks::fake_rpi_recording_state::RecordingMode;
-use crate::tests::test_state::test_global_state::{EventOffload, FileOffload, TEST_SIM_STATE};
+use crate::tests::test_state::test_global_state::{
+    EventOffload, FileOffload, SimState, TEST_SIM_STATE,
+};
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz::Pacific__Auckland;
@@ -180,7 +185,80 @@ pub const CAMERA_SEND_LOGGER_EVENT: u8 = 0x8;
 pub const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
 pub const CAMERA_RAW_RECORDING_TRANSFER: u8 = 0xA;
 
-pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 41;
+pub const EXPECTED_RP2040_FIRMWARE_VERSION: u32 = 42;
+
+/// Decodes every frame of an offloaded CPTV file and checks the pixel range matches the min and
+/// max values in its header.
+fn check_cptv_pixel_range(file: &[u8], state: &mut SimState) {
+    let mut decoder = CptvDecoder::from(std::io::Cursor::new(file)).unwrap();
+    let header = decoder.get_header().unwrap();
+    let header_range = (header.min_value, header.max_value);
+    let mut decoded_range = (u16::MAX, u16::MIN);
+    let mut num_frames = 0;
+    while let Ok(frame) = decoder.next_frame() {
+        if frame.is_background_frame {
+            continue;
+        }
+        num_frames += 1;
+        for &px in frame.image_data.data() {
+            decoded_range.0 = decoded_range.0.min(px);
+            decoded_range.1 = decoded_range.1.max(px);
+        }
+    }
+    state.cptv_files_pixel_checked += 1;
+    if header_range != (Some(decoded_range.0), Some(decoded_range.1)) {
+        state.cptv_pixel_range_mismatches.push(format!(
+            "header min/max {header_range:?}, decoded pixels {decoded_range:?} over {num_frames} \
+             frames"
+        ));
+    }
+}
+
+/// If the first part of a file is a CPTV recording we already got in full from medium power
+/// streaming, forgets it and returns true. The first part of a CPTV file is its header, as its
+/// own gzip member.
+fn take_medium_power_offloaded(first_part: &[u8]) -> bool {
+    use std::io::Read;
+    let mut header = Vec::new();
+    if flate2::read::GzDecoder::new(first_part)
+        .read_to_end(&mut header)
+        .is_err()
+    {
+        return false;
+    }
+    let Some(timestamp) = cptv_header_timestamp(&header) else {
+        return false;
+    };
+    TEST_SIM_STATE.with(|s| {
+        let timestamps = &mut s.borrow_mut().medium_power_offloaded_timestamps;
+        if let Some(index) = timestamps.iter().position(|t| *t == timestamp) {
+            timestamps.remove(index);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Reads the timestamp field from an unzipped CPTV v2 header: "CPTV", version, 'H', field
+/// count, then fields of (length, code, value). The codec crate's header parser wants more bytes
+/// after the last field, so it can't parse a header on its own.
+fn cptv_header_timestamp(header: &[u8]) -> Option<u64> {
+    if header.len() < 7 || &header[0..4] != b"CPTV" || header[4] != 2 || header[5] != b'H' {
+        return None;
+    }
+    let mut offset = 7;
+    for _ in 0..header[6] {
+        let length = usize::from(*header.get(offset)?);
+        let code = *header.get(offset + 1)?;
+        let value = header.get(offset + 2..offset + 2 + length)?;
+        if code == b'T' && length == 8 {
+            return Some(LittleEndian::read_u64(value));
+        }
+        offset += 2 + length;
+    }
+    None
+}
 
 impl SpiEnabledPeripheral {
     pub fn reset(&mut self) {
@@ -431,7 +509,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
             if state.file_download.is_none() {
                 let timestamp = LittleEndian::read_i64(&frame_data[..8]);
                 let mut file = Vec::with_capacity(50_000_000);
-                file.extend_from_slice(&frame_data[16..]);
+                file.extend_from_slice(&frame_data[FIRST_PACKET_HEADER_LENGTH..]);
                 state.file_download = Some(file);
                 state.medium_power_recording_start =
                     DateTime::from_timestamp_micros(timestamp).unwrap_or_default();
@@ -444,6 +522,9 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                 if let Some(file) = state.file_download.take() {
                     let current_time = state.current_time;
                     let recording_time = state.medium_power_recording_start;
+                    state
+                        .medium_power_offloaded_timestamps
+                        .push(recording_time.timestamp_micros() as u64);
 
                     state.files_offloaded.push(FileOffload {
                         size: file.len(),
@@ -463,6 +544,25 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
             LittleEndian::write_u16(&mut s.next_rpi_response[4..6], crc);
             LittleEndian::write_u16(&mut s.next_rpi_response[6..8], crc);
         });
+
+        // Like tc2-agent, tell the rp2040 to erase files we already got from medium power
+        // streaming, rather than send them again.
+        let is_file_start = transfer_type == CAMERA_BEGIN_FILE_TRANSFER
+            || transfer_type == CAMERA_BEGIN_AND_END_FILE_TRANSFER;
+        let pi_already_has_file =
+            is_file_start && crc == crc_from_remote && take_medium_power_offloaded(chunk);
+        if is_file_start {
+            TEST_SIM_STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let flag = if pi_already_has_file {
+                    PI_ALREADY_HAS_FILE
+                } else {
+                    0
+                };
+                s.next_rpi_response[8] = flag;
+                s.next_rpi_response[9] = !flag;
+            });
+        }
 
         if transfer_type == CAMERA_STARTUP_HANDSHAKE {
             debug!("rPi Got camera startup handshake {chunk:?}");
@@ -743,6 +843,17 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                         warn!("Unknown logger event kind {event_kind}");
                     }
                 }
+                CAMERA_BEGIN_FILE_TRANSFER | CAMERA_BEGIN_AND_END_FILE_TRANSFER
+                    if pi_already_has_file =>
+                {
+                    info!("Already have this file from medium power, telling rp2040 to erase it");
+                    TEST_SIM_STATE.with(|state| {
+                        state
+                            .borrow_mut()
+                            .fake_pi_recording_state
+                            .completed_file_offload();
+                    });
+                }
                 CAMERA_BEGIN_FILE_TRANSFER => {
                     TEST_SIM_STATE.with(|state| {
                         let mut state = state.borrow_mut();
@@ -858,6 +969,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                                 };
                                 // fs::write(format!("CPTV_{}.cptv", file_num), &file).unwrap();
                                 info!("Saving cptv file {}", file.len());
+ check_cptv_pixel_range(&file, &mut state);
                                 let current_time = state.current_time;
                                 state.files_offloaded.push(FileOffload {
                                     size: file.len(),
@@ -919,6 +1031,7 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
                             };
 
                             info!("Saving cptv file {}", file.len());
+                            check_cptv_pixel_range(&file, &mut state);
                             let current_time = state.current_time;
                             state.files_offloaded.push(FileOffload {
                                 size: file.len(),
