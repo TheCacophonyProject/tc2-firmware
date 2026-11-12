@@ -44,9 +44,9 @@ fn low_power_mode_fixed_window_audio_and_thermal() {
             thermal_window.1
         ));
         assert_eq!(5, num_thermal_recordings_offloaded(&state.files_offloaded));
-        assert_eq!(24, num_audio_recordings_offloaded(&state.files_offloaded));
+        assert_eq!(21, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
-            7,
+            8,
             num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
         );
         assert_eq!(

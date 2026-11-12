@@ -287,15 +287,17 @@ impl<A, B> I2C<I2C1, (A, B)> {
                         let crc = Crc::<u16>::new(&CRC_AUG_CCITT).checksum(&[payload[0]]);
                         BigEndian::write_u16(&mut payload[1..=2], crc);
                     }
-                    // Maybe advance the simulation?
+
+                    //TODO move this logic else where and base it of TEST_SIM_STATE current time have done this for thermal recording time but i think will
+                    // only work if advance_one_frame is called (seems to be where TEST_SIM_STATE current_time is updated)
+                    // Need to advance the simulation in the audio test process
                     {
                         TEST_SIM_STATE.with(|s| {
                             let mut s = s.borrow_mut();
                             debug!("Got camera state {:?}", s.camera_state);
                             if s.camera_state == CameraState::PoweringOn {
                                 s.camera_state = CameraState::PoweredOn;
-                            }
-                            if s.camera_state == CameraState::PoweringOff {
+                            } else if s.camera_state == CameraState::PoweringOff {
                                 s.camera_state = CameraState::PoweredOff;
                                 s.tc2_agent_state.unset_flag(tc2_agent_state::READY);
                                 s.last_frame = None;

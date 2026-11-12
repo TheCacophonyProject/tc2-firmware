@@ -1,6 +1,6 @@
 extern crate std;
 
-use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState};
+use crate::attiny_rtc_i2c::{CameraState, Tc2AgentState, tc2_agent_state};
 use crate::device_config::DeviceConfig as FirmwareDeviceConfig;
 use crate::ext_spi_transfers::RPI_RETURN_PAYLOAD_LENGTH;
 use crate::formatted_time::FormattedNZTime;
@@ -15,6 +15,9 @@ use std::cell::RefCell;
 use std::time::Instant;
 use std::vec;
 use std::vec::Vec;
+
+const POWER_ON_TIME_SECONDS: u8 = 5;
+const POWER_OFF_TIME_SECONDS: u8 = 1;
 
 pub struct RtcAlarm {
     pub minutes: u8,
@@ -40,6 +43,7 @@ impl RtcAlarm {
 
 pub struct SimState {
     pub(crate) used: bool,
+    pub(crate) powering_on_time: DateTime<Utc>,
     pub(crate) current_time: DateTime<Utc>,
     pub(crate) last_frame: Option<CptvFrame>,
     pub(crate) frame_num: u32,
@@ -56,10 +60,22 @@ pub struct SimState {
     pub(crate) file_download: Option<Vec<u8>>,
     pub(crate) file_part_count: usize,
     pub(crate) file_download_start: Instant,
+    pub(crate) medium_power_recording_start: DateTime<Utc>,
     pub(crate) fake_pi_recording_state: RecordingState,
     pub(crate) rosc_drive_iterator: usize,
     pub(crate) files_offloaded: Vec<FileOffload>,
     pub(crate) events_offloaded: Vec<EventOffload>,
+    // The number of files the rp2040 reported in each startup handshake, in order.
+    pub(crate) handshake_file_counts: Vec<u16>,
+    // Recording start timestamps of files the fake pi got in full from medium power streaming.
+    pub(crate) medium_power_offloaded_timestamps: Vec<u64>,
+    // When set, every nth lepton frame is sent with a misaligned telemetry header and garbage
+    // pixels, which the firmware should skip.
+    pub(crate) invalid_frame_every: Option<u32>,
+    // Offloaded CPTV files whose decoded pixels were checked against the header min and max,
+    // and a description of each one where they didn't match.
+    pub(crate) cptv_files_pixel_checked: usize,
+    pub(crate) cptv_pixel_range_mismatches: Vec<String>,
     pub(crate) device_config: Option<DeviceConfig>,
     pub(crate) firmware_device_config: Option<FirmwareDeviceConfig>,
     pub(crate) thermal_trigger_offsets_mins: Option<Vec<u32>>,
@@ -72,6 +88,26 @@ pub struct SimState {
     pub(crate) restart_num: u32,
     pub(crate) offloads_fail_on_restart_iteration: Option<u32>,
     pub(crate) audio_recording_fails_on_restart_iteration: Option<u32>,
+    pub(crate) dma_read_address: u32,
+}
+
+impl SimState {
+    pub fn update_camera_state(&mut self) {
+        if self.camera_state == CameraState::PoweringOn
+            && self.current_time
+                >= self.powering_on_time + chrono::Duration::seconds(POWER_ON_TIME_SECONDS as i64)
+        {
+            self.camera_state = CameraState::PoweredOn;
+        } else if self.camera_state == CameraState::PoweringOff
+            && self.current_time
+                >= self.powering_on_time + chrono::Duration::seconds(POWER_OFF_TIME_SECONDS as i64)
+        {
+            self.camera_state = CameraState::PoweredOff;
+            self.tc2_agent_state.unset_flag(tc2_agent_state::READY);
+            self.last_frame = None;
+            self.frame_num = 0;
+        }
+    }
 }
 
 pub struct FileOffload {
@@ -135,6 +171,7 @@ impl core::fmt::Debug for EventOffload {
 thread_local! {
     pub static TEST_SIM_STATE: RefCell<SimState> = RefCell::new(SimState {
         used: false,
+        powering_on_time: Default::default(),
         current_time: Default::default(),
         last_frame: None,
         frame_num: 0,
@@ -164,10 +201,16 @@ thread_local! {
         file_download: None,
         file_part_count: 0,
         file_download_start: Instant::now(),
+        medium_power_recording_start: Default::default(),
         fake_pi_recording_state: RecordingState::new(),
         rosc_drive_iterator: 0,
         files_offloaded: vec![],
         events_offloaded: vec![],
+        handshake_file_counts: vec![],
+        medium_power_offloaded_timestamps: vec![],
+        invalid_frame_every: None,
+        cptv_files_pixel_checked: 0,
+        cptv_pixel_range_mismatches: vec![],
         device_config: None,
         firmware_device_config: None,
         thermal_trigger_offsets_mins: None,
@@ -180,6 +223,7 @@ thread_local! {
         restart_num: 0,
         offloads_fail_on_restart_iteration: None,
         audio_recording_fails_on_restart_iteration: None,
+        dma_read_address: 0,
     });
 
 }

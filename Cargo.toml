@@ -55,6 +55,7 @@ louvre = { version = "0.2.1", optional = true }
 sun-times = { version = "0.2.0", optional = true }
 log = { version = "0.4.28", optional = true }
 codec = { git = "https://github.com/TheCacophonyProject/cptv-tools.git", optional = true }
+flate2 = { version = "1.1.2", optional = true }
 
 [features]
 # This is the set of features we enable by default
@@ -111,6 +112,7 @@ std = [
     "dep:log",
     "dep:chrono-tz",
     "dep:codec",
+    "dep:flate2",
     "dep:test-log",
     "byteorder/std",
     "serde/derive"

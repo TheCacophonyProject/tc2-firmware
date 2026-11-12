@@ -309,6 +309,16 @@ pub struct FilePartReturn<'a> {
     pub timestamp: Option<DateTime<Utc>>,
 }
 
+pub struct FilePartAt<'a> {
+    pub part: &'a [u8],
+    pub crc16: u16,
+    pub block: BlockIndex,
+    pub page: PageIndex,
+    pub is_last_page_for_file: bool,
+    pub metadata: FileType,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
 pub type SpiEnabledPeripheral = Spi<
     Enabled,
     SPI1,
@@ -662,12 +672,14 @@ impl OnboardFlash {
 
             // Factory set bad block markers are on the first page of each block:
             let mut part_of_bad_block = false;
+            let mut page_0_is_used = false;
             if self.read_page(block_index, 0).is_ok() {
                 self.read_page_metadata(block_index);
                 self.wait_for_all_ready();
                 if self.current_page.is_part_of_bad_block() {
                     part_of_bad_block = true;
                 }
+                page_0_is_used = self.current_page.page_is_used();
             } else {
                 // If we failed to read the first page of the block, it's probably a bad block.
                 part_of_bad_block = true;
@@ -677,6 +689,13 @@ impl OnboardFlash {
                     // Add the bad block to our runtime table.
                     warn!("BAD BLOCK added {}", block_index);
                     *slot = block_index;
+                } else {
+                    // This block will be treated as good and may be written to.
+                    error!(
+                        "Bad block table full ({} entries), can't add bad block {}",
+                        bad_blocks.len(),
+                        block_index
+                    );
                 }
                 if self.current_block_index == block_index {
                     info!("Current block is bad block so incrementing");
@@ -687,11 +706,32 @@ impl OnboardFlash {
                 if self.read_page(block_index, 1).is_ok() {
                     self.read_page_metadata(block_index);
                     self.wait_for_all_ready();
+                    // A file can end on page 0 of a block, leaving page 1 blank. That block is
+                    // still in use, and needs to be erased along with the file.
+                    // metadata_page is the page current_page holds. Reading page 0 for file times
+                    // below only needs page 1 restoring afterwards if that's what we started with.
+                    let mut metadata_page = 1;
+                    if page_0_is_used
+                        && !self.current_page.page_is_used()
+                        && self.read_page(block_index, 0).is_ok()
+                    {
+                        self.read_page_metadata(block_index);
+                        self.wait_for_all_ready();
+                        metadata_page = 0;
+                    }
                     if block_index < NUM_RECORDING_BLOCKS {
                         last_good_block = Some(block_index);
 
                         let page_is_used = self.current_page.page_is_used();
+                        // Only count files before the first blank block. last_used_block_index
+                        // is set there, and offloading never reads past it, so counting files
+                        // after it would report files to the Pi that never get offloaded.
+                        // TODO: Used blocks after a blank block are never offloaded or erased.
+                        //  If that can happen (e.g. a write that failed part way, or blocks left
+                        //  over from an interrupted erase), they'll sit there until the flash
+                        //  wraps or is erased.
                         if page_is_used
+                            && self.last_used_block_index.is_none()
                             && let Some(file_start_block_index) =
                                 self.current_page.file_start_block_index()
                             && last_file_block_index != file_start_block_index
@@ -700,15 +740,18 @@ impl OnboardFlash {
                             num_files += 1;
 
                             if self.oldest_recording_time.is_none() {
-                                if self.read_page(block_index, 0).is_ok() {
-                                    self.read_page_metadata(block_index);
-                                    self.wait_for_all_ready();
+                                // current_page already holds page 0 if metadata_page is 0.
+                                if metadata_page == 0 || self.read_page(block_index, 0).is_ok() {
+                                    if metadata_page == 1 {
+                                        self.read_page_metadata(block_index);
+                                        self.wait_for_all_ready();
+                                    }
                                     if self.current_page.file_written_time().is_some() {
                                         self.oldest_recording_time =
                                             self.current_page.file_written_time();
                                     }
                                 }
-                                if self.read_page(block_index, 1).is_ok() {
+                                if metadata_page == 1 && self.read_page(block_index, 1).is_ok() {
                                     self.read_page_metadata(block_index);
                                     self.wait_for_all_ready();
                                 }
@@ -716,10 +759,14 @@ impl OnboardFlash {
 
                             if self.current_page.is_cptv_recording() {
                                 if self.current_page.is_startup_status_recording() {
-                                    // For the file time, we need to go back and read the first page.
-                                    if self.read_page(block_index, 0).is_ok() {
-                                        self.read_page_metadata(block_index);
-                                        self.wait_for_all_ready();
+                                    // For the file time, we need to go back and read the first page,
+                                    // unless current_page already holds it.
+                                    if metadata_page == 0 || self.read_page(block_index, 0).is_ok()
+                                    {
+                                        if metadata_page == 1 {
+                                            self.read_page_metadata(block_index);
+                                            self.wait_for_all_ready();
+                                        }
 
                                         self.file_types_found.add_type(FileType::CptvStartup);
                                         if self.current_page.file_written_time().is_some() {
@@ -727,7 +774,8 @@ impl OnboardFlash {
                                                 self.current_page.file_written_time();
                                         }
                                     }
-                                    if self.read_page(block_index, 1).is_ok() {
+                                    if metadata_page == 1 && self.read_page(block_index, 1).is_ok()
+                                    {
                                         self.read_page_metadata(block_index);
                                         self.wait_for_all_ready();
                                     }
@@ -980,6 +1028,10 @@ impl OnboardFlash {
         if self.bad_blocks.contains(&block_index) {
             return Err("Can't erase bad block");
         }
+        self.erase_block_unchecked(block_index)
+    }
+
+    fn erase_block_unchecked(&mut self, block_index: BlockIndex) -> Result<(), &str> {
         self.write_enable();
         let address = OnboardFlash::get_address(block_index, 0);
         self.spi_write(&[BLOCK_ERASE, address[0], address[1], address[2]]);
@@ -992,13 +1044,47 @@ impl OnboardFlash {
     }
 
     pub fn erase_good_blocks(&mut self) {
+        self.recover_blocks_without_factory_marker();
         let bad_blocks = self.bad_blocks;
         for block_index in 0..TOTAL_FLASH_BLOCKS {
             if !&bad_blocks.contains(&block_index)
                 && let Err(e) = self.erase_block(block_index)
             {
+                // Keep going, so one bad block doesn't stop the rest of the flash being erased
                 error!("Failed to erase block {}: {}", block_index, e);
-                break;
+            }
+        }
+    }
+
+    // Older firmware could double program page 0 of a block, which fails ECC, so scan marks the
+    // block as bad. Erasing it fixes this, but we must not erase factory bad blocks, as that can
+    // remove their bad block marker.
+    fn recover_blocks_without_factory_marker(&mut self) {
+        for slot in 0..self.bad_blocks.len() {
+            let block_index = self.bad_blocks[slot];
+            if block_index == u16::MAX {
+                continue;
+            }
+            // Even if the read fails ECC the page is still loaded into the cache, and the bad
+            // block marker isn't covered by ECC, so we can still check it.
+            let _ = self.read_page(block_index, 0);
+            self.read_page_metadata(block_index);
+            self.wait_for_all_ready();
+            if self.current_page.is_part_of_bad_block() {
+                info!("Block {} is factory marked as bad", block_index);
+                continue;
+            }
+            warn!(
+                "Block {} isn't factory marked as bad, erasing it",
+                block_index
+            );
+            if self.erase_block_unchecked(block_index).is_ok()
+                && self.read_page(block_index, 0).is_ok()
+            {
+                info!("Recovered block {}", block_index);
+                self.bad_blocks[slot] = u16::MAX;
+            } else {
+                error!("Block {} is still bad after erasing", block_index);
             }
         }
     }
@@ -1059,6 +1145,46 @@ impl OnboardFlash {
 
             Some(spi)
         } else {
+            None
+        }
+    }
+
+    pub fn read_file_part_at(
+        &mut self,
+        block_index: u16,
+        page_index: u8,
+        events: &mut EventLogger,
+        time: &SyncedDateTime,
+    ) -> Option<FilePartAt<'_>> {
+        if let Ok(()) = self.read_page(block_index, page_index) {
+            self.read_page_from_cache(block_index);
+            if self.current_page.page_is_used() {
+                let length = self.current_page.page_bytes_used();
+                let crc16 = self.current_page.page_crc();
+                let is_last_page_for_file = self.current_page.is_last_page_for_file();
+
+                let timestamp = self.current_page.file_written_time();
+                let metadata = self.current_page.file_type();
+
+                Some(FilePartAt {
+                    part: &self.current_page.user_data()[0..length],
+                    crc16,
+                    block: block_index,
+                    page: page_index,
+                    is_last_page_for_file,
+                    metadata,
+                    timestamp,
+                })
+            } else {
+                // Page is blank, which isn't corruption
+                None
+            }
+        } else {
+            events.log(
+                Event::UnrecoverableDataCorruption((block_index, u16::from(page_index))),
+                time,
+                self,
+            );
             None
         }
     }
@@ -1207,48 +1333,21 @@ impl OnboardFlash {
                 }
             }
 
-            // old file system, should only happen once
-            self.current_block_index = self.find_start(last_block_index);
-            self.current_page_index = 0;
-            self.file_start_block_index = Some(self.current_block_index);
-            debug!(
-                "Searched for file start found {:?}:{:?}",
-                self.current_block_index, self.last_used_block_index
+            // Every page written since firmware 13 (tc2-agent 0.3.10) records the block its file
+            // started at, so if we don't know where the file starts the block is corrupt or
+            // orphaned and there's nothing we can offload. We also end up here if none of the
+            // file's pages could be read.
+            // TODO: Nothing is erased here, so any valid files before this block are stuck. If
+            //  the last used block has no file start (e.g. a page that was only partly written),
+            //  every offload ends here, and the older files are never offloaded or erased. Fixing
+            //  this would mean walking back from last_block_index, erasing blocks until one has a
+            //  valid file start, and offloading from that file.
+            warn!(
+                "No readable file start for last used block {}, nothing to offload",
+                last_block_index
             );
-            return true;
         }
         false
-    }
-
-    pub fn find_start(&mut self, file_block_index: BlockIndex) -> BlockIndex {
-        if file_block_index == 0 {
-            return 0;
-        }
-        // find previous file end
-        for block_index in (1..file_block_index).rev() {
-            if self.last_dirty_page(block_index).is_some()
-                && self.current_page.is_last_page_for_file()
-            {
-                return block_index + 1;
-            }
-        }
-        0
-    }
-
-    fn last_dirty_page(&mut self, block_index: BlockIndex) -> Option<PageIndex> {
-        for page in (0..NUM_PAGES_PER_BLOCK).rev() {
-            info!("Looking for dirty page at {}:{}", block_index, page);
-            if self.read_page(block_index, page).is_ok() {
-                self.read_page_metadata(block_index);
-                self.wait_for_all_ready();
-                if self.current_page.page_is_used() {
-                    return Some(page);
-                }
-            } else {
-                error!("Failed to read page at {}:{}", block_index, page);
-            }
-        }
-        None
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -1501,7 +1600,6 @@ impl OnboardFlash {
         }
         // NOTE: `extended_write` is set when we're using this function to write outside
         //  the regular user data, as when we set the device config
-
         self.write_enable();
         assert!(self.write_enabled());
         // Bytes will always be a full page + metadata + command info at the start
