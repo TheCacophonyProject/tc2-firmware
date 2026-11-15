@@ -21,7 +21,7 @@ fn high_power_mode_dusk_til_dawn_audio_or_thermal() {
     // made before the beginning of the thermal window.
     TEST_SIM_STATE.with(|state| {
         let state = state.borrow();
-        assert_eq!(8, num_audio_recordings_offloaded(&state.files_offloaded));
+        assert_eq!(9, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(0, num_thermal_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
             9,

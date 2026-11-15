@@ -1549,6 +1549,7 @@ dependencies = [
  "defmt-rtt",
  "embedded-hal 1.0.0",
  "embedded-io 0.7.1",
+ "flate2",
  "fugit",
  "log",
  "louvre",
