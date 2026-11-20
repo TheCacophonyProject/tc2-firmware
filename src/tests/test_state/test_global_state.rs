@@ -72,6 +72,9 @@ pub struct SimState {
     // When set, every nth lepton frame is sent with a misaligned telemetry header and garbage
     // pixels, which the firmware should skip.
     pub(crate) invalid_frame_every: Option<u32>,
+    // When set to (time, frames), the lepton frame counter jumps ahead by that many frames once,
+    // at the first frame at or after that time, as if frames were missed.
+    pub(crate) frame_num_jump: Option<(DateTime<Utc>, u32)>,
     // Offloaded CPTV files whose decoded pixels were checked against the header min and max,
     // and a description of each one where they didn't match.
     pub(crate) cptv_files_pixel_checked: usize,
@@ -209,6 +212,7 @@ thread_local! {
         handshake_file_counts: vec![],
         medium_power_offloaded_timestamps: vec![],
         invalid_frame_every: None,
+        frame_num_jump: None,
         cptv_files_pixel_checked: 0,
         cptv_pixel_range_mismatches: vec![],
         device_config: None,
