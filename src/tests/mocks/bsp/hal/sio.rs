@@ -218,6 +218,19 @@ pub fn copy_last_frame(frame_buffer: &mut Option<&'static mut FrameBuffer>) {
         TEST_SIM_STATE.with(|s| {
             let mut s = s.borrow_mut();
             let mut frame_num = s.frame_num;
+            if let Some((jump_at, frames)) = s.frame_num_jump
+                && s.current_time >= jump_at
+            {
+                // The lepton keeps counting frames we didn't get, e.g. while out of sync.
+                warn!(
+                    "Lepton frame counter jumps from {} to {} at {}",
+                    frame_num,
+                    frame_num + frames,
+                    FormattedNZTime(s.current_time)
+                );
+                frame_num += frames;
+                s.frame_num_jump = None;
+            }
             if let Some(frame) = s.last_frame.as_ref() {
                 let header = frame_buffer.frame_data_as_u8_slice_mut();
                 // Telemetry revision

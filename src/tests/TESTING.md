@@ -108,6 +108,7 @@ to 00:00, or 12:00 to 12:00.
 | When reads from microphone can't keep up, ensure we restart and retry | `./testing/audio_cant_keep_up.rs`     |
 | Make sure we gracefully work around bad flash blocks (TODO)           | `./testing/bad_flash_blocks.rs`       |
 | Make sure we handle unrecoverable flash ECC errors (TODO)             | `./testing/flash_ecc_errors.rs`       |
+| Keep recording after the Lepton frame counter jumps ahead (fails now) | `./testing/lepton_frame_counter_jump.rs` |
 
 ## Running tests
 

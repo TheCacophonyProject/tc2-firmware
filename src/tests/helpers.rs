@@ -74,6 +74,7 @@ pub fn simulate_camera_with_config(
                 handshake_file_counts: vec![],
                 medium_power_offloaded_timestamps: vec![],
                 invalid_frame_every: None,
+                frame_num_jump: None,
                 cptv_files_pixel_checked: 0,
                 cptv_pixel_range_mismatches: vec![],
                 device_config: None,

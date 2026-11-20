@@ -11,6 +11,7 @@ mod high_power__default_window__audio_or_thermal;
 mod high_power__fixed_window__audio_and_thermal;
 mod high_power__fixed_window__audio_disabled;
 mod high_power__fixed_window__audio_or_thermal;
+mod lepton_frame_counter_jump;
 mod low_power__always_on__audio_and_thermal;
 mod low_power__always_on__audio_disabled;
 mod low_power__audio_only;
