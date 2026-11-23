@@ -196,8 +196,11 @@ impl<S, P> Spi<Enabled, S, P, 8> {
                 TEST_SIM_STATE.with(|s| {
                     s.borrow_mut().flash_backing_storage[block_index as usize].inner
                         [page_index as usize]
-                        .inner[self.last_page_offset..self.last_page_offset + self.buffer.len()]
-                        .copy_from_slice(&self.buffer);
+                        .program(
+                            self.last_page_offset,
+                            &self.buffer,
+                            (block_index, page_index),
+                        );
                 });
             }
             PAGE_READ => {

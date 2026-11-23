@@ -21,10 +21,10 @@ fn high_power_mode_dusk_til_dawn_audio_and_thermal() {
     simulate_camera_with_config(config, start_time, end_time, None, cptv_files);
     TEST_SIM_STATE.with(|state| {
         let state = state.borrow();
-        assert_eq!(28, num_audio_recordings_offloaded(&state.files_offloaded));
+        assert_eq!(25, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(0, num_thermal_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
-            7,
+            9,
             num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
         );
         assert_eq!(
@@ -36,7 +36,7 @@ fn high_power_mode_dusk_til_dawn_audio_and_thermal() {
             offloaded_event_count(&state.events_offloaded, LoggerEventKind::OffloadedLogs)
         );
         assert_eq!(
-            22,
+            18,
             offloaded_event_count(
                 &state.events_offloaded,
                 LoggerEventKind::StartedSendingFramesToRpi

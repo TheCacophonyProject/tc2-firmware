@@ -42,6 +42,36 @@
         //     "wireProtocol": "Swd"
         // },
         {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit test",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--workspace",
+                    "--features",
+                    "std",
+                    "--no-default-features",
+                    "--target=x86_64-unknown-linux-gnu",
+                    "--package",
+                    "tc2-firmware",
+                    "--test",
+                    "tc2-firmware-tests"
+                ],
+                "filter": {
+                    "name": "tc2-firmware-tests",
+                    "kind": "test"
+                }
+            },
+            "args": [
+                "tests::testing::medium_power__default_window__audio_disabled::medium_power_mode_dusk_til_dawn_audio_disabled",
+                "--exact",
+                "--show-output"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
             "name": "Debug rp2040-project-template",
             "request": "launch",
             "type": "cortex-debug",

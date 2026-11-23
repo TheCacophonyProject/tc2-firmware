@@ -19,10 +19,10 @@ fn high_power_mode_fixed_window_audio_and_thermal() {
     simulate_camera_with_config(config, start_time, end_time, None, cptv_files);
     TEST_SIM_STATE.with(|state| {
         let state = state.borrow();
-        assert_eq!(26, num_audio_recordings_offloaded(&state.files_offloaded));
+        assert_eq!(21, num_audio_recordings_offloaded(&state.files_offloaded));
         assert_eq!(0, num_thermal_recordings_offloaded(&state.files_offloaded));
         assert_eq!(
-            5,
+            7,
             num_audio_recordings_stored_in_flash(&state.flash_backing_storage)
         );
         assert_eq!(
@@ -35,7 +35,7 @@ fn high_power_mode_fixed_window_audio_and_thermal() {
             offloaded_event_count(&state.events_offloaded, LoggerEventKind::OffloadedLogs)
         );
         assert_eq!(
-            22,
+            16,
             offloaded_event_count(
                 &state.events_offloaded,
                 LoggerEventKind::StartedSendingFramesToRpi
