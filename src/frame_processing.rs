@@ -1142,7 +1142,10 @@ pub fn thermal_motion_task(
             timer.delay_us(expected_i2c_io_time_us);
         }
 
-        if frame_is_valid && telemetry_is_valid {
+        // A frame whose frame number jumped too far ahead is skipped, but it still becomes the
+        // frame the next one is compared against. Otherwise, after a jump every later frame is
+        // compared against the same stale frame number, and is skipped too until we restart.
+        if frame_is_valid {
             prev_telemetry = Some(telemetry);
         }
         bk.frames_seen += 1;
@@ -1429,6 +1432,10 @@ fn process_frame_telemetry(
         if frame_diff > 0 && frame_diff < 100 {
             skipped_frames = frame_diff;
         } else if frame_diff >= 100 {
+            warn!(
+                "Frame number jumped from {} to {}, skipping frame",
+                prev_telemetry.frame_num, frame_telemetry.frame_num
+            );
             telemetry_is_valid = false;
         }
     }
